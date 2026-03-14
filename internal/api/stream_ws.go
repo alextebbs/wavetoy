@@ -14,6 +14,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
+	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
 type wsStreamMessage struct {
@@ -32,6 +33,7 @@ type wsStreamMessage struct {
 	WFSpeed     *int     `json:"speed,omitempty"`
 	ViewStartKHz *float64 `json:"start_khz,omitempty"`
 	ViewEndKHz   *float64 `json:"end_khz,omitempty"`
+	SourceID     string   `json:"source_id,omitempty"`
 }
 
 const (
@@ -66,9 +68,6 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 	}
 	client := &streamWSClient{conn: conn}
 
-	// Wait for hello before registering (Phase 2 presence).
-	// Read the first message; if it's a hello, extract identity.
-	// If the client sends something else first, accept it but assign defaults.
 	_, firstPayload, firstErr := conn.ReadMessage()
 	if firstErr != nil {
 		_ = conn.Close()
@@ -97,15 +96,16 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 	client.joinedAt = time.Now()
 
 	s.registerWSClient(streamID, client)
+	s.streamLog.Info(streamID, "ws.connect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 	defer func() {
 		s.unregisterWSClient(streamID, client)
+		s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 		s.broadcastStreamEvent(streamID, map[string]any{
 			"type": "peer_left",
 			"peer": map[string]string{"session_id": client.sessionID},
 		})
 	}()
 
-	// Broadcast peer_joined to existing clients
 	s.broadcastStreamEventExcluding(streamID, client, map[string]any{
 		"type": "peer_joined",
 		"peer": map[string]string{
@@ -145,7 +145,6 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Start waterfall pump
 	wfCh, wfUnsub, wfErr := s.streamManager.SubscribeWaterfall(streamID)
 	if wfErr == nil {
 		defer wfUnsub()
@@ -161,23 +160,9 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[WS] waterfall not available for stream %s: %v", streamID, wfErr)
 	}
 
-	// Start log pump
-	logCh, logUnsub, logErr := s.streamManager.SubscribeLogs(streamID)
-	if logErr == nil {
-		defer logUnsub()
-		go func() {
-			for msg := range logCh {
-				if err := client.writeJSON(map[string]any{
-					"type":    "stream_log",
-					"message": msg,
-				}); err != nil {
-					return
-				}
-			}
-		}()
-	}
+	// Start structured log pump
+	s.startLogPumpForClient(streamID, client)
 
-	// Re-read the stream so the version is fresh
 	stream, _ = s.db.GetStreamByID(r.Context(), streamID)
 	_ = client.writeJSON(map[string]any{
 		"type":          "connected",
@@ -188,7 +173,6 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		"max_freq_khz":  s.streamManager.MaxFreqKHz(streamID),
 	})
 
-	// If the first message was NOT hello, process it now
 	if firstMsg.Type != "hello" {
 		s.handleWSMessage(r, streamID, client, firstMsg)
 	}
@@ -222,7 +206,7 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 	case "ping":
 		_ = client.writeJSON(map[string]any{"type": "pong"})
 	case "hello":
-		// Already handled on connect; ignore subsequent hellos
+		// Already handled on connect
 	case "focus":
 		s.broadcastStreamEventExcluding(streamID, client, map[string]any{
 			"type":       "peer_focus",
@@ -245,7 +229,6 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 		if err := s.streamManager.ReconfigureWaterfall(streamID, zoom, centerKHz, speed); err != nil {
 			log.Printf("[WS] wf_config failed stream=%s: %v", streamID, err)
 		}
-		// Persist + broadcast view bounds to other clients
 		if msg.ViewStartKHz != nil && msg.ViewEndKHz != nil {
 			if err := s.db.UpdateStreamView(r.Context(), streamID, *msg.ViewStartKHz, *msg.ViewEndKHz); err != nil {
 				log.Printf("[WS] failed to persist wf view stream=%s: %v", streamID, err)
@@ -368,8 +351,11 @@ func (s *Server) unregisterWSClient(streamID string, client *streamWSClient) {
 	_ = client.conn.Close()
 }
 
+func (s *Server) BroadcastToStream(streamID string, event map[string]any) {
+	s.broadcastStreamEvent(streamID, event)
+}
+
 func (s *Server) broadcastStreamEvent(streamID string, event map[string]any) {
-	// Legacy per-stream WS clients
 	s.wsMu.RLock()
 	clients := s.wsClients[streamID]
 	copies := make([]*streamWSClient, 0, len(clients))
@@ -381,17 +367,14 @@ func (s *Server) broadcastStreamEvent(streamID string, event map[string]any) {
 		_ = c.writeJSON(event)
 	}
 
-	// Topic registry clients
 	s.registry.broadcast("stream:"+streamID, event)
 
-	// Also fan out summary to "streams" topic for list views
 	if event["type"] == "stream_updated" {
 		s.registry.broadcast("streams", event)
 	}
 }
 
 func (s *Server) broadcastStreamEventExcluding(streamID string, exclude *streamWSClient, event map[string]any) {
-	// Legacy per-stream WS clients
 	s.wsMu.RLock()
 	clients := s.wsClients[streamID]
 	copies := make([]*streamWSClient, 0, len(clients))
@@ -405,12 +388,10 @@ func (s *Server) broadcastStreamEventExcluding(streamID string, exclude *streamW
 		_ = c.writeJSON(event)
 	}
 
-	// Topic registry clients
 	s.registry.broadcastExcluding("stream:"+streamID, exclude, event)
 }
 
 func (s *Server) getPeers(streamID string) []map[string]string {
-	// Merge legacy and topic registry peers
 	seen := make(map[string]struct{})
 	var peers []map[string]string
 
@@ -480,4 +461,30 @@ func buildWFPacket(frame kiwi.WFFrame) []byte {
 	binary.LittleEndian.PutUint16(packet[7:9], frame.Flags)
 	copy(packet[9:], frame.Bins)
 	return packet
+}
+
+func entryToWSPayload(e streamlog.Entry) map[string]any {
+	m := map[string]any{
+		"type":   "stream_log",
+		"t":      e.Time.UnixMilli(),
+		"level":  string(e.Level),
+		"action": e.Action,
+	}
+	if e.From != "" {
+		m["from"] = e.From
+	}
+	if e.To != "" {
+		m["to"] = e.To
+	}
+	if e.Message != "" {
+		m["msg"] = e.Message
+	}
+	return m
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

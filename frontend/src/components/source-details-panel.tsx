@@ -6,6 +6,8 @@ type SourceDetailsPanelProps = {
   selectedSourceId?: string;
   counts?: MapSourceCounts;
   showPickerSummary?: boolean;
+  hideHostname?: boolean;
+  hideSourceName?: boolean;
   className?: string;
 };
 
@@ -14,6 +16,8 @@ export function SourceDetailsPanel({
   selectedSourceId,
   counts,
   showPickerSummary = false,
+  hideHostname = false,
+  hideSourceName = false,
   className,
 }: SourceDetailsPanelProps) {
   return (
@@ -27,80 +31,55 @@ export function SourceDetailsPanel({
         </div>
       ) : null}
 
-      <div className="space-y-1">
-        <p className="font-medium text-foreground">
-          {source?.name ?? "Hover or click a source"}
-        </p>
+      <div className="min-w-0 space-y-1">
         {source ? (
           <>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">url</span>
-              <span
-                className="font-xanh-mono min-w-0 flex-1 truncate text-right text-sm text-white"
+            {!hideHostname && (
+              <a
+                href={`http${source.use_tls ? "s" : ""}://${source.host}:${source.port}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-xanh-mono block truncate text-sm text-foreground hover:text-primary transition-colors"
                 title={`${source.host}:${source.port}`}
               >
                 {source.host}:{source.port}
+              </a>
+            )}
+            {!hideSourceName && (
+              <p className="truncate text-muted-foreground" title={source.name}>
+                {source.name}
+              </p>
+            )}
+            <div className="mt-3 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1">
+              <span className="shrink-0 text-muted-foreground">users</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={`${source.users}/${source.max_listeners}`}>
+                {source.users}/{source.max_listeners}
               </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">users</span>
-              <span className="min-w-0 flex-1 truncate text-right text-white">
-                <span className="font-xanh-mono">{source.users}</span>/
-                <span className="font-xanh-mono">{source.max_listeners}</span>
-              </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">
-                status
-              </span>
-              <span
-                className="min-w-0 flex-1 truncate text-right text-white"
-                title={source.status ?? "n/a"}
-              >
+              <span className="shrink-0 text-muted-foreground">status</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.status ?? "n/a"}>
                 {source.status ?? "n/a"}
               </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">
-                snr dbm
-              </span>
-              <span className="min-w-0 flex-1 truncate text-right font-xanh-mono text-white">
+              <span className="shrink-0 text-muted-foreground">snr dbm</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={String(source.snr_dbm ?? "n/a")}>
                 {source.snr_dbm ?? "n/a"}
               </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">grid</span>
-              <span
-                className="min-w-0 flex-1 truncate text-right text-white"
-                title={source.grid ?? "n/a"}
-              >
+              <span className="shrink-0 text-muted-foreground">grid</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.grid ?? "n/a"}>
                 {source.grid ?? "n/a"}
               </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">
-                location
-              </span>
-              <span
-                className="min-w-0 flex-1 truncate text-right text-white"
-                title={source.location ?? "n/a"}
-              >
+              <span className="shrink-0 text-muted-foreground">location</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.location ?? "n/a"}>
                 {source.location ?? "n/a"}
               </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">
-                antenna
-              </span>
-              <span
-                className="min-w-0 flex-1 truncate text-right text-white"
-                title={source.antenna ?? "n/a"}
-              >
+              <span className="shrink-0 text-muted-foreground">antenna</span>
+              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.antenna ?? "n/a"}>
                 {source.antenna ?? "n/a"}
               </span>
             </div>
           </>
-        ) : null}
+        ) : (
+          <p className="text-muted-foreground">Hover or click a source</p>
+        )}
       </div>
     </div>
   );

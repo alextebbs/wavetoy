@@ -112,6 +112,8 @@ type Stream struct {
 	Filters                  FilterConfig `json:"filters"`
 	WFViewStartKHz           float64      `json:"wf_view_start_khz"`
 	WFViewEndKHz             float64      `json:"wf_view_end_khz"`
+	AutoFallback             bool         `json:"auto_fallback"`
+	AutoFallbackKind         string       `json:"auto_fallback_kind"`
 	CreatedAt                time.Time    `json:"created_at"`
 	UpdatedAt                time.Time    `json:"updated_at"`
 }

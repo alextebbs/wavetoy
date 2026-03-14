@@ -3,25 +3,32 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"os/signal"
 
 	"github.com/joho/godotenv"
 	"github.com/sammy/sdr-radio/internal/api"
 	"github.com/sammy/sdr-radio/internal/config"
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/sync"
+	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/streamlog"
+	srcsync "github.com/sammy/sdr-radio/internal/sync"
 )
 
 func main() {
 	_ = godotenv.Load()
 	cfg := config.Load()
 
-	// Run migrations
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+
 	migrationsPath := filepath.Join("migrations")
 	if p := os.Getenv("MIGRATIONS_PATH"); p != "" {
 		migrationsPath = p
@@ -41,16 +48,16 @@ func main() {
 		log.Fatalf("seed: %v", err)
 	}
 
-	// Health check only. Source sync is manual: run `go run ./cmd/sync-sources` to populate from kiwisdr.com/.public/
-	healthChecker := sync.NewHealthChecker(database)
+	streamLogger := streamlog.New()
+
+	healthChecker := srcsync.NewHealthChecker(database)
 	go func() {
-		// Run health check shortly after first sync, then on interval
 		time.Sleep(30 * time.Second)
 		ticker := time.NewTicker(cfg.HealthInterval)
 		defer ticker.Stop()
 		for {
 			if err := healthChecker.Run(ctx); err != nil {
-				log.Printf("health: %v", err)
+				slog.Error("health check", "err", err)
 			}
 			select {
 			case <-ctx.Done():
@@ -60,11 +67,32 @@ func main() {
 		}
 	}()
 
-	srv := api.New(database)
+	srv := api.New(database, streamLogger)
+
+	fallbackMgr := fallback.NewManager(database, streamLogger, healthChecker, srv.StreamManager(), func(streamID string, event map[string]any) {
+		srv.BroadcastToStream(streamID, event)
+	})
+	srv.SetFallbackManager(fallbackMgr)
+	srv.StreamManager().SetOnDegraded(func(streamID, reason string) {
+		fallbackMgr.HandleDegraded(streamID, reason)
+	})
+
+	go func() {
+		streams, err := database.ListStreamsByTenant(ctx, db.DefaultTenantID, 100, 0)
+		if err != nil {
+			slog.Error("fallback: list streams", "err", err)
+			return
+		}
+		for _, stream := range streams {
+			if stream.AutoFallback {
+				fallbackMgr.Enable(ctx, stream.ID)
+			}
+		}
+	}()
 
 	httpServer := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router()}
 	go func() {
-		log.Printf("listening on %s", cfg.HTTPAddr)
+		slog.Info("listening", "addr", cfg.HTTPAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http: %v", err)
 		}
@@ -73,6 +101,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 	httpServer.Shutdown(context.Background())
 }

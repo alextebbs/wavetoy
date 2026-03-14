@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"math"
 	"net/url"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
 type Config struct {
@@ -29,9 +29,12 @@ type Config struct {
 	AGCGainDB     *float64
 }
 
+type LogFunc func(level streamlog.LogLevel, action, from, to, msg string)
+
 type Client struct {
 	conn  *websocket.Conn
 	label string
+	logFn LogFunc
 
 	closeOnce sync.Once
 	writeMu   sync.Mutex
@@ -66,7 +69,7 @@ func ConnectTimestamp() int64 {
 	return time.Now().Unix()
 }
 
-func Connect(ctx context.Context, cfg Config, timestamp int64) (*Client, error) {
+func Connect(ctx context.Context, cfg Config, timestamp int64, logFn LogFunc) (*Client, error) {
 	scheme := "ws"
 	if cfg.UseTLS {
 		scheme = "wss"
@@ -83,26 +86,29 @@ func Connect(ctx context.Context, cfg Config, timestamp int64) (*Client, error) 
 	}
 
 	label := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	log.Printf("[KIWI] dialing %s endpoint=%s", label, endpoint.String())
+	if logFn != nil {
+		logFn(streamlog.LevelDebug, "dial", "wavetoy", "kiwi", fmt.Sprintf("endpoint=%s", endpoint.String()))
+	}
 
 	dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second}
-	conn, resp, err := dialer.DialContext(ctx, endpoint.String(), nil)
+	conn, _, err := dialer.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
-		log.Printf("[KIWI] dial failed %s: %v", label, err)
+		if logFn != nil {
+			logFn(streamlog.LevelDebug, "dial", "wavetoy", "kiwi", fmt.Sprintf("failed: %v", err))
+		}
 		return nil, err
 	}
-	log.Printf("[KIWI] connected %s (http_status=%d)", label, resp.StatusCode)
 
 	client := &Client{
 		conn:  conn,
 		label: label,
+		logFn: logFn,
 		done:  make(chan struct{}),
 		pcm:   make(chan []byte, 64),
 	}
 	client.sampleRate.Store(12000)
 
 	if err := client.init(cfg); err != nil {
-		log.Printf("[KIWI] init failed %s: %v", label, err)
 		client.Close()
 		return nil, err
 	}
@@ -137,7 +143,6 @@ func (c *Client) Stats() Stats {
 func (c *Client) Close() error {
 	var closeErr error
 	c.closeOnce.Do(func() {
-		log.Printf("[KIWI] closing connection %s", c.label)
 		close(c.done)
 		closeErr = c.conn.Close()
 		close(c.pcm)
@@ -228,14 +233,14 @@ func (c *Client) readLoop() {
 	for {
 		msgType, payload, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("[KIWI] << %s read_loop exiting: %v", c.label, err)
+			if c.logFn != nil {
+				c.logFn(streamlog.LevelWarn, "kiwi.read.exit", "kiwi", "wavetoy",
+					fmt.Sprintf("%s: %v", c.label, err))
+			}
 			return
 		}
 
 		if msgType != websocket.BinaryMessage || len(payload) < 3 {
-			if msgType == websocket.TextMessage {
-				log.Printf("[KIWI] << %s text_msg=%q", c.label, string(payload))
-			}
 			continue
 		}
 
@@ -257,7 +262,10 @@ func (c *Client) readLoop() {
 				}
 				if c.sndFirstLogged.CompareAndSwap(false, true) {
 					compressed := flags&SND_FLAG_COMPRESSED != 0
-					log.Printf("[KIWI] << %s first SND frame: bytes=%d compressed=%v flags=0x%02x", c.label, len(body)-7, compressed, flags)
+					if c.logFn != nil {
+						c.logFn(streamlog.LevelDebug, "kiwi.snd.first", "kiwi", "wavetoy",
+							fmt.Sprintf("bytes=%d compressed=%v flags=0x%02x", len(body)-7, compressed, flags))
+					}
 				}
 			}
 			pcm, ok := c.processSND(body)
@@ -268,7 +276,6 @@ func (c *Client) readLoop() {
 			case c.pcm <- pcm:
 			default:
 				c.sndQueueDropFrames.Add(1)
-				log.Printf("[KIWI] << %s dropping audio frame (slow consumer), queue_drops=%d", c.label, c.sndQueueDropFrames.Load())
 			}
 		}
 	}
@@ -293,8 +300,8 @@ func (c *Client) keepAliveLoop() {
 func (c *Client) send(cmd string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if cmd != "SET keepalive" {
-		log.Printf("[KIWI] >> %s cmd=%q", c.label, cmd)
+	if cmd != "SET keepalive" && c.logFn != nil {
+		c.logFn(streamlog.LevelDebug, "kiwi.cmd", "wavetoy", "kiwi", cmd)
 	}
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(cmd))
 }
@@ -303,12 +310,13 @@ func (c *Client) processMSG(body []byte) {
 	if len(body) == 0 {
 		return
 	}
-	// Kiwi MSG payload includes one leading byte that clients skip.
 	text := string(body[1:])
-	if len(text) > 200 {
-		log.Printf("[KIWI] << %s MSG (truncated, %d bytes): %.200s...", c.label, len(text), text)
-	} else {
-		log.Printf("[KIWI] << %s MSG: %s", c.label, text)
+	if c.logFn != nil {
+		display := text
+		if len(display) > 200 {
+			display = display[:200] + "..."
+		}
+		c.logFn(streamlog.LevelDebug, "kiwi.msg", "kiwi", "wavetoy", display)
 	}
 	for _, pair := range strings.Split(text, " ") {
 		if pair == "" {
@@ -325,6 +333,10 @@ func (c *Client) processMSG(body []byte) {
 				continue
 			}
 			outRate := c.SampleRate()
+			if c.logFn != nil {
+				c.logFn(streamlog.LevelDebug, "kiwi.samplerate", "kiwi", "wavetoy",
+					fmt.Sprintf("audio_rate=%d → SET AR OK in=%d out=%d", inRate, inRate, outRate))
+			}
 			if err := c.send(fmt.Sprintf("SET AR OK in=%d out=%d", inRate, outRate)); err != nil {
 				return
 			}
@@ -364,7 +376,6 @@ func (c *Client) processSND(body []byte) ([]byte, bool) {
 	}
 
 	if flags&SND_FLAG_STEREO != 0 && len(audio) >= 10 {
-		// Skip GPS header in stereo/IQ mode. For Phase 1 live audio endpoint we stick to mono audio streams.
 		audio = audio[10:]
 	}
 

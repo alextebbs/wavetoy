@@ -55,8 +55,41 @@ export type Stream = {
   filters?: FilterConfig;
   wf_view_start_khz: number;
   wf_view_end_khz: number;
+  auto_fallback: boolean;
+  auto_fallback_kind: string;
   created_at: string;
   updated_at: string;
+};
+
+export type ProbeMetrics = {
+  audio_rms_db: number;
+  rms_similarity: number;
+  silence_agreement: number;
+  spectral_similarity: number;
+  noise_floor_similarity: number;
+  frame_rate: number;
+  latency_ms: number;
+};
+
+export type FallbackSuggestion = {
+  stream_id: string;
+  source_id: string;
+  source_name: string;
+  source_host: string;
+  source_port: number;
+  rank: number;
+  score: number;
+  distance_km: number;
+  bearing_deg: number;
+  last_probed: string;
+  probe_metrics: ProbeMetrics;
+};
+
+export type FallbacksResponse = {
+  stream_id: string;
+  auto_fallback: boolean;
+  auto_fallback_kind: string;
+  suggestions: FallbackSuggestion[];
 };
 
 export type Peer = {
@@ -206,4 +239,20 @@ export async function createStream(payload: {
 
 export async function deleteStream(streamId: string): Promise<void> {
   await apiDelete(`/streams/${streamId}`);
+}
+
+export async function getFallbacks(streamId: string): Promise<FallbacksResponse> {
+  return apiGet<FallbacksResponse>(`/streams/${streamId}/fallbacks`);
+}
+
+export async function reprobeStream(streamId: string): Promise<void> {
+  await apiPost(`/streams/${streamId}/reprobe`, {});
+}
+
+export function fallbackRefAudioUrl(streamId: string): string {
+  return `/api/streams/${streamId}/fallbacks/ref-audio`;
+}
+
+export function fallbackProbeAudioUrl(streamId: string, rank: number): string {
+  return `/api/streams/${streamId}/fallbacks/${rank}/probe-audio`;
 }

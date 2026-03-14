@@ -75,7 +75,7 @@ func TestConnect_UsesSNDPathAndNegotiatesAudioRate(t *testing.T) {
 		BandwidthLoHz: -5000,
 		BandwidthHiHz: 5000,
 		AGCOn:         true,
-	})
+	}, 0, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestConnect_DecodesCompressedAndBigEndianSND(t *testing.T) {
 		BandwidthLoHz: -5000,
 		BandwidthHiHz: 5000,
 		AGCOn:         true,
-	})
+	}, 0, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

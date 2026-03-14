@@ -72,6 +72,45 @@ func (h *HealthChecker) Run(ctx context.Context) error {
 	return nil
 }
 
+// RunForSources checks a specific set of sources by ID, concurrently.
+func (h *HealthChecker) RunForSources(ctx context.Context, sourceIDs []string) error {
+	if len(sourceIDs) == 0 {
+		return nil
+	}
+	allSources, err := h.db.ListSourceIDsForHealthCheck(ctx)
+	if err != nil {
+		return err
+	}
+	idSet := make(map[string]struct{}, len(sourceIDs))
+	for _, id := range sourceIDs {
+		idSet[id] = struct{}{}
+	}
+
+	var targets []db.SourceForHealthCheck
+	for _, s := range allSources {
+		if _, ok := idSet[s.ID]; ok {
+			targets = append(targets, s)
+		}
+	}
+
+	sem := make(chan struct{}, h.concurrency)
+	var wg sync.WaitGroup
+	for _, s := range targets {
+		wg.Add(1)
+		go func(src db.SourceForHealthCheck) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			st := h.fetchStatus(ctx, src.Host, src.Port, src.UseTLS)
+			if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
+				log.Printf("health: set %s: %v", src.ID, err)
+			}
+		}(s)
+	}
+	wg.Wait()
+	return nil
+}
+
 func (h *HealthChecker) fetchStatus(ctx context.Context, host string, port int, useTLS bool) db.SourceStatus {
 	// Probe both schemes and persist whichever succeeds.
 	// Prefer the previously known scheme first for lower latency.

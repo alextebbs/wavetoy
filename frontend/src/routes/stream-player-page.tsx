@@ -1,8 +1,10 @@
-import { AudioWaveform } from "@/components/audio-waveform";
-import { PostProcessingPanel } from "@/components/post-processing-panel";
+import { FallbackSection } from "@/components/fallback-section";
+import { FiltersSection } from "@/components/filters-section";
+import { FrequencyDialer } from "@/components/frequency-dialer";
+import { LogsPanel } from "@/components/logs-panel";
 import { SourceDetailsPanel } from "@/components/source-details-panel";
 import { SourceMapPicker } from "@/components/source-map-picker";
-import { SourceMiniMap } from "@/components/source-mini-map";
+import { SourceSection } from "@/components/source-section";
 import { BottomDrawer } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +30,7 @@ import {
   getStream,
 } from "@/lib/api";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { DownloadIcon, PanelRightIcon, RefreshCwIcon, XIcon } from "lucide-react";
+import { DownloadIcon, PanelRightIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useThrottle } from "@/lib/timing";
 
@@ -44,10 +46,7 @@ type ResamplerState = {
   firTail: Float32Array;
 };
 
-type LogLine = {
-  id: string;
-  text: string;
-};
+import type { LogEntry } from "@/components/logs-panel";
 
 type AudioMetrics = {
   startedAt: number;
@@ -90,9 +89,10 @@ export function StreamPlayerPage() {
   const [status, setStatus] = useState("idle");
   const [deleting, setDeleting] = useState(false);
   const [capturing, setCapturing] = useState(false);
-  const [logLines, setLogLines] = useState<LogLine[]>([]);
+  const [logLines, setLogLines] = useState<LogEntry[]>([]);
   const [sourceId, setSourceId] = useState("");
   const [frequency, setFrequency] = useState(10000);
+  const [dialerOpen, setDialerOpen] = useState(false);
   const [mode, setMode] = useState("usb");
   const [lo, setLo] = useState(-5000);
   const [hi, setHi] = useState(5000);
@@ -117,11 +117,12 @@ export function StreamPlayerPage() {
   const setViewRemote = useBandViewStore((s) => s.setViewRemote);
   const [spectrumHeight, setSpectrumHeight] = useState(144);
   const draggingRef = useRef(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
   const waterfallRef = useRef<WaterfallHandle>(null);
   const spectrumRef = useRef<SpectrumHandle>(null);
 
-  const logContainerRef = useRef<HTMLDivElement>(null);
-  const logStickRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
   const versionRef = useRef<number>(0);
   const sessionIdRef = useRef(getSessionId());
@@ -157,21 +158,24 @@ export function StreamPlayerPage() {
   });
   const waveformSamplesRef = useRef<Float32Array>(new Float32Array(0));
 
-  const log = useCallback((line: string) => {
+  const appendLogEntry = useCallback((entry: Omit<LogEntry, "id">) => {
     setLogLines((prev) => [
-      ...prev.slice(-120),
+      ...prev.slice(-500),
       {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        text: `[${new Date().toLocaleTimeString()}] ${line}`,
+        ...entry,
+        id: `${entry.t}-${Math.random().toString(36).slice(2, 8)}`,
       },
     ]);
   }, []);
 
-  const onLogScroll = useCallback(() => {
-    const el = logContainerRef.current;
-    if (!el) return;
-    logStickRef.current =
-      el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  const appendLogEntries = useCallback((entries: Omit<LogEntry, "id">[]) => {
+    setLogLines((prev) => {
+      const withIds = entries.map((e) => ({
+        ...e,
+        id: `${e.t}-${Math.random().toString(36).slice(2, 8)}`,
+      }));
+      return [...prev, ...withIds].slice(-500);
+    });
   }, []);
 
   useEffect(() => {
@@ -180,11 +184,6 @@ export function StreamPlayerPage() {
     return () => { document.title = "wavetoy"; };
   }, [stream?.name]);
 
-  useEffect(() => {
-    if (!logStickRef.current) return;
-    const el = logContainerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [logLines]);
 
   const ensureAudio = useCallback(async () => {
     if (!audioCtxRef.current) {
@@ -385,7 +384,6 @@ export function StreamPlayerPage() {
           }),
         );
       }
-      log("connected, subscribed to stream");
     };
     ws.onclose = () => {
       if (intentionalCloseRef.current) {
@@ -393,119 +391,98 @@ export function StreamPlayerPage() {
         return;
       }
       setStatus("reconnecting");
-      log("socket closed, reconnecting...");
       scheduleReconnect();
     };
     ws.onerror = () => {
       setStatus("error");
-      log("socket error");
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") {
         try {
-          const msg = JSON.parse(ev.data) as {
-            type?: string;
-            stream?: Stream;
-            sample_rate?: number;
-            max_freq_khz?: number;
-            error?: string;
-            code?: string;
-            current_version?: number;
-            peers?: Peer[];
-            peer?: Peer;
-            session_id?: string;
-            changed_by?: Peer;
-            changed_fields?: string[];
-            field?: string;
-            start_khz?: number;
-            end_khz?: number;
-            zoom?: number;
-            center_khz?: number;
-            message?: string;
-          };
+          const msg = JSON.parse(ev.data) as Record<string, any>;
           if (msg.type === "connected") {
             if (msg.sample_rate) streamRateRef.current = msg.sample_rate;
             if (msg.max_freq_khz) setMaxBandwidth(msg.max_freq_khz);
             if (msg.peers) setPeers(msg.peers);
             if (msg.stream) {
-              const vs = msg.stream.wf_view_start_khz;
-              const ve = msg.stream.wf_view_end_khz;
+              const s = msg.stream as Stream;
+              const vs = s.wf_view_start_khz;
+              const ve = s.wf_view_end_khz;
               if (vs != null && ve != null && ve > vs && ve < 100000) {
                 setView(vs, ve);
               }
-              versionRef.current = msg.stream.version;
+              versionRef.current = s.version;
               lastAutoPatchRef.current = encodeControlPatch(
-                msg.stream.source_id,
-                msg.stream.frequency_khz,
-                msg.stream.mode,
-                msg.stream.bandwidth_low_hz,
-                msg.stream.bandwidth_high_hz,
+                s.source_id, s.frequency_khz, s.mode,
+                s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
-              setStream(msg.stream);
-              setSourceId(msg.stream.source_id);
-              setFrequency(msg.stream.frequency_khz);
-              setMode(msg.stream.mode);
-              setLo(msg.stream.bandwidth_low_hz);
-              setHi(msg.stream.bandwidth_high_hz);
+              setStream(s);
+              setSourceId(s.source_id);
+              setFrequency(s.frequency_khz);
+              setMode(s.mode);
+              setLo(s.bandwidth_low_hz);
+              setHi(s.bandwidth_high_hz);
             }
-            log("session ready");
           } else if (msg.type === "stream_updated" && msg.stream) {
+            const s = msg.stream as Stream;
             if (msg.sample_rate) streamRateRef.current = msg.sample_rate;
-            versionRef.current = msg.stream.version;
+            versionRef.current = s.version;
             lastAutoPatchRef.current = encodeControlPatch(
-              msg.stream.source_id,
-              msg.stream.frequency_khz,
-              msg.stream.mode,
-              msg.stream.bandwidth_low_hz,
-              msg.stream.bandwidth_high_hz,
+              s.source_id, s.frequency_khz, s.mode,
+              s.bandwidth_low_hz, s.bandwidth_high_hz,
             );
-            setStream(msg.stream);
-            setSourceId(msg.stream.source_id);
-            setFrequency(msg.stream.frequency_khz);
-            setMode(msg.stream.mode);
-            setLo(msg.stream.bandwidth_low_hz);
-            setHi(msg.stream.bandwidth_high_hz);
-            const isOwnChange =
-              msg.changed_by?.session_id === sessionIdRef.current;
-            if (!isOwnChange && msg.changed_fields?.length) {
-              log(
-                `peer changed: ${msg.changed_fields.join(", ")}`,
-              );
-            } else {
-              log("stream updated");
-            }
+            setStream(s);
+            setSourceId(s.source_id);
+            setFrequency(s.frequency_khz);
+            setMode(s.mode);
+            setLo(s.bandwidth_low_hz);
+            setHi(s.bandwidth_high_hz);
           } else if (msg.type === "peer_joined" && msg.peer) {
+            const peer = msg.peer as Peer;
             setPeers((prev) => {
-              if (prev.some((p) => p.session_id === msg.peer!.session_id))
+              if (prev.some((p) => p.session_id === peer.session_id))
                 return prev;
-              return [...prev, msg.peer!];
+              return [...prev, peer];
             });
-            log(`peer joined (${msg.peer.session_id.slice(0, 6)})`);
           } else if (msg.type === "peer_left" && msg.peer) {
+            const peer = msg.peer as Peer;
             setPeers((prev) =>
-              prev.filter((p) => p.session_id !== msg.peer!.session_id),
+              prev.filter((p) => p.session_id !== peer.session_id),
             );
-            log(`peer left (${msg.peer.session_id.slice(0, 6)})`);
           } else if (msg.type === "error") {
             if (msg.code === "CONFLICT" && msg.stream) {
-              versionRef.current = msg.stream.version;
+              const s = msg.stream as Stream;
+              versionRef.current = s.version;
               lastAutoPatchRef.current = encodeControlPatch(
-                msg.stream.source_id,
-                msg.stream.frequency_khz,
-                msg.stream.mode,
-                msg.stream.bandwidth_low_hz,
-                msg.stream.bandwidth_high_hz,
+                s.source_id, s.frequency_khz, s.mode,
+                s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
-              setStream(msg.stream);
-              setSourceId(msg.stream.source_id);
-              setFrequency(msg.stream.frequency_khz);
-              setMode(msg.stream.mode);
-              setLo(msg.stream.bandwidth_low_hz);
-              setHi(msg.stream.bandwidth_high_hz);
+              setStream(s);
+              setSourceId(s.source_id);
+              setFrequency(s.frequency_khz);
+              setMode(s.mode);
+              setLo(s.bandwidth_low_hz);
+              setHi(s.bandwidth_high_hz);
             }
-            log(`error: ${msg.error} (${msg.code})`);
-          } else if (msg.type === "stream_log" && msg.message) {
-            log(`[server] ${msg.message}`);
+          } else if (msg.type === "stream_log") {
+            appendLogEntry({
+              t: msg.t ?? Date.now(),
+              level: msg.level ?? "info",
+              action: msg.action ?? "",
+              from: msg.from,
+              to: msg.to,
+              msg: msg.msg,
+            });
+          } else if (msg.type === "stream_log_history" && Array.isArray(msg.entries)) {
+            const entries = (msg.entries as Record<string, any>[]).map((e) => ({
+              t: e.t ?? Date.now(),
+              level: e.level ?? "info",
+              action: e.action ?? "",
+              from: e.from as string | undefined,
+              to: e.to as string | undefined,
+              msg: e.msg as string | undefined,
+            }));
+            appendLogEntries(entries);
           } else if (msg.type === "wf_view_changed") {
             if (msg.start_khz != null && msg.end_khz != null) {
               setViewRemote(msg.start_khz, msg.end_khz);
@@ -518,7 +495,7 @@ export function StreamPlayerPage() {
             }
           }
         } catch {
-          log(`text: ${ev.data}`);
+          // ignore unparseable text
         }
         return;
       }
@@ -584,24 +561,24 @@ export function StreamPlayerPage() {
       }
       workletRef.current?.port.postMessage(resampled);
     };
-  }, [ensureAudio, log, resamplePCM, streamId]);
+  }, [ensureAudio, appendLogEntry, appendLogEntries, resamplePCM, streamId]);
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) return;
     const delay = reconnectBackoffRef.current;
     reconnectBackoffRef.current = Math.min(delay * 2, 30000);
-    log(`reconnecting in ${delay}ms...`);
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       void connect();
     }, delay);
-  }, [connect, log]);
+  }, [connect]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     draggingRef.current = true;
+    setIsResizing(true);
     const startX = e.clientX;
-    const startWidth = sidebarWidth;
+    const startWidth = sidebarWidthRef.current;
 
     const onMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;
@@ -610,6 +587,7 @@ export function StreamPlayerPage() {
     };
     const onUp = () => {
       draggingRef.current = false;
+      setIsResizing(false);
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.style.cursor = "";
@@ -619,7 +597,8 @@ export function StreamPlayerPage() {
     document.addEventListener("mouseup", onUp);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
-  }, [sidebarWidth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onSpectrumResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -652,12 +631,12 @@ export function StreamPlayerPage() {
       bandwidth_high_hz?: number;
       name?: string;
       filters?: FilterConfig;
+      auto_fallback?: boolean;
+      auto_fallback_kind?: string;
     },
-    logLine?: string,
   ) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      log("not connected");
       return;
     }
     ws.send(
@@ -667,13 +646,10 @@ export function StreamPlayerPage() {
         patch,
       }),
     );
-    if (logLine) {
-      log(logLine);
-    }
   };
 
   const patchSource = (nextSourceID: string) => {
-    sendPatch({ source_id: nextSourceID }, "source change sent");
+    sendPatch({ source_id: nextSourceID });
   };
 
   const onMapHoverSource = useCallback((source: Source | null) => {
@@ -690,8 +666,8 @@ export function StreamPlayerPage() {
       await deleteStream(streamId);
       wsRef.current?.close();
       await navigate({ to: "/" });
-    } catch (e) {
-      log(`delete failed: ${String(e)}`);
+    } catch {
+      // delete failed
     } finally {
       setDeleting(false);
     }
@@ -720,9 +696,8 @@ export function StreamPlayerPage() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
-      log(`captured ${(blob.size / 1024).toFixed(0)} KB`);
-    } catch (e) {
-      log(`capture failed: ${String(e)}`);
+    } catch {
+      // capture failed
     } finally {
       setCapturing(false);
     }
@@ -734,12 +709,12 @@ export function StreamPlayerPage() {
       const payload = await getMapSources();
       setMapSources(payload.included_sources);
       setMapCounts(payload.counts);
-    } catch (e) {
-      log(`map source load failed: ${String(e)}`);
+    } catch {
+      // map source load failed
     } finally {
       setMapLoading(false);
     }
-  }, [log]);
+  }, []);
 
   const currentSource =
     mapSources.find((s) => s.id === sourceId) ?? null;
@@ -810,7 +785,7 @@ export function StreamPlayerPage() {
         setLo(s.bandwidth_low_hz);
         setHi(s.bandwidth_high_hz);
       })
-      .catch((e) => log(`stream load failed: ${String(e)}`));
+      .catch(() => { /* stream load failed */ });
 
     void refreshMapSources();
     void connect();
@@ -822,7 +797,7 @@ export function StreamPlayerPage() {
       intentionalCloseRef.current = true;
       wsRef.current?.close();
     };
-  }, [connect, log, refreshMapSources, streamId]);
+  }, [connect, refreshMapSources, streamId]);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -868,21 +843,24 @@ export function StreamPlayerPage() {
           </div>
 
           {/* Center: frequency */}
-          <div className="flex flex-1 items-baseline justify-center gap-2">
-            <Tooltip content="Center frequency (kHz)">
-              <Input
-                type="text"
-                value={frequency}
-                onChange={(e) => {
-                  const next = Number(e.target.value);
-                  if (Number.isFinite(next)) setFrequency(next);
-                }}
-                className="font-xanh-mono h-auto w-48 border-none bg-transparent p-0 text-center text-3xl leading-none font-normal tracking-tight shadow-none focus-visible:ring-0 md:text-4xl"
-              />
-            </Tooltip>
+          <div className="relative flex flex-1 items-baseline justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDialerOpen((v) => !v)}
+              className="font-xanh-mono cursor-pointer border-none bg-transparent p-0 text-center text-3xl leading-none font-normal tracking-tight text-foreground hover:text-primary transition-colors md:text-4xl"
+            >
+              {frequency.toFixed(2)}
+            </button>
             <span className="text-xs uppercase tracking-widest text-muted-foreground">
               kHz
             </span>
+            {dialerOpen && (
+              <FrequencyDialer
+                currentKHz={frequency}
+                onSubmit={(kHz) => setFrequency(Math.min(kHz, 30000))}
+                onClose={() => setDialerOpen(false)}
+              />
+            )}
           </div>
 
           {/* Right: mode + bandwidth + actions */}
@@ -951,7 +929,7 @@ export function StreamPlayerPage() {
         <BandViewport
           className="min-w-0 flex-1"
           onClickFrequency={(freqKHz) => {
-            setFrequency(Math.round(freqKHz * 100) / 100);
+            setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
           }}
           onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
             const ws = wsRef.current;
@@ -997,7 +975,7 @@ export function StreamPlayerPage() {
 
       {/* Right: info panel (full height, animated) */}
       <aside
-        className="relative flex shrink-0 flex-col border-l overflow-hidden transition-[width] duration-200 ease-in-out"
+        className={`relative flex shrink-0 flex-col border-l overflow-hidden ${isResizing ? "" : "transition-[width] duration-200 ease-in-out"}`}
         style={{ width: sidebarOpen ? sidebarWidth : 0, borderLeftWidth: sidebarOpen ? 1 : 0 }}
       >
         {/* Resize handle */}
@@ -1009,69 +987,37 @@ export function StreamPlayerPage() {
           className="flex min-h-0 flex-1 flex-col overflow-auto pl-1"
           style={{ minWidth: sidebarWidth }}
         >
-          <section className="border-b">
-            <SourceMiniMap source={currentSource} />
-            <div className="flex items-center justify-between px-3 pt-2">
-              <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                Source
-              </h3>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6"
-                onClick={() => {
-                  setPendingSourceId("");
-                  setHoveredSource(null);
-                  setSourceDrawerOpen(true);
-                  if (mapSources.length === 0 && !mapLoading) {
-                    void refreshMapSources();
-                  }
-                }}
-              >
-                <RefreshCwIcon className="size-3" />
-              </Button>
-            </div>
-            <div className="px-3 pb-3">
-              <SourceDetailsPanel
-                source={currentSource}
-                selectedSourceId={sourceId}
-              />
-            </div>
-          </section>
-
-          <section className="border-b">
-            <AudioWaveform
-              samplesRef={waveformSamplesRef}
-              height={56}
-            />
-            <div className="px-3 pb-3 pt-2">
-            <h3 className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-              Post-Processing
-            </h3>
-            <PostProcessingPanel
-              filters={stream?.filters ?? {}}
-              onFiltersChange={(filters) =>
-                sendPatch({ filters }, "filters updated")
+          <SourceSection
+            source={currentSource}
+            sourceId={sourceId}
+            onChangeSource={() => {
+              setPendingSourceId("");
+              setHoveredSource(null);
+              setSourceDrawerOpen(true);
+              if (mapSources.length === 0 && !mapLoading) {
+                void refreshMapSources();
               }
-              samplesRef={waveformSamplesRef}
-            />
-            </div>
-          </section>
+            }}
+          />
 
-          <section className="flex min-h-0 flex-1 flex-col">
-            <h3 className="px-3 py-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-              Logs
-            </h3>
-            <div
-              ref={logContainerRef}
-              onScroll={onLogScroll}
-              className="min-h-0 flex-1 overflow-auto px-3 pb-3 text-[11px] leading-relaxed text-muted-foreground"
-            >
-              {logLines.map((line) => (
-                <div key={line.id}>{line.text}</div>
-              ))}
-            </div>
-          </section>
+          <FallbackSection
+            stream={stream}
+            streamId={streamId}
+            wsRef={wsRef}
+            onToggleFallback={(enabled) => {
+              sendPatch({ auto_fallback: enabled });
+            }}
+          />
+
+          <FiltersSection
+            filters={stream?.filters ?? {}}
+            onFiltersChange={(filters) =>
+              sendPatch({ filters })
+            }
+            samplesRef={waveformSamplesRef}
+          />
+
+          <LogsPanel lines={logLines} />
 
         </div>
       </aside>
@@ -1096,7 +1042,7 @@ export function StreamPlayerPage() {
                 if (e.key === "Enter") {
                   const name = editName.trim();
                   if (name && name !== stream?.name) {
-                    sendPatch({ name }, "renamed stream");
+                    sendPatch({ name });
                     if (stream) setStream({ ...stream, name });
                   }
                   setStreamSettingsOpen(false);
@@ -1135,7 +1081,7 @@ export function StreamPlayerPage() {
                   onClick={() => {
                     const name = editName.trim();
                     if (name && name !== stream?.name) {
-                      sendPatch({ name }, "renamed stream");
+                      sendPatch({ name });
                       if (stream) setStream({ ...stream, name });
                     }
                     setStreamSettingsOpen(false);

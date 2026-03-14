@@ -49,6 +49,31 @@ export const SourceMapPicker = memo(function SourceMapPicker({
   const mapColors = useThemeStore((s) => s.theme.map);
   const [hoveredID, setHoveredID] = useState<string | null>(null);
 
+  const countryPaint = useMemo(
+    () => ({
+      "line-color": mapColors.countryLines,
+      "line-opacity": mapColors.countryLineOpacity,
+      "line-width": 1.1,
+    }),
+    [mapColors.countryLines, mapColors.countryLineOpacity],
+  );
+
+  const mapStyle = useMemo(
+    () =>
+      ({
+        version: 8,
+        sources: {},
+        layers: [
+          {
+            id: "background",
+            type: "background",
+            paint: { "background-color": mapColors.background },
+          },
+        ],
+      }) as never,
+    [mapColors.background],
+  );
+
   const plottableSources = useMemo(
     () =>
       sources.filter(
@@ -91,17 +116,7 @@ export const SourceMapPicker = memo(function SourceMapPicker({
           initialViewState={{ longitude: 0, latitude: 20, zoom: 1.6 }}
           maxZoom={14}
           minZoom={1}
-          mapStyle={{
-            version: 8,
-            sources: {},
-            layers: [
-              {
-                id: "background",
-                type: "background",
-                paint: { "background-color": mapColors.background },
-              },
-            ],
-          } as never}
+          mapStyle={mapStyle}
           attributionControl={false}
           dragRotate={false}
           touchPitch={false}
@@ -111,11 +126,7 @@ export const SourceMapPicker = memo(function SourceMapPicker({
             <Layer
               id="country-lines"
               type="line"
-              paint={{
-                "line-color": mapColors.countryLines,
-                "line-opacity": mapColors.countryLineOpacity,
-                "line-width": 1.1,
-              }}
+              paint={countryPaint}
             />
           </MapSource>
           {plottableSources.map((source) => {

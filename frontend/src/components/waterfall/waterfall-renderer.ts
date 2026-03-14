@@ -56,6 +56,11 @@ export class WaterfallRenderer {
 
   private backgroundLayers: WFLayer[] = [];
 
+  private timeLabelPositions: { y: number; label: string }[] = [];
+  private timeLabelsDirty = true;
+  private rateWindowStart = 0;
+  private rateWindowRows = 0;
+
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.visibleCanvas = canvas;
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -150,6 +155,9 @@ export class WaterfallRenderer {
 
     this.totalRows = 0;
     this.rawBins = [];
+    this.rateWindowStart = 0;
+    this.rateWindowRows = 0;
+    this.timeLabelsDirty = true;
     this.initOffscreen();
     this.needsRepaint = true;
   }
@@ -178,6 +186,7 @@ export class WaterfallRenderer {
     if (width < 1 || height < 1) return;
     this.visibleCanvas.width = width;
     this.visibleCanvas.height = height;
+    this.timeLabelsDirty = true;
     this.blitToVisible();
   }
 
@@ -185,6 +194,9 @@ export class WaterfallRenderer {
     this.stopRenderLoop();
     this.queue.length = 0;
     this.backgroundLayers.length = 0;
+    this.timeLabelPositions.length = 0;
+    this.rateWindowStart = 0;
+    this.rateWindowRows = 0;
   }
 
   get currentLevels(): { min: number; max: number } {
@@ -203,6 +215,7 @@ export class WaterfallRenderer {
       for (const layer of this.backgroundLayers) {
         layer.yOffset += lines.length;
       }
+      this.measureRate(lines.length);
     }
 
     // Prune layers that have scrolled off the bottom of the visible canvas
@@ -309,6 +322,8 @@ export class WaterfallRenderer {
         viewSpan
       );
     }
+
+    this.drawTimeLabels();
   }
 
   private blitLayer(
@@ -369,6 +384,80 @@ export class WaterfallRenderer {
       this.colorMapLine(bins);
       layerCtx.putImageData(this.rowImageData, 0, i);
     }
+  }
+
+  private measureRate(newRows: number): void {
+    const now = performance.now();
+    if (this.rateWindowStart === 0) {
+      this.rateWindowStart = now;
+      this.rateWindowRows = 0;
+      return;
+    }
+    this.rateWindowRows += newRows;
+    const elapsed = (now - this.rateWindowStart) / 1000;
+    if (elapsed >= 2 && this.timeLabelsDirty) {
+      this.rebuildTimeLabels(this.rateWindowRows / elapsed);
+    }
+  }
+
+  private rebuildTimeLabels(rowsPerSecond: number): void {
+    const { height } = this.visibleCanvas;
+    if (height === 0 || rowsPerSecond <= 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const pxPerSec = rowsPerSecond * this.rowScale;
+    const fontSize = Math.round(9 * dpr);
+    const minGap = 30 * dpr;
+    const intervals = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
+
+    const positions: { y: number; label: string }[] = [];
+    let lastY = -Infinity;
+
+    for (const secs of intervals) {
+      const y = Math.round(secs * pxPerSec);
+      if (y < fontSize || y > height - fontSize) continue;
+      if (y - lastY < minGap) continue;
+      positions.push({ y, label: secs >= 60 ? `${Math.round(secs / 60)}m` : `${secs}s` });
+      lastY = y;
+    }
+
+    this.timeLabelPositions = positions;
+    this.timeLabelsDirty = false;
+  }
+
+  private drawTimeLabels(): void {
+    if (this.timeLabelPositions.length === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = this.visibleCtx;
+    const fontSize = Math.round(9 * dpr);
+    const tickLen = 5 * dpr;
+    const labelX = tickLen + 3 * dpr;
+
+    ctx.save();
+    ctx.font = `${fontSize}px system-ui, sans-serif`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+
+    const d = useThemeStore.getState().theme.display;
+    const tickColor = d.freqScaleTickMinor;
+    const labelColor = d.freqScaleTickMajor;
+
+    for (const { y, label } of this.timeLabelPositions) {
+      ctx.strokeStyle = tickColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(tickLen, y + 0.5);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.fillText(label, labelX + 1, y + 1);
+      ctx.fillStyle = labelColor;
+      ctx.fillText(label, labelX, y);
+    }
+
+    ctx.restore();
   }
 
   private updateAutoLevel(bins: Uint8Array): void {

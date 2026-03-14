@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
 import { useThemeStore } from "@/lib/theme";
 
@@ -26,6 +26,9 @@ export function TuningOverlay({
   const endKHz = useBandViewStore((s) => s.endKHz);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const [activeElement, setActiveElement] = useState<DragKind | null>(null);
+  const [hoveredElement, setHoveredElement] = useState<DragKind | null>(null);
+  const [shiftHeld, setShiftHeld] = useState(false);
   const dragRef = useRef<{
     kind: DragKind;
     startX: number;
@@ -33,6 +36,11 @@ export function TuningOverlay({
     origHi: number;
     origFreq: number;
   } | null>(null);
+
+  const thickElement = activeElement ?? hoveredElement;
+  const mirrorBandwidth = shiftHeld && (activeElement === "left" || activeElement === "right");
+  const leftThick = thickElement === "left" || mirrorBandwidth;
+  const rightThick = thickElement === "right" || mirrorBandwidth;
 
   const pxToHz = useCallback(
     (dx: number): number => {
@@ -51,6 +59,7 @@ export function TuningOverlay({
       e.preventDefault();
       e.stopPropagation();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      setActiveElement(kind);
       dragRef.current = {
         kind,
         startX: e.clientX,
@@ -68,16 +77,33 @@ export function TuningOverlay({
       if (!d) return;
       e.stopPropagation();
 
+      setShiftHeld(e.shiftKey);
       const deltaHz = pxToHz(e.clientX - d.startX);
 
       if (d.kind === "left" && onBandwidthChange) {
-        let newLo = Math.round(d.origLo + deltaHz);
-        newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, d.origHi - 100));
-        onBandwidthChange(newLo, d.origHi);
+        if (e.shiftKey) {
+          let newLo = Math.round(d.origLo + deltaHz);
+          let newHi = Math.round(d.origHi - deltaHz);
+          newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
+          newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
+          onBandwidthChange(newLo, newHi);
+        } else {
+          let newLo = Math.round(d.origLo + deltaHz);
+          newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, d.origHi - 100));
+          onBandwidthChange(newLo, d.origHi);
+        }
       } else if (d.kind === "right" && onBandwidthChange) {
-        let newHi = Math.round(d.origHi + deltaHz);
-        newHi = Math.min(MAX_BW_HZ, Math.max(newHi, d.origLo + 100));
-        onBandwidthChange(d.origLo, newHi);
+        if (e.shiftKey) {
+          let newLo = Math.round(d.origLo - deltaHz);
+          let newHi = Math.round(d.origHi + deltaHz);
+          newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
+          newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
+          onBandwidthChange(newLo, newHi);
+        } else {
+          let newHi = Math.round(d.origHi + deltaHz);
+          newHi = Math.min(MAX_BW_HZ, Math.max(newHi, d.origLo + 100));
+          onBandwidthChange(d.origLo, newHi);
+        }
       } else if (d.kind === "center" && onFrequencyChange) {
         const deltaKHz = deltaHz / 1000;
         onFrequencyChange(
@@ -91,6 +117,8 @@ export function TuningOverlay({
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
     dragRef.current = null;
+    setActiveElement(null);
+    setShiftHeld(false);
   }, []);
 
   const span = endKHz - startKHz;
@@ -110,64 +138,82 @@ export function TuningOverlay({
 
   return (
     <div ref={containerRef} className="absolute inset-0 z-30 pointer-events-none">
-      {/* Passband fill */}
+      {/* Passband group: fill + handles */}
       <div
-        className="absolute inset-y-0"
+        className="absolute inset-y-0 pointer-events-auto"
         style={{
           left: `${Math.max(0, leftPct)}%`,
           right: `${Math.max(0, 100 - rightPct)}%`,
-          backgroundColor: tuning.passbandFill,
-          borderLeft: `1px solid ${tuning.passbandBorder}`,
-          borderRight: `1px solid ${tuning.passbandBorder}`,
         }}
-      />
-      {/* Center frequency line */}
-      {centerPct >= 0 && centerPct <= 100 && (
+      >
+        {/* Passband fill */}
         <div
-          className="absolute inset-y-0 w-px"
-          style={{ left: `${centerPct}%`, backgroundColor: tuning.centerLine }}
-        />
-      )}
-
-      {/* Left edge drag handle */}
-      <div
-        className="absolute inset-y-0 cursor-ew-resize pointer-events-auto"
-        style={{
-          left: `${Math.max(0, leftPct)}%`,
-          width: HANDLE_PX,
-          transform: "translateX(-50%)",
-        }}
-        onPointerDown={(e) => onPointerDown(e, "left")}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      />
-      {/* Right edge drag handle */}
-      <div
-        className="absolute inset-y-0 cursor-ew-resize pointer-events-auto"
-        style={{
-          left: `${Math.min(100, rightPct)}%`,
-          width: HANDLE_PX,
-          transform: "translateX(-50%)",
-        }}
-        onPointerDown={(e) => onPointerDown(e, "right")}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      />
-      {/* Center drag handle */}
-      {centerPct >= 0 && centerPct <= 100 && (
-        <div
-          className="absolute inset-y-0 cursor-grab pointer-events-auto active:cursor-grabbing"
+          className="absolute inset-0 pointer-events-none transition-[border-width] duration-150"
           style={{
-            left: `${centerPct}%`,
+            backgroundColor: tuning.passbandFill,
+            borderLeft: `${leftThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
+            borderRight: `${rightThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
+          }}
+        />
+        {/* Left edge drag handle */}
+        <div
+          className="absolute inset-y-0 cursor-ew-resize"
+          style={{
+            left: 0,
             width: HANDLE_PX,
             transform: "translateX(-50%)",
           }}
-          onPointerDown={(e) => onPointerDown(e, "center")}
+          onMouseEnter={() => setHoveredElement("left")}
+          onMouseLeave={() => setHoveredElement(null)}
+          onPointerDown={(e) => onPointerDown(e, "left")}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
+        />
+        {/* Right edge drag handle */}
+        <div
+          className="absolute inset-y-0 cursor-ew-resize"
+          style={{
+            right: 0,
+            left: "auto",
+            width: HANDLE_PX,
+            transform: "translateX(50%)",
+          }}
+          onMouseEnter={() => setHoveredElement("right")}
+          onMouseLeave={() => setHoveredElement(null)}
+          onPointerDown={(e) => onPointerDown(e, "right")}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        />
+        {/* Center drag handle */}
+        {centerPct >= 0 && centerPct <= 100 && leftPct < centerPct && centerPct < rightPct && (
+          <div
+            className="absolute inset-y-0 cursor-grab active:cursor-grabbing"
+            style={{
+              left: `${((centerPct - leftPct) / (rightPct - leftPct)) * 100}%`,
+              width: HANDLE_PX,
+              transform: "translateX(-50%)",
+            }}
+            onMouseEnter={() => setHoveredElement("center")}
+            onMouseLeave={() => setHoveredElement(null)}
+            onPointerDown={(e) => onPointerDown(e, "center")}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+          />
+        )}
+      </div>
+      {/* Center frequency line */}
+      {centerPct >= 0 && centerPct <= 100 && (
+        <div
+          className="absolute inset-y-0 pointer-events-none transition-[width] duration-150"
+          style={{
+            left: `${centerPct}%`,
+            width: thickElement === "center" ? 3 : 1,
+            transform: "translateX(-50%)",
+            backgroundColor: tuning.centerLine,
+          }}
         />
       )}
     </div>

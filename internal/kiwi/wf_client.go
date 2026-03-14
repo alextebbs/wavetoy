@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
 type WFConfig struct {
@@ -35,6 +35,7 @@ type WFFrame struct {
 type WFClient struct {
 	conn  *websocket.Conn
 	label string
+	logFn LogFunc
 
 	closeOnce sync.Once
 	writeMu   sync.Mutex
@@ -44,7 +45,7 @@ type WFClient struct {
 
 	framesIn       atomic.Int64
 	firstLogged    atomic.Bool
-	maxFreqKHz     atomic.Int64 // from KiwiSDR config, default 30000
+	maxFreqKHz     atomic.Int64
 }
 
 const (
@@ -52,7 +53,7 @@ const (
 	WF_BINS            = 1024
 )
 
-func ConnectWF(ctx context.Context, cfg WFConfig, timestamp int64) (*WFClient, error) {
+func ConnectWF(ctx context.Context, cfg WFConfig, timestamp int64, logFn LogFunc) (*WFClient, error) {
 	scheme := "ws"
 	if cfg.UseTLS {
 		scheme = "wss"
@@ -69,26 +70,29 @@ func ConnectWF(ctx context.Context, cfg WFConfig, timestamp int64) (*WFClient, e
 	}
 
 	label := fmt.Sprintf("%s:%d/WF", cfg.Host, cfg.Port)
-	log.Printf("[KIWI-WF] dialing %s endpoint=%s", label, endpoint.String())
+	if logFn != nil {
+		logFn(streamlog.LevelDebug, "dial", "wavetoy", "kiwi", fmt.Sprintf("wf endpoint=%s", endpoint.String()))
+	}
 
 	dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second}
-	conn, resp, err := dialer.DialContext(ctx, endpoint.String(), nil)
+	conn, _, err := dialer.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
-		log.Printf("[KIWI-WF] dial failed %s: %v", label, err)
+		if logFn != nil {
+			logFn(streamlog.LevelDebug, "dial", "wavetoy", "kiwi", fmt.Sprintf("wf failed: %v", err))
+		}
 		return nil, err
 	}
-	log.Printf("[KIWI-WF] connected %s (http_status=%d)", label, resp.StatusCode)
 
 	client := &WFClient{
 		conn:   conn,
 		label:  label,
+		logFn:  logFn,
 		done:   make(chan struct{}),
 		frames: make(chan WFFrame, 32),
 	}
 	client.maxFreqKHz.Store(30000)
 
 	if err := client.init(cfg); err != nil {
-		log.Printf("[KIWI-WF] init failed %s: %v", label, err)
 		client.Close()
 		return nil, err
 	}
@@ -113,7 +117,6 @@ func (c *WFClient) MaxFreqKHz() int64 {
 func (c *WFClient) Close() error {
 	var closeErr error
 	c.closeOnce.Do(func() {
-		log.Printf("[KIWI-WF] closing connection %s", c.label)
 		close(c.done)
 		closeErr = c.conn.Close()
 		close(c.frames)
@@ -186,14 +189,14 @@ func (c *WFClient) readLoop() {
 	for {
 		msgType, payload, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("[KIWI-WF] << %s read_loop exiting: %v", c.label, err)
+			if c.logFn != nil {
+				c.logFn(streamlog.LevelWarn, "kiwi.wf.read.exit", "kiwi", "wavetoy",
+					fmt.Sprintf("%s: %v", c.label, err))
+			}
 			return
 		}
 
 		if msgType != websocket.BinaryMessage || len(payload) < 3 {
-			if msgType == websocket.TextMessage {
-				log.Printf("[KIWI-WF] << %s text_msg=%q", c.label, string(payload))
-			}
 			continue
 		}
 
@@ -217,7 +220,6 @@ func (c *WFClient) readLoop() {
 }
 
 func (c *WFClient) processWF(body []byte) (WFFrame, bool) {
-	// body[0] is a skip byte (same as kiwiclient)
 	if len(body) < 13 {
 		return WFFrame{}, false
 	}
@@ -231,8 +233,10 @@ func (c *WFClient) processWF(body []byte) (WFFrame, bool) {
 	copy(bins, body[12:])
 
 	if c.firstLogged.CompareAndSwap(false, true) {
-		log.Printf("[KIWI-WF] << %s first W/F frame: bins=%d xbin=%d zoom=%d flags=0x%04x",
-			c.label, len(bins), xBin, zoom, flags)
+		if c.logFn != nil {
+			c.logFn(streamlog.LevelDebug, "kiwi.wf.first", "kiwi", "wavetoy",
+				fmt.Sprintf("bins=%d xbin=%d zoom=%d flags=0x%04x", len(bins), xBin, zoom, flags))
+		}
 	}
 	c.framesIn.Add(1)
 
@@ -251,11 +255,13 @@ func (c *WFClient) processMSG(body []byte) {
 		name, value, _ := strings.Cut(pair, "=")
 		switch name {
 		case "bandwidth":
-			// bandwidth is in Hz, convert to kHz
 			var bw float64
 			if _, err := fmt.Sscanf(value, "%f", &bw); err == nil && bw > 0 {
 				c.maxFreqKHz.Store(int64(bw / 1000))
-				log.Printf("[KIWI-WF] << %s bandwidth=%dkHz", c.label, c.maxFreqKHz.Load())
+				if c.logFn != nil {
+					c.logFn(streamlog.LevelDebug, "kiwi.bandwidth", "kiwi", "wavetoy",
+						fmt.Sprintf("bandwidth=%dkHz", c.maxFreqKHz.Load()))
+				}
 			}
 		}
 	}
@@ -280,8 +286,8 @@ func (c *WFClient) keepAliveLoop() {
 func (c *WFClient) send(cmd string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if cmd != "SET keepalive" {
-		log.Printf("[KIWI-WF] >> %s cmd=%q", c.label, cmd)
+	if cmd != "SET keepalive" && c.logFn != nil {
+		c.logFn(streamlog.LevelDebug, "kiwi.cmd", "wavetoy", "kiwi", cmd)
 	}
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(cmd))
 }

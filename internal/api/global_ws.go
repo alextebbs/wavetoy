@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sammy/sdr-radio/internal/db"
+	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
 func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
@@ -45,13 +46,14 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	client.joinedAt = time.Now()
 
-	// Deduplicate: close any stale connection with the same session ID
 	s.evictStaleSession(client)
 
 	defer func() {
 		topics := s.registry.unsubscribeAll(client)
 		for _, topic := range topics {
 			if strings.HasPrefix(topic, "stream:") {
+				streamID := strings.TrimPrefix(topic, "stream:")
+				s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 				s.registry.broadcast(topic, map[string]any{
 					"type": "peer_left",
 					"peer": map[string]string{"session_id": client.sessionID},
@@ -61,8 +63,6 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 	}()
 
-	// Handle resume: if the hello contained resume data, auto-subscribe
-	// to those topics and only send state if the version has changed.
 	resumeTopics := make([]string, 0)
 	if firstMsg.Type == "hello" && firstMsg.Resume != nil {
 		for topic, rv := range firstMsg.Resume {
@@ -71,6 +71,8 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
+				s.streamLog.Info(streamID, "ws.resume", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil {
 					continue
@@ -169,6 +171,8 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
+				s.streamLog.Info(streamID, "ws.connect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil || stream.TenantID != db.DefaultTenantID {
 					_ = client.writeJSON(map[string]any{
@@ -218,6 +222,8 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			topic = strings.TrimSpace(topic)
 			s.registry.unsubscribe(client, topic)
 			if strings.HasPrefix(topic, "stream:") {
+				streamID := strings.TrimPrefix(topic, "stream:")
+				s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s (unsubscribe)", client.sessionID[:min(8, len(client.sessionID))]))
 				s.registry.broadcast(topic, map[string]any{
 					"type": "peer_left",
 					"peer": map[string]string{"session_id": client.sessionID},
@@ -226,7 +232,6 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 		}
 
 	case "patch":
-		// Find the stream topic this client is subscribed to
 		streamID := s.findStreamTopicForClient(client)
 		if streamID == "" {
 			_ = client.writeJSON(map[string]any{
@@ -257,12 +262,81 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			"field":      msg.Field,
 		})
 
+	case "switch_fallback":
+		streamID := s.findStreamTopicForClient(client)
+		if streamID == "" {
+			_ = client.writeJSON(map[string]any{
+				"type":  "error",
+				"error": "not subscribed to any stream topic",
+				"code":  "VALIDATION",
+			})
+			return
+		}
+		if msg.SourceID == "" {
+			_ = client.writeJSON(map[string]any{
+				"type":  "error",
+				"error": "source_id is required",
+				"code":  "VALIDATION",
+			})
+			return
+		}
+		s.handleSwitchFallback(r, streamID, msg.SourceID, client)
+
+	case "reprobe_fallbacks":
+		streamID := s.findStreamTopicForClient(client)
+		if streamID == "" {
+			_ = client.writeJSON(map[string]any{
+				"type":  "error",
+				"error": "not subscribed to any stream topic",
+				"code":  "VALIDATION",
+			})
+			return
+		}
+		if s.fallbackManager != nil {
+			s.fallbackManager.Reprobe(r.Context(), streamID)
+		}
+
 	default:
 		_ = client.writeJSON(map[string]any{
 			"type":  "error",
 			"error": "unsupported message type",
 			"code":  "VALIDATION",
 		})
+	}
+}
+
+func (s *Server) handleSwitchFallback(r *http.Request, streamID, sourceID string, client *streamWSClient) {
+	existing, err := s.db.GetStreamByID(r.Context(), streamID)
+	if err != nil || existing == nil {
+		_ = client.writeJSON(map[string]any{
+			"type":  "error",
+			"error": "stream not found",
+			"code":  "NOT_FOUND",
+		})
+		return
+	}
+
+	prevSourceID := existing.SourceID
+
+	patchReq := patchStreamRequest{SourceID: &sourceID}
+	stream, apiErr := s.applyPatchStream(r.Context(), existing, patchReq, 0)
+	if apiErr != nil {
+		_ = client.writeJSON(map[string]any{
+			"type":  "error",
+			"error": apiErr.Error,
+			"code":  apiErr.Code,
+		})
+		return
+	}
+
+	s.broadcastStreamEvent(stream.ID, map[string]any{
+		"type":        "stream_updated",
+		"stream":      stream,
+		"sample_rate": s.streamManager.SampleRate(stream.ID),
+	})
+
+	if s.fallbackManager != nil && stream.AutoFallback && prevSourceID != sourceID {
+		go s.fallbackManager.NotifySwitch(r.Context(), streamID, prevSourceID, sourceID)
 	}
 }
 
@@ -320,18 +394,31 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 }
 
 func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) {
-	logCh, unsubscribe, err := s.streamManager.SubscribeLogs(streamID)
+	// Send log history first
+	history := s.streamLog.Snapshot(streamID, streamlog.LevelInfo, 200)
+	if len(history) > 0 {
+		entries := make([]map[string]any, len(history))
+		for i, e := range history {
+			entries[i] = entryToWSPayload(e)
+			entries[i]["type"] = "stream_log_entry"
+		}
+		_ = client.writeJSON(map[string]any{
+			"type":    "stream_log_history",
+			"entries": entries,
+		})
+	}
+
+	// Subscribe for live updates
+	logCh, unsubscribe, err := s.streamLog.Subscribe(streamID)
 	if err != nil {
 		return
 	}
 
 	go func() {
 		defer unsubscribe()
-		for msg := range logCh {
-			if err := client.writeJSON(map[string]any{
-				"type":    "stream_log",
-				"message": msg,
-			}); err != nil {
+		for entry := range logCh {
+			payload := entryToWSPayload(entry)
+			if err := client.writeJSON(payload); err != nil {
 				return
 			}
 		}

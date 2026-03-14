@@ -135,9 +135,9 @@ const phosphor: SDRTheme = {
     snrLightness: 55,
   },
   tuning: {
-    passbandFill: "rgba(251,170,199,0.10)",
-    passbandBorder: "rgba(251,170,199,0.35)",
-    centerLine: "rgba(252,185,210,0.75)",
+    passbandFill: "rgba(255,80,150,0.12)",
+    passbandBorder: "rgba(255,80,150,0.50)",
+    centerLine: "rgba(255,100,160,0.80)",
   },
   statusWarning: "#2dd4bf",
 };
