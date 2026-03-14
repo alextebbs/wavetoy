@@ -15,7 +15,7 @@ const buttonVariants = cva(
         secondary:
           "bg-yellow-300 text-yellow-950 hover:bg-yellow-200 aria-expanded:bg-yellow-200 aria-expanded:text-yellow-950",
         ghost:
-          "text-yellow-800 hover:bg-yellow-100 hover:text-yellow-950 aria-expanded:bg-yellow-100 aria-expanded:text-yellow-950 dark:text-yellow-100 dark:hover:bg-yellow-300/20",
+          "border-transparent bg-transparent text-yellow-800 shadow-none hover:bg-yellow-100 hover:text-yellow-950 aria-expanded:bg-yellow-100 aria-expanded:text-yellow-950 focus-visible:border-transparent dark:text-yellow-100 dark:hover:bg-yellow-300/20",
         destructive: "bg-yellow-500 text-yellow-950 hover:bg-yellow-400",
         link: "text-yellow-700 underline-offset-4 hover:underline dark:text-yellow-300",
       },

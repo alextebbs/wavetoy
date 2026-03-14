@@ -53,13 +53,6 @@ export function StreamsPage() {
       const payload = await getMapSources();
       setMapSources(payload.included_sources);
       setMapCounts(payload.counts);
-      setSelectedSource(
-        (prev) =>
-          prev ??
-          (payload.included_sources.length > 0
-            ? payload.included_sources[0]
-            : null),
-      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -73,6 +66,8 @@ export function StreamsPage() {
   }, [refreshStreams, refreshMapSources]);
 
   const openCreateDrawer = () => {
+    setSelectedSource(null);
+    setHoveredSource(null);
     setCreateDrawerOpen(true);
     if (mapSources.length === 0 && !mapLoading) {
       void refreshMapSources();
@@ -108,47 +103,47 @@ export function StreamsPage() {
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
       <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-xl font-semibold">Streams</h1>
-          <p className="text-sm text-muted-foreground">
-            Click a stream to listen live.
-          </p>
-        </div>
+        <h1 className="font-xanh-mono text-3xl leading-none lowercase">
+          wavetoy
+        </h1>
         <Button type="button" variant="ghost" onClick={openCreateDrawer}>
           <PlusIcon className="size-4" />
         </Button>
       </div>
 
-      <div className="border-t" />
+      <div className="border-t border-zinc-500/60" />
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       <section className="space-y-2">
-        <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-          Existing Streams
-        </h2>
-        {(loading ? [] : streams).map((stream) => (
-          <Link
-            key={stream.id}
-            to="/streams/$streamId"
-            params={{ streamId: stream.id }}
-            className="block border-b py-3 transition-colors hover:bg-muted/20"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <p className="font-medium">{stream.name}</p>
-                <p className="text-sm text-muted-foreground">
-                  {stream.frequency_khz} kHz {stream.mode} [
-                  {stream.bandwidth_low_hz}, {stream.bandwidth_high_hz}]
-                </p>
-                <p className="text-xs text-muted-foreground">ID: {stream.id}</p>
+        {(loading ? [] : streams).length === 0 ? (
+          <p className="font-xanh-mono py-10 text-center text-sm text-zinc-500">
+            no streams :(
+          </p>
+        ) : (
+          streams.map((stream) => (
+            <Link
+              key={stream.id}
+              to="/streams/$streamId"
+              params={{ streamId: stream.id }}
+              className="block border-b py-3 transition-colors hover:bg-muted/20"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="font-medium">{stream.name}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {stream.frequency_khz} kHz {stream.mode} [
+                    {stream.bandwidth_low_hz}, {stream.bandwidth_high_hz}]
+                  </p>
+                  <p className="text-xs text-muted-foreground">ID: {stream.id}</p>
+                </div>
+                <span className="text-xs uppercase tracking-wider text-muted-foreground">
+                  {stream.state}
+                </span>
               </div>
-              <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                {stream.state}
-              </span>
-            </div>
-          </Link>
-        ))}
+            </Link>
+          ))
+        )}
       </section>
 
       <BottomDrawer
@@ -197,6 +192,7 @@ export function StreamsPage() {
                       className="flex-1"
                     />
                     <Button
+                      variant="ghost"
                       disabled={creating || !selectedSource || !name.trim()}
                       onClick={() => void onCreate()}
                     >

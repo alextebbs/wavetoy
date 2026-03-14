@@ -50,6 +50,22 @@ type AudioMetrics = {
   sampleCount: number;
 };
 
+function encodeControlPatch(
+  sourceID: string,
+  frequency: number,
+  mode: string,
+  lo: number,
+  hi: number,
+): string {
+  return JSON.stringify({
+    source_id: sourceID,
+    frequency_khz: Number(frequency),
+    mode,
+    bandwidth_low_hz: Number(lo),
+    bandwidth_high_hz: Number(hi),
+  });
+}
+
 declare global {
   interface Window {
     dumpAudioMetrics?: () => AudioMetrics;
@@ -97,6 +113,7 @@ export function StreamPlayerPage() {
     sampleCount: 0,
   });
   const lastPacketAtRef = useRef(0);
+  const lastAutoPatchRef = useRef("");
   const resamplerRef = useRef<ResamplerState>({
     carryPos: 0,
     hasLast: false,
@@ -311,6 +328,13 @@ export function StreamPlayerPage() {
           if (msg.type === "connected") {
             if (msg.sample_rate) streamRateRef.current = msg.sample_rate;
             if (msg.stream) {
+              lastAutoPatchRef.current = encodeControlPatch(
+                msg.stream.source_id,
+                msg.stream.frequency_khz,
+                msg.stream.mode,
+                msg.stream.bandwidth_low_hz,
+                msg.stream.bandwidth_high_hz,
+              );
               setStream(msg.stream);
               setSourceId(msg.stream.source_id);
               setFrequency(msg.stream.frequency_khz);
@@ -321,6 +345,13 @@ export function StreamPlayerPage() {
             log("session ready");
           } else if (msg.type === "stream_updated" && msg.stream) {
             if (msg.sample_rate) streamRateRef.current = msg.sample_rate;
+            lastAutoPatchRef.current = encodeControlPatch(
+              msg.stream.source_id,
+              msg.stream.frequency_khz,
+              msg.stream.mode,
+              msg.stream.bandwidth_low_hz,
+              msg.stream.bandwidth_high_hz,
+            );
             setStream(msg.stream);
             setSourceId(msg.stream.source_id);
             setFrequency(msg.stream.frequency_khz);
@@ -386,7 +417,16 @@ export function StreamPlayerPage() {
     };
   }, [ensureAudio, log, resamplePCM, streamId]);
 
-  const patch = () => {
+  const sendPatch = (
+    patch: {
+      source_id?: string;
+      frequency_khz?: number;
+      mode?: string;
+      bandwidth_low_hz?: number;
+      bandwidth_high_hz?: number;
+    },
+    logLine?: string,
+  ) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       log("not connected");
@@ -395,33 +435,16 @@ export function StreamPlayerPage() {
     ws.send(
       JSON.stringify({
         type: "patch",
-        patch: {
-          source_id: sourceId,
-          frequency_khz: Number(frequency),
-          mode,
-          bandwidth_low_hz: Number(lo),
-          bandwidth_high_hz: Number(hi),
-        },
+        patch,
       }),
     );
-    log("patch sent");
+    if (logLine) {
+      log(logLine);
+    }
   };
 
   const patchSource = (nextSourceID: string) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      log("not connected");
-      return;
-    }
-    ws.send(
-      JSON.stringify({
-        type: "patch",
-        patch: {
-          source_id: nextSourceID,
-        },
-      }),
-    );
-    log("source change sent");
+    sendPatch({ source_id: nextSourceID }, "source change sent");
   };
 
   const onDeleteStream = async () => {
@@ -480,8 +503,36 @@ export function StreamPlayerPage() {
   }, [hi, lo, mode]);
 
   useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const patch = {
+      source_id: sourceId,
+      frequency_khz: Number(frequency),
+      mode,
+      bandwidth_low_hz: Number(lo),
+      bandwidth_high_hz: Number(hi),
+    };
+    const encoded = JSON.stringify(patch);
+    if (encoded === lastAutoPatchRef.current) {
+      return;
+    }
+    sendPatch(patch);
+    lastAutoPatchRef.current = encoded;
+  }, [frequency, hi, lo, mode, sourceId]);
+
+  useEffect(() => {
     void getStream(streamId)
       .then((s) => {
+        lastAutoPatchRef.current = encodeControlPatch(
+          s.source_id,
+          s.frequency_khz,
+          s.mode,
+          s.bandwidth_low_hz,
+          s.bandwidth_high_hz,
+        );
         setStream(s);
         setSourceId(s.source_id);
         setPendingSourceId(s.source_id);
@@ -546,7 +597,8 @@ export function StreamPlayerPage() {
               type="button"
               variant="secondary"
               onClick={() => {
-                setPendingSourceId(sourceId);
+                setPendingSourceId("");
+                setHoveredSource(null);
                 setSourceDrawerOpen(true);
                 if (mapSources.length === 0 && !mapLoading) {
                   void refreshMapSources();
@@ -608,9 +660,6 @@ export function StreamPlayerPage() {
             placeholder="Bandwidth high (Hz)"
           />
         </div>
-        <Button onClick={patch} disabled={!sourceId}>
-          Apply Patch
-        </Button>
       </section>
 
       <section className="space-y-2 border-b pb-6">
