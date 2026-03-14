@@ -1,9 +1,29 @@
-/sdr-radio
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Go
 *.exe
 *.test
 *.out
 vendor/
-.env
-.env.*
-!.env.example
-*.log
+tmp/
+*.coverprofile
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local scratch folders
+tmp_openwebrx/
+tmp_tokoeka/
+kiwi-probe
