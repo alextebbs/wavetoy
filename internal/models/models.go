@@ -44,6 +44,9 @@ type Stream struct {
 	ActivityDetectionEnabled bool      `json:"activity_detection_enabled"`
 	ActivitySensitivity      float64   `json:"activity_sensitivity"`
 	State                    string    `json:"state"`
+	Version                  int64     `json:"version"`
+	WFViewStartKHz           float64   `json:"wf_view_start_khz"`
+	WFViewEndKHz             float64   `json:"wf_view_end_khz"`
 	CreatedAt                time.Time `json:"created_at"`
 	UpdatedAt                time.Time `json:"updated_at"`
 }

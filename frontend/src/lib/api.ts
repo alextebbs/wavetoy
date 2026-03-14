@@ -13,9 +13,46 @@ export type Stream = {
   activity_detection_enabled: boolean;
   activity_sensitivity: number;
   state: string;
+  version: number;
+  wf_view_start_khz: number;
+  wf_view_end_khz: number;
   created_at: string;
   updated_at: string;
 };
+
+export type Peer = {
+  session_id: string;
+  color: string;
+};
+
+const PEER_COLORS = [
+  "#4f87e2",
+  "#e24f87",
+  "#4fe287",
+  "#e2c94f",
+  "#874fe2",
+  "#e2874f",
+  "#4fe2c9",
+  "#c94fe2",
+];
+
+export function getSessionId(): string {
+  let id = sessionStorage.getItem("sdr_session_id");
+  if (!id) {
+    id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    sessionStorage.setItem("sdr_session_id", id);
+  }
+  return id;
+}
+
+export function getSessionColor(): string {
+  let color = sessionStorage.getItem("sdr_session_color");
+  if (!color) {
+    color = PEER_COLORS[Math.floor(Math.random() * PEER_COLORS.length)];
+    sessionStorage.setItem("sdr_session_color", color);
+  }
+  return color;
+}
 
 export type Source = {
   id: string;

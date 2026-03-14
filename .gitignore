@@ -24,6 +24,5 @@ frontend/node_modules/
 frontend/dist/
 
 # Local scratch folders
-tmp_openwebrx/
-tmp_tokoeka/
+tmp_*/
 kiwi-probe

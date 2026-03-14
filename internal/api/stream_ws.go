@@ -1,21 +1,43 @@
 package api
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/sammy/sdr-radio/internal/db"
+	"github.com/sammy/sdr-radio/internal/kiwi"
+	"github.com/sammy/sdr-radio/internal/models"
 )
 
 type wsStreamMessage struct {
-	Type  string             `json:"type"`
-	Patch patchStreamRequest `json:"patch"`
+	Type      string             `json:"type"`
+	Version   int64              `json:"version,omitempty"`
+	Patch     patchStreamRequest `json:"patch"`
+	SessionID string             `json:"session_id,omitempty"`
+	Color     string             `json:"color,omitempty"`
+	Topics    []string           `json:"topics,omitempty"`
+	Field     string             `json:"field,omitempty"`
+	Resume    map[string]struct {
+		Version int64 `json:"version"`
+	} `json:"resume,omitempty"`
+	WFZoom      *int     `json:"zoom,omitempty"`
+	WFCenterKHz *float64 `json:"center_khz,omitempty"`
+	WFSpeed     *int     `json:"speed,omitempty"`
+	ViewStartKHz *float64 `json:"start_khz,omitempty"`
+	ViewEndKHz   *float64 `json:"end_khz,omitempty"`
 }
 
-const wsPacketTypeAudioPCM16 = 0x02
+const (
+	wsPacketTypeWaterfall = 0x01
+	wsPacketTypeAudioPCM16 = 0x02
+)
 
 func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 	streamID := chi.URLParam(r, "id")
@@ -43,8 +65,54 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := &streamWSClient{conn: conn}
+
+	// Wait for hello before registering (Phase 2 presence).
+	// Read the first message; if it's a hello, extract identity.
+	// If the client sends something else first, accept it but assign defaults.
+	_, firstPayload, firstErr := conn.ReadMessage()
+	if firstErr != nil {
+		_ = conn.Close()
+		return
+	}
+	var firstMsg wsStreamMessage
+	if err := json.Unmarshal(firstPayload, &firstMsg); err != nil {
+		_ = client.writeJSON(map[string]any{
+			"type":  "error",
+			"error": "invalid JSON payload",
+			"code":  "VALIDATION",
+		})
+		_ = conn.Close()
+		return
+	}
+	if firstMsg.Type == "hello" {
+		client.sessionID = firstMsg.SessionID
+		client.color = firstMsg.Color
+	}
+	if client.sessionID == "" {
+		client.sessionID = fmt.Sprintf("anon-%d", time.Now().UnixNano())
+	}
+	if client.color == "" {
+		client.color = "#888888"
+	}
+	client.joinedAt = time.Now()
+
 	s.registerWSClient(streamID, client)
-	defer s.unregisterWSClient(streamID, client)
+	defer func() {
+		s.unregisterWSClient(streamID, client)
+		s.broadcastStreamEvent(streamID, map[string]any{
+			"type": "peer_left",
+			"peer": map[string]string{"session_id": client.sessionID},
+		})
+	}()
+
+	// Broadcast peer_joined to existing clients
+	s.broadcastStreamEventExcluding(streamID, client, map[string]any{
+		"type": "peer_joined",
+		"peer": map[string]string{
+			"session_id": client.sessionID,
+			"color":      client.color,
+		},
+	})
 
 	audioCh, unsubscribe, err := s.streamManager.Subscribe(streamID)
 	if err != nil {
@@ -77,12 +145,37 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	client.writeJSON(map[string]any{
-		"type":        "connected",
-		"stream":      stream,
-		"sample_rate": s.streamManager.SampleRate(streamID),
-		"audio_type":  "pcm_s16le",
+	// Start waterfall pump
+	wfCh, wfUnsub, wfErr := s.streamManager.SubscribeWaterfall(streamID)
+	if wfErr == nil {
+		defer wfUnsub()
+		go func() {
+			for frame := range wfCh {
+				packet := buildWFPacket(frame)
+				if err := client.writeBinary(packet); err != nil {
+					return
+				}
+			}
+		}()
+	} else {
+		log.Printf("[WS] waterfall not available for stream %s: %v", streamID, wfErr)
+	}
+
+	// Re-read the stream so the version is fresh
+	stream, _ = s.db.GetStreamByID(r.Context(), streamID)
+	_ = client.writeJSON(map[string]any{
+		"type":          "connected",
+		"stream":        stream,
+		"sample_rate":   s.streamManager.SampleRate(streamID),
+		"audio_type":    "pcm_s16le",
+		"peers":         s.getPeers(streamID),
+		"max_freq_khz":  s.streamManager.MaxFreqKHz(streamID),
 	})
+
+	// If the first message was NOT hello, process it now
+	if firstMsg.Type != "hello" {
+		s.handleWSMessage(r, streamID, client, firstMsg)
+	}
 
 	for {
 		select {
@@ -97,48 +190,142 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		}
 		var msg wsStreamMessage
 		if err := json.Unmarshal(payload, &msg); err != nil {
-			client.writeJSON(map[string]any{
+			_ = client.writeJSON(map[string]any{
 				"type":  "error",
 				"error": "invalid JSON payload",
 				"code":  "VALIDATION",
 			})
 			continue
 		}
-		switch msg.Type {
-		case "ping":
-			client.writeJSON(map[string]any{"type": "pong"})
-		case "patch":
-			latest, err := s.db.GetStreamByID(r.Context(), streamID)
-			if err != nil || latest == nil {
-				client.writeJSON(map[string]any{
-					"type":  "error",
-					"error": "stream not found",
-					"code":  "NOT_FOUND",
-				})
-				continue
-			}
-			updated, apiErr := s.applyPatchStream(r.Context(), latest, msg.Patch)
-			if apiErr != nil {
-				client.writeJSON(map[string]any{
-					"type":  "error",
-					"error": apiErr.Error,
-					"code":  apiErr.Code,
-				})
-				continue
-			}
-			s.broadcastStreamEvent(streamID, map[string]any{
-				"type":        "stream_updated",
-				"stream":      updated,
-				"sample_rate": s.streamManager.SampleRate(streamID),
-			})
-		default:
-			client.writeJSON(map[string]any{
-				"type":  "error",
-				"error": "unsupported message type",
-				"code":  "VALIDATION",
-			})
-		}
+		s.handleWSMessage(r, streamID, client, msg)
 	}
+}
+
+func (s *Server) handleWSMessage(r *http.Request, streamID string, client *streamWSClient, msg wsStreamMessage) {
+	switch msg.Type {
+	case "ping":
+		_ = client.writeJSON(map[string]any{"type": "pong"})
+	case "hello":
+		// Already handled on connect; ignore subsequent hellos
+	case "focus":
+		s.broadcastStreamEventExcluding(streamID, client, map[string]any{
+			"type":       "peer_focus",
+			"session_id": client.sessionID,
+			"field":      msg.Field,
+		})
+	case "wf_config":
+		zoom := 0
+		if msg.WFZoom != nil {
+			zoom = *msg.WFZoom
+		}
+		centerKHz := 15000.0
+		if msg.WFCenterKHz != nil {
+			centerKHz = *msg.WFCenterKHz
+		}
+		speed := 4
+		if msg.WFSpeed != nil {
+			speed = *msg.WFSpeed
+		}
+		if err := s.streamManager.ReconfigureWaterfall(streamID, zoom, centerKHz, speed); err != nil {
+			log.Printf("[WS] wf_config failed stream=%s: %v", streamID, err)
+		}
+		// Persist + broadcast view bounds to other clients
+		if msg.ViewStartKHz != nil && msg.ViewEndKHz != nil {
+			if err := s.db.UpdateStreamView(r.Context(), streamID, *msg.ViewStartKHz, *msg.ViewEndKHz); err != nil {
+				log.Printf("[WS] failed to persist wf view stream=%s: %v", streamID, err)
+			}
+			evt := map[string]any{
+				"type":      "wf_view_changed",
+				"start_khz": *msg.ViewStartKHz,
+				"end_khz":   *msg.ViewEndKHz,
+				"changed_by": map[string]string{
+					"session_id": client.sessionID,
+					"color":      client.color,
+				},
+			}
+			if msg.WFZoom != nil {
+				evt["zoom"] = *msg.WFZoom
+			}
+			if msg.WFCenterKHz != nil {
+				evt["center_khz"] = *msg.WFCenterKHz
+			}
+			s.broadcastStreamEventExcluding(streamID, client, evt)
+		}
+	case "patch":
+		latest, err := s.db.GetStreamByID(r.Context(), streamID)
+		if err != nil || latest == nil {
+			_ = client.writeJSON(map[string]any{
+				"type":  "error",
+				"error": "stream not found",
+				"code":  "NOT_FOUND",
+			})
+			return
+		}
+
+		changedFields := collectChangedFields(latest, msg.Patch)
+		updated, apiErr := s.applyPatchStream(r.Context(), latest, msg.Patch, msg.Version)
+		if apiErr != nil {
+			resp := map[string]any{
+				"type":  "error",
+				"error": apiErr.Error,
+				"code":  apiErr.Code,
+			}
+			if apiErr.Code == "CONFLICT" {
+				resp["current_version"] = latest.Version
+				resp["stream"] = latest
+			}
+			_ = client.writeJSON(resp)
+			return
+		}
+		s.broadcastStreamEvent(streamID, map[string]any{
+			"type":        "stream_updated",
+			"stream":      updated,
+			"sample_rate": s.streamManager.SampleRate(streamID),
+			"changed_by": map[string]string{
+				"session_id": client.sessionID,
+				"color":      client.color,
+			},
+			"changed_fields": changedFields,
+		})
+	default:
+		_ = client.writeJSON(map[string]any{
+			"type":  "error",
+			"error": "unsupported message type",
+			"code":  "VALIDATION",
+		})
+	}
+}
+
+func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []string {
+	var fields []string
+	if patch.SourceID != nil && *patch.SourceID != existing.SourceID {
+		fields = append(fields, "source_id")
+	}
+	if patch.FrequencyKHz != nil && *patch.FrequencyKHz != existing.FrequencyKHz {
+		fields = append(fields, "frequency_khz")
+	}
+	if patch.Mode != nil && strings.ToLower(*patch.Mode) != existing.Mode {
+		fields = append(fields, "mode")
+	}
+	if patch.BandwidthLowHz != nil && *patch.BandwidthLowHz != existing.BandwidthLowHz {
+		fields = append(fields, "bandwidth_low_hz")
+	}
+	if patch.BandwidthHighHz != nil && *patch.BandwidthHighHz != existing.BandwidthHighHz {
+		fields = append(fields, "bandwidth_high_hz")
+	}
+	if patch.Name != nil && *patch.Name != existing.Name {
+		fields = append(fields, "name")
+	}
+	if patch.AGCOn != nil && *patch.AGCOn != existing.AGCOn {
+		fields = append(fields, "agc_on")
+	}
+	if patch.AGCGainDB != nil {
+		fields = append(fields, "agc_gain_db")
+	}
+	if patch.BufferMinutes != nil && *patch.BufferMinutes != existing.BufferMinutes {
+		fields = append(fields, "buffer_minutes")
+	}
+	return fields
 }
 
 func (s *Server) registerWSClient(streamID string, client *streamWSClient) {
@@ -163,6 +350,7 @@ func (s *Server) unregisterWSClient(streamID string, client *streamWSClient) {
 }
 
 func (s *Server) broadcastStreamEvent(streamID string, event map[string]any) {
+	// Legacy per-stream WS clients
 	s.wsMu.RLock()
 	clients := s.wsClients[streamID]
 	copies := make([]*streamWSClient, 0, len(clients))
@@ -170,10 +358,65 @@ func (s *Server) broadcastStreamEvent(streamID string, event map[string]any) {
 		copies = append(copies, c)
 	}
 	s.wsMu.RUnlock()
-
 	for _, c := range copies {
 		_ = c.writeJSON(event)
 	}
+
+	// Topic registry clients
+	s.registry.broadcast("stream:"+streamID, event)
+
+	// Also fan out summary to "streams" topic for list views
+	if event["type"] == "stream_updated" {
+		s.registry.broadcast("streams", event)
+	}
+}
+
+func (s *Server) broadcastStreamEventExcluding(streamID string, exclude *streamWSClient, event map[string]any) {
+	// Legacy per-stream WS clients
+	s.wsMu.RLock()
+	clients := s.wsClients[streamID]
+	copies := make([]*streamWSClient, 0, len(clients))
+	for c := range clients {
+		if c != exclude {
+			copies = append(copies, c)
+		}
+	}
+	s.wsMu.RUnlock()
+	for _, c := range copies {
+		_ = c.writeJSON(event)
+	}
+
+	// Topic registry clients
+	s.registry.broadcastExcluding("stream:"+streamID, exclude, event)
+}
+
+func (s *Server) getPeers(streamID string) []map[string]string {
+	// Merge legacy and topic registry peers
+	seen := make(map[string]struct{})
+	var peers []map[string]string
+
+	s.wsMu.RLock()
+	for c := range s.wsClients[streamID] {
+		if _, dup := seen[c.sessionID]; !dup {
+			seen[c.sessionID] = struct{}{}
+			peers = append(peers, map[string]string{
+				"session_id": c.sessionID,
+				"color":      c.color,
+			})
+		}
+	}
+	s.wsMu.RUnlock()
+
+	for _, c := range s.registry.peers("stream:" + streamID) {
+		if _, dup := seen[c.sessionID]; !dup {
+			seen[c.sessionID] = struct{}{}
+			peers = append(peers, map[string]string{
+				"session_id": c.sessionID,
+				"color":      c.color,
+			})
+		}
+	}
+	return peers
 }
 
 func (s *Server) closeWSClients(streamID string) {
@@ -206,4 +449,16 @@ func (c *streamWSClient) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.conn.Close()
+}
+
+// buildWFPacket encodes a waterfall frame for the browser:
+// [0x01][xbin u32 LE][zoom u16 LE][flags u16 LE][bins...]
+func buildWFPacket(frame kiwi.WFFrame) []byte {
+	packet := make([]byte, 1+4+2+2+len(frame.Bins))
+	packet[0] = wsPacketTypeWaterfall
+	binary.LittleEndian.PutUint32(packet[1:5], frame.XBin)
+	binary.LittleEndian.PutUint16(packet[5:7], frame.Zoom)
+	binary.LittleEndian.PutUint16(packet[7:9], frame.Flags)
+	copy(packet[9:], frame.Bins)
+	return packet
 }

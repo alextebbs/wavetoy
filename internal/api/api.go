@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -21,14 +22,18 @@ type Server struct {
 	db            *db.DB
 	streamManager *streammgr.Manager
 	wsUpgrader    websocket.Upgrader
+	registry      *topicRegistry
 	wsMu          sync.RWMutex
 	wsClients     map[string]map[*streamWSClient]struct{}
 	frontendDist  string
 }
 
 type streamWSClient struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn      *websocket.Conn
+	mu        sync.Mutex
+	sessionID string
+	color     string
+	joinedAt  time.Time
 }
 
 func New(database *db.DB) *Server {
@@ -38,6 +43,7 @@ func New(database *db.DB) *Server {
 		wsUpgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		registry:     newTopicRegistry(),
 		wsClients:    make(map[string]map[*streamWSClient]struct{}),
 		frontendDist: filepath.Join("frontend", "dist"),
 	}
@@ -60,6 +66,8 @@ func (s *Server) Router() http.Handler {
 		api.Patch("/streams/{id}", s.patchStream)
 		api.Delete("/streams/{id}", s.deleteStream)
 		api.Get("/streams/{id}/ws", s.streamWS)
+		api.Post("/streams/{id}/capture", s.captureStream)
+		api.Get("/ws", s.globalWS)
 	})
 
 	r.Get("/*", s.serveFrontend)

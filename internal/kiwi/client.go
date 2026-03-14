@@ -30,7 +30,8 @@ type Config struct {
 }
 
 type Client struct {
-	conn *websocket.Conn
+	conn  *websocket.Conn
+	label string
 
 	closeOnce sync.Once
 	writeMu   sync.Mutex
@@ -48,6 +49,7 @@ type Client struct {
 	sndCompressedIn    atomic.Int64
 	sndUncompressedIn  atomic.Int64
 	sndQueueDropFrames atomic.Int64
+	sndFirstLogged     atomic.Bool
 }
 
 type Stats struct {
@@ -58,32 +60,49 @@ type Stats struct {
 	SNDQueueDropFrames int64 `json:"snd_queue_drop_frames"`
 }
 
-func Connect(ctx context.Context, cfg Config) (*Client, error) {
+// ConnectTimestamp returns a timestamp suitable for pairing SND + W/F connections
+// into a single KiwiSDR channel slot.
+func ConnectTimestamp() int64 {
+	return time.Now().Unix()
+}
+
+func Connect(ctx context.Context, cfg Config, timestamp int64) (*Client, error) {
 	scheme := "ws"
 	if cfg.UseTLS {
 		scheme = "wss"
 	}
 
+	if timestamp == 0 {
+		timestamp = time.Now().Unix()
+	}
+
 	endpoint := url.URL{
 		Scheme: scheme,
 		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Path:   fmt.Sprintf("/%d/SND", time.Now().Unix()),
+		Path:   fmt.Sprintf("/%d/SND", timestamp),
 	}
+
+	label := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	log.Printf("[KIWI] dialing %s endpoint=%s", label, endpoint.String())
 
 	dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, endpoint.String(), nil)
+	conn, resp, err := dialer.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
+		log.Printf("[KIWI] dial failed %s: %v", label, err)
 		return nil, err
 	}
+	log.Printf("[KIWI] connected %s (http_status=%d)", label, resp.StatusCode)
 
 	client := &Client{
-		conn: conn,
-		done: make(chan struct{}),
-		pcm:  make(chan []byte, 64),
+		conn:  conn,
+		label: label,
+		done:  make(chan struct{}),
+		pcm:   make(chan []byte, 64),
 	}
 	client.sampleRate.Store(12000)
 
 	if err := client.init(cfg); err != nil {
+		log.Printf("[KIWI] init failed %s: %v", label, err)
 		client.Close()
 		return nil, err
 	}
@@ -118,6 +137,7 @@ func (c *Client) Stats() Stats {
 func (c *Client) Close() error {
 	var closeErr error
 	c.closeOnce.Do(func() {
+		log.Printf("[KIWI] closing connection %s", c.label)
 		close(c.done)
 		closeErr = c.conn.Close()
 		close(c.pcm)
@@ -171,10 +191,10 @@ func buildTuningCommands(cfg Config) []string {
 	passbandLo := cfg.BandwidthLoHz
 	passbandHi := cfg.BandwidthHiHz
 	if passbandLo == 0 {
-		passbandLo = -5000
+		passbandLo = -4900
 	}
 	if passbandHi == 0 {
-		passbandHi = 5000
+		passbandHi = 4900
 	}
 
 	cmds := []string{
@@ -208,10 +228,14 @@ func (c *Client) readLoop() {
 	for {
 		msgType, payload, err := c.conn.ReadMessage()
 		if err != nil {
+			log.Printf("[KIWI] << %s read_loop exiting: %v", c.label, err)
 			return
 		}
 
 		if msgType != websocket.BinaryMessage || len(payload) < 3 {
+			if msgType == websocket.TextMessage {
+				log.Printf("[KIWI] << %s text_msg=%q", c.label, string(payload))
+			}
 			continue
 		}
 
@@ -231,6 +255,10 @@ func (c *Client) readLoop() {
 				} else {
 					c.sndUncompressedIn.Add(1)
 				}
+				if c.sndFirstLogged.CompareAndSwap(false, true) {
+					compressed := flags&SND_FLAG_COMPRESSED != 0
+					log.Printf("[KIWI] << %s first SND frame: bytes=%d compressed=%v flags=0x%02x", c.label, len(body)-7, compressed, flags)
+				}
 			}
 			pcm, ok := c.processSND(body)
 			if !ok || len(pcm) == 0 {
@@ -240,7 +268,7 @@ func (c *Client) readLoop() {
 			case c.pcm <- pcm:
 			default:
 				c.sndQueueDropFrames.Add(1)
-				log.Printf("kiwi: dropping audio frame (slow consumer)")
+				log.Printf("[KIWI] << %s dropping audio frame (slow consumer), queue_drops=%d", c.label, c.sndQueueDropFrames.Load())
 			}
 		}
 	}
@@ -265,6 +293,9 @@ func (c *Client) keepAliveLoop() {
 func (c *Client) send(cmd string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if cmd != "SET keepalive" {
+		log.Printf("[KIWI] >> %s cmd=%q", c.label, cmd)
+	}
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(cmd))
 }
 
@@ -274,6 +305,11 @@ func (c *Client) processMSG(body []byte) {
 	}
 	// Kiwi MSG payload includes one leading byte that clients skip.
 	text := string(body[1:])
+	if len(text) > 200 {
+		log.Printf("[KIWI] << %s MSG (truncated, %d bytes): %.200s...", c.label, len(text), text)
+	} else {
+		log.Printf("[KIWI] << %s MSG: %s", c.label, text)
+	}
 	for _, pair := range strings.Split(text, " ") {
 		if pair == "" {
 			continue

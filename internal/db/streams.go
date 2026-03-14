@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/segmentio/ksuid"
 )
@@ -15,6 +16,7 @@ var (
 	ErrSourceNotFound    = errors.New("source not found")
 	ErrSourceUnavailable = errors.New("source unavailable")
 	ErrSourceAtCapacity  = errors.New("source at listener capacity")
+	ErrVersionConflict   = errors.New("version conflict")
 )
 
 type CreateStreamParams struct {
@@ -73,6 +75,7 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		ActivityDetectionEnabled: false,
 		ActivitySensitivity:      0.5,
 		State:                    "created",
+		Version:                  1,
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
@@ -81,16 +84,16 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		INSERT INTO streams (
 			id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 			mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-			activity_sensitivity, state, created_at, updated_at
+			activity_sensitivity, state, version, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11, $12,
-			$13, $14, $15, $16
+			$13, $14, $15, $16, $17
 		)
 	`,
 		stream.ID, stream.TenantID, stream.SourceID, stream.FrequencyKHz, stream.BandwidthLowHz, stream.BandwidthHighHz,
 		stream.Mode, stream.Name, stream.AGCOn, stream.AGCGainDB, stream.BufferMinutes, stream.ActivityDetectionEnabled,
-		stream.ActivitySensitivity, stream.State, stream.CreatedAt, stream.UpdatedAt,
+		stream.ActivitySensitivity, stream.State, stream.Version, stream.CreatedAt, stream.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -98,7 +101,11 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 	return stream, nil
 }
 
-func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p UpdateStreamParams) (*models.Stream, error) {
+// UpdateStream applies an update. If baseVersion > 0, it performs an atomic
+// compare-and-swap: the update only succeeds when the current DB version
+// matches baseVersion. On mismatch, ErrVersionConflict is returned.
+// If baseVersion == 0, the version check is skipped (REST compat).
+func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p UpdateStreamParams, baseVersion int64) (*models.Stream, error) {
 	source, err := db.GetSourceByID(ctx, p.SourceID)
 	if err != nil {
 		return nil, err
@@ -113,24 +120,53 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 		return nil, ErrSourceAtCapacity
 	}
 
-	tag, err := db.Pool.Exec(ctx, `
-		UPDATE streams
-		SET source_id = $1,
-		    frequency_khz = $2,
-		    bandwidth_low_hz = $3,
-		    bandwidth_high_hz = $4,
-		    mode = $5,
-		    name = $6,
-		    agc_on = $7,
-		    agc_gain_db = $8,
-		    buffer_minutes = $9,
-		    updated_at = now()
-		WHERE id = $10 AND tenant_id = $11
-	`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, streamID, tenantID)
+	var tag pgconn.CommandTag
+	if baseVersion > 0 {
+		tag, err = db.Pool.Exec(ctx, `
+			UPDATE streams
+			SET source_id = $1,
+			    frequency_khz = $2,
+			    bandwidth_low_hz = $3,
+			    bandwidth_high_hz = $4,
+			    mode = $5,
+			    name = $6,
+			    agc_on = $7,
+			    agc_gain_db = $8,
+			    buffer_minutes = $9,
+			    version = version + 1,
+			    updated_at = now()
+			WHERE id = $10 AND tenant_id = $11 AND version = $12
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, streamID, tenantID, baseVersion)
+	} else {
+		tag, err = db.Pool.Exec(ctx, `
+			UPDATE streams
+			SET source_id = $1,
+			    frequency_khz = $2,
+			    bandwidth_low_hz = $3,
+			    bandwidth_high_hz = $4,
+			    mode = $5,
+			    name = $6,
+			    agc_on = $7,
+			    agc_gain_db = $8,
+			    buffer_minutes = $9,
+			    version = version + 1,
+			    updated_at = now()
+			WHERE id = $10 AND tenant_id = $11
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, streamID, tenantID)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
+		if baseVersion > 0 {
+			existing, getErr := db.GetStreamByID(ctx, streamID)
+			if getErr != nil {
+				return nil, getErr
+			}
+			if existing != nil {
+				return nil, ErrVersionConflict
+			}
+		}
 		return nil, nil
 	}
 	return db.GetStreamByID(ctx, streamID)
@@ -141,13 +177,15 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, created_at, updated_at
+		       activity_sensitivity, state, version, wf_view_start_khz, wf_view_end_khz,
+		       created_at, updated_at
 		FROM streams
 		WHERE id = $1
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-		&stream.ActivitySensitivity, &stream.State, &stream.CreatedAt, &stream.UpdatedAt,
+		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+		&stream.CreatedAt, &stream.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -165,7 +203,8 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, created_at, updated_at
+		       activity_sensitivity, state, version, wf_view_start_khz, wf_view_end_khz,
+		       created_at, updated_at
 		FROM streams
 		WHERE tenant_id = $1
 		ORDER BY updated_at DESC
@@ -182,7 +221,8 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		if err := rows.Scan(
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-			&stream.ActivitySensitivity, &stream.State, &stream.CreatedAt, &stream.UpdatedAt,
+			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+			&stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -200,6 +240,13 @@ func (db *DB) UpdateStreamState(ctx context.Context, streamID, state string) err
 		return fmt.Errorf("stream %s not found", streamID)
 	}
 	return nil
+}
+
+func (db *DB) UpdateStreamView(ctx context.Context, streamID string, startKHz, endKHz float64) error {
+	_, err := db.Pool.Exec(ctx, `
+		UPDATE streams SET wf_view_start_khz = $1, wf_view_end_khz = $2 WHERE id = $3
+	`, startKHz, endKHz, streamID)
+	return err
 }
 
 func (db *DB) DeleteStream(ctx context.Context, streamID, tenantID string) (bool, error) {

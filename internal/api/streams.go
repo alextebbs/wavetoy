@@ -111,6 +111,7 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, stream)
+	s.BroadcastStreamCreated(stream)
 }
 
 func (s *Server) patchStream(w http.ResponseWriter, r *http.Request) {
@@ -136,15 +137,16 @@ func (s *Server) patchStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, apiErr := s.applyPatchStream(r.Context(), existing, req)
+	stream, apiErr := s.applyPatchStream(r.Context(), existing, req, 0)
 	if apiErr != nil {
 		writeError(w, apiErr.Status, apiErr.Error, apiErr.Code)
 		return
 	}
 	writeJSON(w, http.StatusOK, stream)
 	s.broadcastStreamEvent(stream.ID, map[string]any{
-		"type":   "stream_updated",
-		"stream": stream,
+		"type":        "stream_updated",
+		"stream":      stream,
+		"sample_rate": s.streamManager.SampleRate(stream.ID),
 	})
 }
 
@@ -184,14 +186,16 @@ func (s *Server) deleteStream(w http.ResponseWriter, r *http.Request) {
 		"type":      "stream_deleted",
 		"stream_id": streamID,
 	})
+	s.BroadcastStreamDeleted(streamID)
 	s.closeWSClients(streamID)
+	s.registry.closeAll("stream:" + streamID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      streamID,
 		"deleted": true,
 	})
 }
 
-func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, req patchStreamRequest) (*models.Stream, *patchStreamError) {
+func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, req patchStreamRequest, baseVersion int64) (*models.Stream, *patchStreamError) {
 	updated := db.UpdateStreamParams{
 		SourceID:        existing.SourceID,
 		FrequencyKHz:    existing.FrequencyKHz,
@@ -264,9 +268,11 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "no fields provided to update", Code: "VALIDATION"}
 	}
 
-	stream, err := s.db.UpdateStream(ctx, existing.ID, db.DefaultTenantID, updated)
+	stream, err := s.db.UpdateStream(ctx, existing.ID, db.DefaultTenantID, updated, baseVersion)
 	if err != nil {
 		switch {
+		case errors.Is(err, db.ErrVersionConflict):
+			return nil, &patchStreamError{Status: http.StatusConflict, Error: "patch based on stale version", Code: "CONFLICT"}
 		case errors.Is(err, db.ErrSourceNotFound):
 			return nil, &patchStreamError{Status: http.StatusNotFound, Error: "source not found", Code: "NOT_FOUND"}
 		case errors.Is(err, db.ErrSourceUnavailable):

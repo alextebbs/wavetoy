@@ -1,7 +1,9 @@
 import { SourceDetailsPanel } from "@/components/source-details-panel";
 import { SourceMapPicker } from "@/components/source-map-picker";
+import { SourceMiniMap } from "@/components/source-mini-map";
 import { BottomDrawer } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   type MapSourceCounts,
@@ -9,11 +11,13 @@ import {
   type Stream,
   createStream,
   getMapSources,
+  getSessionColor,
+  getSessionId,
   listStreams,
 } from "@/lib/api";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export function StreamsPage() {
   const navigate = useNavigate();
@@ -21,7 +25,7 @@ export function StreamsPage() {
   const [streams, setStreams] = useState<Stream[]>([]);
   const [error, setError] = useState("");
 
-  const [name, setName] = useState("Group Stream");
+  const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
   const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
@@ -60,10 +64,95 @@ export function StreamsPage() {
     }
   }, []);
 
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectBackoffRef = useRef(1000);
+  const intentionalCloseRef = useRef(false);
+
+  const connectWS = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      intentionalCloseRef.current = true;
+      wsRef.current.close();
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(
+      `${protocol}//${window.location.host}/api/ws`,
+    );
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      intentionalCloseRef.current = false;
+      reconnectBackoffRef.current = 1000;
+      ws.send(
+        JSON.stringify({
+          type: "hello",
+          session_id: getSessionId(),
+          color: getSessionColor(),
+        }),
+      );
+      ws.send(
+        JSON.stringify({
+          type: "subscribe",
+          topics: ["streams"],
+        }),
+      );
+    };
+
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string") return;
+      try {
+        const msg = JSON.parse(ev.data) as {
+          type?: string;
+          stream?: Stream;
+          stream_id?: string;
+        };
+        if (msg.type === "stream_created" && msg.stream) {
+          setStreams((prev) => [msg.stream!, ...prev]);
+        } else if (msg.type === "stream_deleted" && msg.stream_id) {
+          setStreams((prev) =>
+            prev.filter((s) => s.id !== msg.stream_id),
+          );
+        } else if (msg.type === "stream_updated" && msg.stream) {
+          setStreams((prev) =>
+            prev.map((s) =>
+              s.id === msg.stream!.id ? msg.stream! : s,
+            ),
+          );
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    ws.onclose = () => {
+      if (intentionalCloseRef.current) return;
+      const delay = reconnectBackoffRef.current;
+      reconnectBackoffRef.current = Math.min(delay * 2, 30000);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        connectWS();
+      }, delay);
+    };
+  }, []);
+
   useEffect(() => {
     void refreshStreams();
     void refreshMapSources();
-  }, [refreshStreams, refreshMapSources]);
+    connectWS();
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      intentionalCloseRef.current = true;
+      wsRef.current?.close();
+    };
+  }, [refreshStreams, refreshMapSources, connectWS]);
 
   const openCreateDrawer = () => {
     setSelectedSource(null);
@@ -115,34 +204,47 @@ export function StreamsPage() {
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
-      <section className="space-y-2">
+      <section>
         {(loading ? [] : streams).length === 0 ? (
           <p className="font-xanh-mono py-10 text-center text-sm text-zinc-500">
             no streams :(
           </p>
         ) : (
-          streams.map((stream) => (
-            <Link
-              key={stream.id}
-              to="/streams/$streamId"
-              params={{ streamId: stream.id }}
-              className="block border-b py-3 transition-colors hover:bg-muted/20"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="font-medium">{stream.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {stream.frequency_khz} kHz {stream.mode} [
-                    {stream.bandwidth_low_hz}, {stream.bandwidth_high_hz}]
-                  </p>
-                  <p className="text-xs text-muted-foreground">ID: {stream.id}</p>
-                </div>
-                <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                  {stream.state}
-                </span>
-              </div>
-            </Link>
-          ))
+          <div className="grid gap-4">
+            {streams.map((stream) => {
+              const source = mapSources.find((s) => s.id === stream.source_id) ?? null;
+              return (
+                <Link
+                  key={stream.id}
+                  to="/streams/$streamId"
+                  params={{ streamId: stream.id }}
+                >
+                  <Card className="p-0 transition-colors hover:ring-foreground/25">
+                    <SourceMiniMap
+                      source={source}
+                      className="h-28 w-full overflow-hidden"
+                    />
+                    <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{stream.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {stream.frequency_khz} kHz · {stream.mode.toUpperCase()}
+                        </p>
+                        {source?.name && (
+                          <p className="truncate text-[11px] text-muted-foreground/60">
+                            {source.name}
+                          </p>
+                        )}
+                      </div>
+                      <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
+                        {stream.state}
+                      </span>
+                    </div>
+                  </Card>
+                </Link>
+              );
+            })}
+          </div>
         )}
       </section>
 
