@@ -1,0 +1,49 @@
+package models
+
+import (
+	"time"
+)
+
+type Source struct {
+	ID                string     `json:"id"`
+	Type              string     `json:"type"`
+	Host              string     `json:"host"`
+	Port              int        `json:"port"`
+	UseTLS            bool       `json:"use_tls"`
+	Latitude          *float64   `json:"latitude,omitempty"`
+	Longitude         *float64   `json:"longitude,omitempty"`
+	Name              string     `json:"name"`
+	MaxListeners      int        `json:"max_listeners"`
+	Available         bool       `json:"available"`
+	Users             int        `json:"users"`             // current listeners (from /status)
+	SNRDBM            *float64   `json:"snr_dbm,omitempty"` // avg SNR in dB
+	Antenna           *string    `json:"antenna,omitempty"`
+	Location          *string    `json:"location,omitempty"` // loc from /status
+	Grid              *string    `json:"grid,omitempty"`
+	Status            *string    `json:"status,omitempty"` // active, etc.
+	AntConnected      bool       `json:"ant_connected"`
+	Offline           bool       `json:"offline"`
+	LastHealthCheckAt *time.Time `json:"last_health_check_at,omitempty"`
+	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type Stream struct {
+	ID                       string    `json:"id"`
+	TenantID                 string    `json:"tenant_id"`
+	SourceID                 string    `json:"source_id"`
+	FrequencyKHz             float64   `json:"frequency_khz"`
+	BandwidthLowHz           int       `json:"bandwidth_low_hz"`
+	BandwidthHighHz          int       `json:"bandwidth_high_hz"`
+	Mode                     string    `json:"mode"`
+	Name                     string    `json:"name"`
+	AGCOn                    bool      `json:"agc_on"`
+	AGCGainDB                *float64  `json:"agc_gain_db,omitempty"`
+	BufferMinutes            int       `json:"buffer_minutes"`
+	ActivityDetectionEnabled bool      `json:"activity_detection_enabled"`
+	ActivitySensitivity      float64   `json:"activity_sensitivity"`
+	State                    string    `json:"state"`
+	CreatedAt                time.Time `json:"created_at"`
+	UpdatedAt                time.Time `json:"updated_at"`
+}

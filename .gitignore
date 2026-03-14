@@ -1,0 +1,9 @@
+/sdr-radio
+*.exe
+*.test
+*.out
+vendor/
+.env
+.env.*
+!.env.example
+*.log
