@@ -1,4 +1,5 @@
 import { useBandViewStore } from "@/lib/band-view-store";
+import { useThemeStore } from "@/lib/theme";
 import { useMemo } from "react";
 
 interface Tick {
@@ -46,6 +47,7 @@ interface FrequencyScaleProps {
 export function FrequencyScale({ className, onResizeStart }: FrequencyScaleProps) {
   const startKHz = useBandViewStore((s) => s.startKHz);
   const endKHz = useBandViewStore((s) => s.endKHz);
+  const d = useThemeStore((s) => s.theme.display);
 
   const ticks = useMemo(() => {
     const span = endKHz - startKHz;
@@ -72,8 +74,8 @@ export function FrequencyScale({ className, onResizeStart }: FrequencyScaleProps
 
   return (
     <div
-      className={`relative select-none overflow-hidden bg-zinc-950 ${className ?? ""}`}
-      style={{ height: 36 }}
+      className={`relative select-none overflow-hidden ${className ?? ""}`}
+      style={{ height: 36, backgroundColor: d.freqScaleBg }}
     >
       {ticks.map((tick) => (
         <div
@@ -82,16 +84,26 @@ export function FrequencyScale({ className, onResizeStart }: FrequencyScaleProps
           style={{ left: `${tick.xPercent}%` }}
         >
           <div
-            className={`w-px ${tick.major ? "h-3 bg-zinc-400" : "h-2 bg-zinc-600"}`}
+            className="w-px"
+            style={{
+              height: tick.major ? 12 : 8,
+              backgroundColor: tick.major ? d.freqScaleTickMajor : d.freqScaleTickMinor,
+            }}
           />
           {tick.label && (
-            <span className="absolute left-1/2 top-3.5 -translate-x-1/2 whitespace-nowrap text-[10px] leading-none text-zinc-400">
+            <span
+              className="absolute left-1/2 top-3.5 -translate-x-1/2 whitespace-nowrap text-[10px] leading-none"
+              style={{ color: d.freqScaleLabel }}
+            >
               {tick.label}
             </span>
           )}
         </div>
       ))}
-      <span className="absolute right-1.5 top-3.5 text-[9px] leading-none text-zinc-600">
+      <span
+        className="absolute right-1.5 top-3.5 text-[9px] leading-none"
+        style={{ color: d.freqScaleUnitLabel }}
+      >
         kHz
       </span>
       {onResizeStart && (

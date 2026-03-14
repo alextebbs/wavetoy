@@ -315,6 +315,27 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 			}
 		}
 	}()
+
+	s.startLogPumpForClient(streamID, client)
+}
+
+func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) {
+	logCh, unsubscribe, err := s.streamManager.SubscribeLogs(streamID)
+	if err != nil {
+		return
+	}
+
+	go func() {
+		defer unsubscribe()
+		for msg := range logCh {
+			if err := client.writeJSON(map[string]any{
+				"type":    "stream_log",
+				"message": msg,
+			}); err != nil {
+				return
+			}
+		}
+	}()
 }
 
 func (s *Server) evictStaleSession(newClient *streamWSClient) {

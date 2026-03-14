@@ -1,27 +1,14 @@
 import type { MapSourceCounts, Source } from "@/lib/api";
+import { useThemeStore } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import type { FeatureCollection } from "geojson";
 import WorldData from "geojson-world-map/lib/world";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import MapLibreMap, {
   Layer,
   Marker,
   Source as MapSource,
 } from "react-map-gl/maplibre";
-
-const BASE_STYLE = {
-  version: 8,
-  sources: {},
-  layers: [
-    {
-      id: "background",
-      type: "background",
-      paint: {
-        "background-color": "#000000",
-      },
-    },
-  ],
-};
 
 type SourceMapPickerProps = {
   sources: Source[];
@@ -39,16 +26,18 @@ function snrToDotColor(
   snr: number | undefined,
   minSNR: number,
   maxSNR: number,
+  mapColors: ReturnType<typeof useThemeStore.getState>["theme"]["map"],
 ) {
-  if (!Number.isFinite(snr)) return "#facc15";
+  if (!Number.isFinite(snr)) return mapColors.snrFallback;
   const range = maxSNR - minSNR;
   const t = range > 0 ? ((snr ?? minSNR) - minSNR) / range : 0.5;
   const clamped = Math.max(0, Math.min(1, t));
-  const hue = 8 + clamped * 112; // red-orange to green
-  return `hsl(${hue} 95% 55%)`;
+  const [lo, hi] = mapColors.snrHueRange;
+  const hue = lo + clamped * (hi - lo);
+  return `hsl(${hue} ${mapColors.snrSaturation}% ${mapColors.snrLightness}%)`;
 }
 
-export function SourceMapPicker({
+export const SourceMapPicker = memo(function SourceMapPicker({
   sources,
   counts,
   selectedSourceId,
@@ -57,6 +46,7 @@ export function SourceMapPicker({
   className,
   showCounts = true,
 }: SourceMapPickerProps) {
+  const mapColors = useThemeStore((s) => s.theme.map);
   const [hoveredID, setHoveredID] = useState<string | null>(null);
 
   const plottableSources = useMemo(
@@ -101,7 +91,17 @@ export function SourceMapPicker({
           initialViewState={{ longitude: 0, latitude: 20, zoom: 1.6 }}
           maxZoom={14}
           minZoom={1}
-          mapStyle={BASE_STYLE as never}
+          mapStyle={{
+            version: 8,
+            sources: {},
+            layers: [
+              {
+                id: "background",
+                type: "background",
+                paint: { "background-color": mapColors.background },
+              },
+            ],
+          } as never}
           attributionControl={false}
           dragRotate={false}
           touchPitch={false}
@@ -112,8 +112,8 @@ export function SourceMapPicker({
               id="country-lines"
               type="line"
               paint={{
-                "line-color": "#8a8a8a",
-                "line-opacity": 0.72,
+                "line-color": mapColors.countryLines,
+                "line-opacity": mapColors.countryLineOpacity,
                 "line-width": 1.1,
               }}
             />
@@ -156,16 +156,25 @@ export function SourceMapPicker({
                         source.snr_dbm,
                         snrStats.min,
                         snrStats.max,
+                        mapColors,
                       ),
-                      boxShadow: selected ? "0 0 0 1px #fde68a" : "none",
+                      boxShadow: selected
+                        ? `0 0 0 1px ${mapColors.selectedRing}`
+                        : "none",
                       transition:
                         "width 140ms ease, height 140ms ease, transform 140ms ease",
                     }}
                   />
                   {selected ? (
                     <>
-                      <span className="absolute left-1/2 top-1/2 h-[2px] w-[28px] -translate-x-1/2 -translate-y-1/2 bg-yellow-200/90" />
-                      <span className="absolute left-1/2 top-1/2 h-[28px] w-[2px] -translate-x-1/2 -translate-y-1/2 bg-yellow-200/90" />
+                      <span
+                        className="absolute left-1/2 top-1/2 h-[2px] w-[28px] -translate-x-1/2 -translate-y-1/2"
+                        style={{ backgroundColor: mapColors.crosshair }}
+                      />
+                      <span
+                        className="absolute left-1/2 top-1/2 h-[28px] w-[2px] -translate-x-1/2 -translate-y-1/2"
+                        style={{ backgroundColor: mapColors.crosshair }}
+                      />
                     </>
                   ) : null}
                 </button>
@@ -176,4 +185,4 @@ export function SourceMapPicker({
       </div>
     </div>
   );
-}
+});

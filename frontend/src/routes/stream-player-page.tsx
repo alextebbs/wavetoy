@@ -1,16 +1,12 @@
+import { AudioWaveform } from "@/components/audio-waveform";
+import { PostProcessingPanel } from "@/components/post-processing-panel";
 import { SourceDetailsPanel } from "@/components/source-details-panel";
 import { SourceMapPicker } from "@/components/source-map-picker";
 import { SourceMiniMap } from "@/components/source-mini-map";
 import { BottomDrawer } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Tooltip } from "@/components/ui/tooltip";
 import { SpectrumDisplay } from "@/components/spectrum/spectrum-display";
 import type { SpectrumHandle } from "@/components/spectrum/spectrum-display";
 import { BandViewport, computeOptimalWFConfig } from "@/components/waterfall/band-viewport";
@@ -20,6 +16,7 @@ import { WaterfallDisplay } from "@/components/waterfall/waterfall-display";
 import type { WaterfallHandle } from "@/components/waterfall/types";
 import { useBandViewStore } from "@/lib/band-view-store";
 import {
+  type FilterConfig,
   type MapSourceCounts,
   type Peer,
   type Source,
@@ -30,9 +27,10 @@ import {
   getSessionId,
   getStream,
 } from "@/lib/api";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { ChevronLeftIcon, DownloadIcon, PanelRightIcon } from "lucide-react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { DownloadIcon, PanelRightIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useThrottle } from "@/lib/timing";
 
 const AUDIO_TYPE = 0x02;
 const WATERFALL_TYPE = 0x01;
@@ -109,9 +107,11 @@ export function StreamPlayerPage() {
   const [pendingSourceId, setPendingSourceId] = useState("");
   const [hoveredSource, setHoveredSource] = useState<Source | null>(null);
   const [peers, setPeers] = useState<Peer[]>([]);
-  const [conflictToast, setConflictToast] = useState("");
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
+  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
+  const [editName, setEditName] = useState("");
   const setMaxBandwidth = useBandViewStore((s) => s.setMaxBandwidth);
   const setView = useBandViewStore((s) => s.setView);
   const setViewRemote = useBandViewStore((s) => s.setViewRemote);
@@ -120,6 +120,8 @@ export function StreamPlayerPage() {
   const waterfallRef = useRef<WaterfallHandle>(null);
   const spectrumRef = useRef<SpectrumHandle>(null);
 
+  const logContainerRef = useRef<HTMLDivElement>(null);
+  const logStickRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
   const versionRef = useRef<number>(0);
   const sessionIdRef = useRef(getSessionId());
@@ -153,6 +155,7 @@ export function StreamPlayerPage() {
     firTaps: new Float32Array(0),
     firTail: new Float32Array(0),
   });
+  const waveformSamplesRef = useRef<Float32Array>(new Float32Array(0));
 
   const log = useCallback((line: string) => {
     setLogLines((prev) => [
@@ -163,6 +166,25 @@ export function StreamPlayerPage() {
       },
     ]);
   }, []);
+
+  const onLogScroll = useCallback(() => {
+    const el = logContainerRef.current;
+    if (!el) return;
+    logStickRef.current =
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  }, []);
+
+  useEffect(() => {
+    const name = stream?.name;
+    document.title = name ? `${name} — wavetoy` : "wavetoy";
+    return () => { document.title = "wavetoy"; };
+  }, [stream?.name]);
+
+  useEffect(() => {
+    if (!logStickRef.current) return;
+    const el = logContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logLines]);
 
   const ensureAudio = useCallback(async () => {
     if (!audioCtxRef.current) {
@@ -399,6 +421,7 @@ export function StreamPlayerPage() {
             end_khz?: number;
             zoom?: number;
             center_khz?: number;
+            message?: string;
           };
           if (msg.type === "connected") {
             if (msg.sample_rate) streamRateRef.current = msg.sample_rate;
@@ -479,10 +502,10 @@ export function StreamPlayerPage() {
               setMode(msg.stream.mode);
               setLo(msg.stream.bandwidth_low_hz);
               setHi(msg.stream.bandwidth_high_hz);
-              setConflictToast("Settings changed by another listener");
-              setTimeout(() => setConflictToast(""), 3000);
             }
             log(`error: ${msg.error} (${msg.code})`);
+          } else if (msg.type === "stream_log" && msg.message) {
+            log(`[server] ${msg.message}`);
           } else if (msg.type === "wf_view_changed") {
             if (msg.start_khz != null && msg.end_khz != null) {
               setViewRemote(msg.start_khz, msg.end_khz);
@@ -532,6 +555,11 @@ export function StreamPlayerPage() {
         if (sample & 0x8000) sample -= 0x10000;
         pcm[i] = sample;
       }
+      const wfBuf = new Float32Array(count);
+      for (let i = 0; i < count; i++) {
+        wfBuf[i] = pcm[i] / 32768;
+      }
+      waveformSamplesRef.current = wfBuf;
       const outRate = audioCtxRef.current?.sampleRate ?? 48000;
       const resampled = resamplePCM(pcm, streamRateRef.current, outRate);
       if (resampled.length > 0) {
@@ -601,7 +629,7 @@ export function StreamPlayerPage() {
 
     const onMove = (ev: MouseEvent) => {
       const delta = ev.clientY - startY;
-      setSpectrumHeight(Math.max(60, Math.min(500, startHeight + delta)));
+      setSpectrumHeight(Math.max(0, Math.min(500, startHeight + delta)));
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
@@ -622,6 +650,8 @@ export function StreamPlayerPage() {
       mode?: string;
       bandwidth_low_hz?: number;
       bandwidth_high_hz?: number;
+      name?: string;
+      filters?: FilterConfig;
     },
     logLine?: string,
   ) => {
@@ -646,10 +676,15 @@ export function StreamPlayerPage() {
     sendPatch({ source_id: nextSourceID }, "source change sent");
   };
 
+  const onMapHoverSource = useCallback((source: Source | null) => {
+    setHoveredSource(source);
+  }, []);
+
+  const onMapSelectSource = useCallback((source: Source) => {
+    setPendingSourceId(source.id);
+  }, []);
+
   const onDeleteStream = async () => {
-    if (!window.confirm("Delete this stream? This cannot be undone.")) {
-      return;
-    }
     setDeleting(true);
     try {
       await deleteStream(streamId);
@@ -734,26 +769,28 @@ export function StreamPlayerPage() {
     lp.frequency.setTargetAtTime(lpHz, ctx.currentTime, 0.015);
   }, [hi, lo, mode]);
 
-  useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return;
-    }
+  const throttledAutoPatch = useThrottle(
+    (sid: string, freq: number, m: string, bwLo: number, bwHi: number) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const patch = {
+        source_id: sid,
+        frequency_khz: Number(freq),
+        mode: m,
+        bandwidth_low_hz: Number(bwLo),
+        bandwidth_high_hz: Number(bwHi),
+      };
+      const encoded = JSON.stringify(patch);
+      if (encoded === lastAutoPatchRef.current) return;
+      sendPatch(patch);
+      lastAutoPatchRef.current = encoded;
+    },
+    150,
+  );
 
-    const patch = {
-      source_id: sourceId,
-      frequency_khz: Number(frequency),
-      mode,
-      bandwidth_low_hz: Number(lo),
-      bandwidth_high_hz: Number(hi),
-    };
-    const encoded = JSON.stringify(patch);
-    if (encoded === lastAutoPatchRef.current) {
-      return;
-    }
-    sendPatch(patch);
-    lastAutoPatchRef.current = encoded;
-  }, [frequency, hi, lo, mode, sourceId]);
+  useEffect(() => {
+    throttledAutoPatch(sourceId, frequency, mode, lo, hi);
+  }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch]);
 
   useEffect(() => {
     void getStream(streamId)
@@ -788,116 +825,129 @@ export function StreamPlayerPage() {
   }, [connect, log, refreshMapSources, streamId]);
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden">
-      {/* ── Top bar ── */}
-      <header className="flex shrink-0 items-center gap-3 border-b bg-background px-4 py-2">
-        {/* Left: peers + name */}
-        <div className="flex min-w-0 items-center gap-2">
-          <div className="flex items-center gap-1.5">
-            {peers.map((p) => (
-              <span
-                key={p.session_id}
-                className="inline-block size-2.5 shrink-0 rounded-full"
-                style={{ backgroundColor: p.color }}
-                title={p.session_id.slice(0, 8)}
-              />
-            ))}
-          </div>
-          <Link to="/" className="shrink-0">
-            <Button variant="ghost" size="icon" className="size-7">
-              <ChevronLeftIcon className="size-4" />
-            </Button>
-          </Link>
-          <span className="truncate text-sm font-medium">
-            {stream?.name ?? "Stream"}
-          </span>
-          {status === "reconnecting" && (
-            <span className="shrink-0 text-xs text-amber-500">
-              reconnecting...
-            </span>
-          )}
-        </div>
-
-        {/* Center: frequency */}
-        <div className="flex flex-1 items-baseline justify-center gap-2">
-          <Input
-            type="text"
-            value={frequency}
-            onChange={(e) => {
-              const next = Number(e.target.value);
-              if (Number.isFinite(next)) setFrequency(next);
-            }}
-            className="font-xanh-mono h-auto w-48 border-none bg-transparent p-0 text-center text-3xl leading-none font-normal tracking-tight shadow-none focus-visible:ring-0 md:text-4xl"
-          />
-          <span className="text-xs uppercase tracking-widest text-muted-foreground">
-            kHz
-          </span>
-        </div>
-
-        {/* Right: mode + bandwidth + actions */}
-        <div className="flex shrink-0 items-center gap-2">
-          <Select value={mode} onValueChange={setMode}>
-            <SelectTrigger className="h-8 w-20 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m.toUpperCase()}
-                </SelectItem>
+    <div className="flex h-screen overflow-hidden">
+      {/* ── Left: top bar + waterfall area ── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* ── Top bar (waterfall area only) ── */}
+        <header className="flex shrink-0 items-center gap-3 border-b bg-background px-4 py-2">
+          {/* Left: name + peers + status */}
+          <div className="flex min-w-0 items-center gap-3">
+            <Tooltip content="Stream settings">
+              <button
+                className="font-xanh-mono min-w-0 truncate text-sm hover:text-muted-foreground transition-colors"
+                onClick={() => {
+                  setEditName(stream?.name ?? "");
+                  setStreamSettingsOpen(true);
+                }}
+              >
+                {stream?.name || "Untitled stream"}
+              </button>
+            </Tooltip>
+            <div className="flex items-center gap-1.5">
+              {peers.map((p) => (
+                <Tooltip key={p.session_id} content={`user ${p.session_id.slice(0, 8)} connected`}>
+                  <span
+                    className="inline-block size-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: p.color }}
+                  />
+                </Tooltip>
               ))}
-            </SelectContent>
-          </Select>
-          <div className="flex items-center gap-1">
-            <Input
-              type="number"
-              value={lo}
-              onChange={(e) => setLo(Number(e.target.value))}
-              className="h-8 w-20 text-xs"
-              title="Bandwidth low (Hz)"
-            />
-            <span className="text-xs text-muted-foreground">/</span>
-            <Input
-              type="number"
-              value={hi}
-              onChange={(e) => setHi(Number(e.target.value))}
-              className="h-8 w-20 text-xs"
-              title="Bandwidth high (Hz)"
-            />
+            </div>
+            {status !== "connected" && status !== "idle" && (
+              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                status === "connecting" || status === "reconnecting"
+                  ? "bg-primary/15 text-primary"
+                  : "bg-destructive/15 text-destructive"
+              }`}>
+                {status === "connecting" && "connecting"}
+                {status === "reconnecting" && "reconnecting"}
+                {status === "closed" && "disconnected"}
+                {status === "error" && "error"}
+              </span>
+            )}
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-8"
-            disabled={capturing || status !== "connected"}
-            onClick={() => void onCapture()}
-            title="Download ring buffer as WAV"
-          >
-            <DownloadIcon className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 text-xs text-destructive"
-            disabled={deleting}
-            onClick={() => void onDeleteStream()}
-          >
-            {deleting ? "..." : "Delete"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 shrink-0"
-            onClick={() => setSidebarOpen((v) => !v)}
-          >
-            <PanelRightIcon className="size-4" />
-          </Button>
-        </div>
-      </header>
 
-      {/* ── Body: two-column layout ── */}
-      <div className="flex min-h-0 flex-1">
-        {/* Left column: spectrum + freq scale + waterfall */}
+          {/* Center: frequency */}
+          <div className="flex flex-1 items-baseline justify-center gap-2">
+            <Tooltip content="Center frequency (kHz)">
+              <Input
+                type="text"
+                value={frequency}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  if (Number.isFinite(next)) setFrequency(next);
+                }}
+                className="font-xanh-mono h-auto w-48 border-none bg-transparent p-0 text-center text-3xl leading-none font-normal tracking-tight shadow-none focus-visible:ring-0 md:text-4xl"
+              />
+            </Tooltip>
+            <span className="text-xs uppercase tracking-widest text-muted-foreground">
+              kHz
+            </span>
+          </div>
+
+          {/* Right: mode + bandwidth + actions */}
+          <div className="flex shrink-0 items-center gap-2">
+            <Tooltip content="Demodulation mode">
+              <div className="flex h-8 rounded-md border border-border overflow-hidden">
+                {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setMode(m)}
+                    className={`px-2 text-xs font-medium transition-colors ${
+                      mode === m
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {m.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </Tooltip>
+            <div className="flex items-center gap-1">
+              <Tooltip content="Low cut (Hz)">
+                <Input
+                  type="number"
+                  value={lo}
+                  onChange={(e) => setLo(Number(e.target.value))}
+                  className="h-8 w-20 text-xs"
+                />
+              </Tooltip>
+              <span className="text-xs text-muted-foreground">/</span>
+              <Tooltip content="High cut (Hz)">
+                <Input
+                  type="number"
+                  value={hi}
+                  onChange={(e) => setHi(Number(e.target.value))}
+                  className="h-8 w-20 text-xs"
+                />
+              </Tooltip>
+            </div>
+            <Tooltip content="Download ring buffer">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                disabled={capturing || status !== "connected"}
+                onClick={() => void onCapture()}
+              >
+                <DownloadIcon className="size-4" />
+              </Button>
+            </Tooltip>
+            <Tooltip content="Toggle info panel">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                onClick={() => setSidebarOpen((v) => !v)}
+              >
+                <PanelRightIcon className="size-4" />
+              </Button>
+            </Tooltip>
+          </div>
+        </header>
+
+        {/* Spectrum + freq scale + waterfall */}
         <BandViewport
           className="min-w-0 flex-1"
           onClickFrequency={(freqKHz) => {
@@ -926,6 +976,11 @@ export function StreamPlayerPage() {
             centerFreqKHz={frequency}
             passbandLowHz={lo}
             passbandHighHz={hi}
+            onFrequencyChange={setFrequency}
+            onBandwidthChange={(newLo, newHi) => {
+              setLo(newLo);
+              setHi(newHi);
+            }}
           />
           <SpectrumDisplay
             ref={spectrumRef}
@@ -938,68 +993,160 @@ export function StreamPlayerPage() {
             className="min-h-0 flex-1"
           />
         </BandViewport>
-
-        {/* Right column: source + logs (collapsible + resizable) */}
-        {sidebarOpen && (
-          <aside
-            className="relative flex shrink-0 flex-col"
-            style={{ width: sidebarWidth }}
-          >
-            {/* Resize handle */}
-            <div
-              className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize border-l transition-colors hover:border-primary"
-              onMouseDown={onResizeStart}
-            />
-            <div className="flex min-h-0 flex-1 flex-col overflow-auto pl-1">
-              <section className="border-b">
-                <SourceMiniMap source={currentSource} />
-                <div className="flex items-center justify-between px-3 pt-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                    Source
-                  </h3>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 text-xs"
-                    onClick={() => {
-                      setPendingSourceId("");
-                      setHoveredSource(null);
-                      setSourceDrawerOpen(true);
-                      if (mapSources.length === 0 && !mapLoading) {
-                        void refreshMapSources();
-                      }
-                    }}
-                  >
-                    Change
-                  </Button>
-                </div>
-                <div className="px-3 pb-3">
-                  <SourceDetailsPanel
-                    source={currentSource}
-                    selectedSourceId={sourceId}
-                  />
-                </div>
-              </section>
-
-              <section className="flex min-h-0 flex-1 flex-col">
-                <h3 className="px-3 py-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                  Logs
-                </h3>
-                <div className="min-h-0 flex-1 overflow-auto px-3 pb-3 text-[11px] leading-relaxed text-muted-foreground">
-                  {logLines.map((line) => (
-                    <div key={line.id}>{line.text}</div>
-                  ))}
-                </div>
-              </section>
-            </div>
-          </aside>
-        )}
       </div>
 
-      {/* ── Toasts ── */}
-      {conflictToast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-md border bg-background px-4 py-2 text-sm shadow-lg">
-          {conflictToast}
+      {/* Right: info panel (full height, animated) */}
+      <aside
+        className="relative flex shrink-0 flex-col border-l overflow-hidden transition-[width] duration-200 ease-in-out"
+        style={{ width: sidebarOpen ? sidebarWidth : 0, borderLeftWidth: sidebarOpen ? 1 : 0 }}
+      >
+        {/* Resize handle */}
+        <div
+          className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize transition-colors hover:border-l hover:border-primary"
+          onMouseDown={onResizeStart}
+        />
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-auto pl-1"
+          style={{ minWidth: sidebarWidth }}
+        >
+          <section className="border-b">
+            <SourceMiniMap source={currentSource} />
+            <div className="flex items-center justify-between px-3 pt-2">
+              <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                Source
+              </h3>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={() => {
+                  setPendingSourceId("");
+                  setHoveredSource(null);
+                  setSourceDrawerOpen(true);
+                  if (mapSources.length === 0 && !mapLoading) {
+                    void refreshMapSources();
+                  }
+                }}
+              >
+                <RefreshCwIcon className="size-3" />
+              </Button>
+            </div>
+            <div className="px-3 pb-3">
+              <SourceDetailsPanel
+                source={currentSource}
+                selectedSourceId={sourceId}
+              />
+            </div>
+          </section>
+
+          <section className="border-b">
+            <AudioWaveform
+              samplesRef={waveformSamplesRef}
+              height={56}
+            />
+            <div className="px-3 pb-3 pt-2">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              Post-Processing
+            </h3>
+            <PostProcessingPanel
+              filters={stream?.filters ?? {}}
+              onFiltersChange={(filters) =>
+                sendPatch({ filters }, "filters updated")
+              }
+              samplesRef={waveformSamplesRef}
+            />
+            </div>
+          </section>
+
+          <section className="flex min-h-0 flex-1 flex-col">
+            <h3 className="px-3 py-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              Logs
+            </h3>
+            <div
+              ref={logContainerRef}
+              onScroll={onLogScroll}
+              className="min-h-0 flex-1 overflow-auto px-3 pb-3 text-[11px] leading-relaxed text-muted-foreground"
+            >
+              {logLines.map((line) => (
+                <div key={line.id}>{line.text}</div>
+              ))}
+            </div>
+          </section>
+
+        </div>
+      </aside>
+
+      {/* ── Stream settings modal ── */}
+      {streamSettingsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setStreamSettingsOpen(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setStreamSettingsOpen(false);
+          }}
+        >
+          <div className="w-80 rounded-lg border bg-background p-4 shadow-lg">
+            <Input
+              autoFocus
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const name = editName.trim();
+                  if (name && name !== stream?.name) {
+                    sendPatch({ name }, "renamed stream");
+                    if (stream) setStream({ ...stream, name });
+                  }
+                  setStreamSettingsOpen(false);
+                  setEditName("");
+                }
+              }}
+              className="mb-4 h-8 text-sm"
+              placeholder="Untitled stream"
+            />
+            <div className="flex items-center justify-between">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs text-destructive"
+                disabled={deleting}
+                onClick={() => void onDeleteStream()}
+              >
+                <XIcon className="size-3" />
+                {deleting ? "..." : "Kill"}
+              </Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => {
+                    setStreamSettingsOpen(false);
+                    setEditName("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => {
+                    const name = editName.trim();
+                    if (name && name !== stream?.name) {
+                      sendPatch({ name }, "renamed stream");
+                      if (stream) setStream({ ...stream, name });
+                    }
+                    setStreamSettingsOpen(false);
+                    setEditName("");
+                  }}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1024,10 +1171,8 @@ export function StreamPlayerPage() {
                   selectedSourceId={pendingSourceId}
                   showCounts={false}
                   className="h-full"
-                  onHoverSource={setHoveredSource}
-                  onSelectSource={(source) => {
-                    setPendingSourceId(source.id);
-                  }}
+                  onHoverSource={onMapHoverSource}
+                  onSelectSource={onMapSelectSource}
                 />
               )}
             </div>

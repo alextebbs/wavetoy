@@ -5,19 +5,19 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-md border border-yellow-500/40 bg-clip-padding text-xs font-medium tracking-wider uppercase whitespace-nowrap transition-all outline-none select-none focus-visible:border-yellow-500 focus-visible:ring-3 focus-visible:ring-yellow-400/40 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/button inline-flex shrink-0 items-center justify-center rounded-md border border-primary/40 bg-clip-padding text-xs font-medium tracking-wider uppercase whitespace-nowrap transition-all outline-none select-none focus-visible:border-primary focus-visible:ring-3 focus-visible:ring-primary/40 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
-        default: "bg-yellow-400 text-yellow-950 hover:bg-yellow-300",
+        default: "bg-primary text-primary-foreground hover:bg-primary/85",
         outline:
-          "border-yellow-500/40 bg-yellow-50 text-yellow-900 hover:bg-yellow-100 aria-expanded:bg-yellow-100 aria-expanded:text-yellow-950 dark:border-yellow-400/50 dark:bg-yellow-300/20 dark:text-yellow-100 dark:hover:bg-yellow-300/30",
+          "border-primary/40 bg-primary/10 text-foreground hover:bg-primary/20 aria-expanded:bg-primary/20",
         secondary:
-          "bg-yellow-300 text-yellow-950 hover:bg-yellow-200 aria-expanded:bg-yellow-200 aria-expanded:text-yellow-950",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary/80",
         ghost:
-          "border-transparent bg-transparent text-yellow-800 shadow-none hover:bg-yellow-100 hover:text-yellow-950 aria-expanded:bg-yellow-100 aria-expanded:text-yellow-950 focus-visible:border-transparent dark:text-yellow-100 dark:hover:bg-yellow-300/20",
-        destructive: "bg-yellow-500 text-yellow-950 hover:bg-yellow-400",
-        link: "text-yellow-700 underline-offset-4 hover:underline dark:text-yellow-300",
+          "border-transparent bg-transparent text-muted-foreground shadow-none hover:bg-primary/10 hover:text-foreground aria-expanded:bg-primary/10 focus-visible:border-transparent",
+        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/85 border-destructive/50",
+        link: "text-primary underline-offset-4 hover:underline border-transparent",
       },
       size: {
         default:

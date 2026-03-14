@@ -5,6 +5,7 @@ import {
   useRef,
 } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
+import { useThemeStore } from "@/lib/theme";
 import { WaterfallRenderer } from "./waterfall-renderer";
 import type { ColorMapName, WaterfallHandle } from "./types";
 
@@ -16,7 +17,9 @@ interface WaterfallDisplayProps {
 export const WaterfallDisplay = forwardRef<
   WaterfallHandle,
   WaterfallDisplayProps
->(function WaterfallDisplay({ className, colorMap = "turbo" }, ref) {
+>(function WaterfallDisplay({ className, colorMap }, ref) {
+  const defaultColorMap = useThemeStore((s) => s.theme.display.defaultColorMap);
+  const effectiveColorMap = colorMap ?? defaultColorMap;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WaterfallRenderer | null>(null);
@@ -54,7 +57,7 @@ export const WaterfallDisplay = forwardRef<
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const renderer = new WaterfallRenderer(canvas, { colorMap });
+    const renderer = new WaterfallRenderer(canvas, { colorMap: effectiveColorMap });
     rendererRef.current = renderer;
 
     const s = useBandViewStore.getState();
@@ -83,7 +86,7 @@ export const WaterfallDisplay = forwardRef<
       renderer.destroy();
       rendererRef.current = null;
     };
-  }, [colorMap]);
+  }, [effectiveColorMap]);
 
   return (
     <div

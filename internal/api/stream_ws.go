@@ -161,6 +161,22 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[WS] waterfall not available for stream %s: %v", streamID, wfErr)
 	}
 
+	// Start log pump
+	logCh, logUnsub, logErr := s.streamManager.SubscribeLogs(streamID)
+	if logErr == nil {
+		defer logUnsub()
+		go func() {
+			for msg := range logCh {
+				if err := client.writeJSON(map[string]any{
+					"type":    "stream_log",
+					"message": msg,
+				}); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
 	// Re-read the stream so the version is fresh
 	stream, _ = s.db.GetStreamByID(r.Context(), streamID)
 	_ = client.writeJSON(map[string]any{
@@ -324,6 +340,9 @@ func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []s
 	}
 	if patch.BufferMinutes != nil && *patch.BufferMinutes != existing.BufferMinutes {
 		fields = append(fields, "buffer_minutes")
+	}
+	if patch.Filters != nil {
+		fields = append(fields, "filters")
 	}
 	return fields
 }

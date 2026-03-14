@@ -85,7 +85,7 @@ export const SpectrumDisplay = forwardRef<SpectrumHandle, SpectrumDisplayProps>(
     return (
       <div
         ref={containerRef}
-        className={`relative bg-[#09090b] ${className ?? ""}`}
+        className={`relative bg-background ${className ?? ""}`}
         style={style}
       >
         <canvas

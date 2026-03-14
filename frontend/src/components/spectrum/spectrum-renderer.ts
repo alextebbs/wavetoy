@@ -1,3 +1,9 @@
+import { useThemeStore } from "@/lib/theme";
+
+function getDisplay() {
+  return useThemeStore.getState().theme.display;
+}
+
 export interface SpectrumRendererOptions {
   minLevel?: number;
   maxLevel?: number;
@@ -130,7 +136,7 @@ export class SpectrumRenderer {
     this.canvas.width = width;
     this.canvas.height = height;
     this.rebuildGradient();
-    this.dirty = true;
+    this.render();
   }
 
   startRenderLoop(): void {
@@ -191,11 +197,9 @@ export class SpectrumRenderer {
     const { height } = this.canvas;
     if (height <= 0) return;
     const g = this.ctx.createLinearGradient(0, 0, 0, height);
-    g.addColorStop(0, "#ef4444");
-    g.addColorStop(0.25, "#f59e0b");
-    g.addColorStop(0.45, "#22c55e");
-    g.addColorStop(0.7, "#06b6d4");
-    g.addColorStop(1, "#1e3a5f");
+    for (const [pos, color] of getDisplay().spectrumGradientStops) {
+      g.addColorStop(pos, color);
+    }
     this.gradient = g;
   }
 
@@ -204,7 +208,7 @@ export class SpectrumRenderer {
     if (width === 0 || height === 0) return;
     const ctx = this.ctx;
 
-    ctx.fillStyle = "#09090b";
+    ctx.fillStyle = getDisplay().spectrumBg;
     ctx.fillRect(0, 0, width, height);
 
     if (!this.displayBins) return;
@@ -220,10 +224,11 @@ export class SpectrumRenderer {
     const step = range > 60 ? 20 : 10;
     const firstDb = Math.ceil(this.minLevel / step) * step;
 
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    const d = getDisplay();
+    ctx.strokeStyle = d.spectrumGridLine;
     ctx.lineWidth = 1;
     ctx.font = "10px system-ui, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fillStyle = d.spectrumGridLabel;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
@@ -252,7 +257,7 @@ export class SpectrumRenderer {
 
     if (x2 < 0 || x1 > w) return;
 
-    this.ctx.fillStyle = "rgba(255,255,255,0.1)";
+    this.ctx.fillStyle = getDisplay().spectrumPassbandFill;
     this.ctx.fillRect(x1, 0, x2 - x1, h);
   }
 
@@ -270,7 +275,7 @@ export class SpectrumRenderer {
     const barW = Math.max(1, Math.ceil(binWidthPx));
 
     ctx.fillStyle = this.gradient ?? "rgba(0, 200, 255, 0.3)";
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = getDisplay().spectrumFillOpacity;
 
     for (let i = 0; i < numBins; i++) {
       const freqKHz = this.dataStartKHz + (i / numBins) * dataSpan;
@@ -318,7 +323,7 @@ export class SpectrumRenderer {
     }
 
     if (started) {
-      ctx.strokeStyle = "#facc15";
+      ctx.strokeStyle = getDisplay().spectrumPeakTrace;
       ctx.lineWidth = 1;
       ctx.stroke();
     }

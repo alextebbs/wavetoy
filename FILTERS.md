@@ -162,7 +162,9 @@ For small inputs, `tanh(x) ≈ x`, so the signal passes through unchanged. For l
 | `drive_db` | 0–24 | 6 | How much gain to apply before the saturation curve |
 | `ceiling_db` | -12 to 0 | -1 | Output ceiling in dB relative to full scale |
 
-### 5. Noise Reduction (Spectral Subtraction)
+### 5. Noise Reduction (Spectral Subtraction) — Phase 2
+
+> **Deferred to phase 2.** The four filters above are implemented. Noise reduction requires an FFT, overlap-add buffering, and noise floor estimation — significantly more complexity. It will be added separately once the core pipeline is proven.
 
 Estimates and subtracts background noise from the signal, improving clarity by reducing stationary noise (receiver hiss, atmospheric static). This is a frequency-domain filter — the only one in the chain that requires an FFT.
 
@@ -223,7 +225,7 @@ type Filter interface {
 }
 ```
 
-Filters operate on `[]byte` (the same type flowing through the pipeline) rather than `[]float64` to avoid an extra conversion step at the chain boundary. Each filter internally converts samples as needed for its math.
+Individual filters operate on `[]float64` (normalized samples in [-1.0, 1.0]). The `Chain` handles PCM16 ↔ float64 conversion at the boundary once, so filters avoid repeated conversion overhead.
 
 ### Filter Chain
 
@@ -253,15 +255,15 @@ The chain holds a read lock during processing (called from the pump goroutine ~2
 
 ### Filter Configuration Model
 
-The filter configuration is stored as a JSON column on the stream, not as individual columns. This keeps the schema stable as we add new filter types — no migrations needed for new parameters.
+Filter configuration is stored as a JSONB column on the `streams` table. Adding a new filter type means adding a field to the Go struct and the TypeScript type — no migrations, no new columns, no schema changes.
 
 ```go
 type FilterConfig struct {
-    LowPass       *LowPassConfig       `json:"low_pass,omitempty"`
-    HighPass      *HighPassConfig      `json:"high_pass,omitempty"`
-    NoiseGate     *NoiseGateConfig     `json:"noise_gate,omitempty"`
-    SoftClipper   *SoftClipperConfig   `json:"soft_clipper,omitempty"`
-    NoiseReducer  *NoiseReducerConfig  `json:"noise_reducer,omitempty"`
+    LowPass      *LowPassConfig      `json:"low_pass,omitempty"`
+    HighPass     *HighPassConfig     `json:"high_pass,omitempty"`
+    NoiseGate    *NoiseGateConfig    `json:"noise_gate,omitempty"`
+    SoftClipper  *SoftClipperConfig  `json:"soft_clipper,omitempty"`
+    // NoiseReducer will be added in phase 2
 }
 
 type LowPassConfig struct {
@@ -288,36 +290,27 @@ type SoftClipperConfig struct {
     CeilingDB float64 `json:"ceiling_db"`
 }
 
-type NoiseReducerConfig struct {
-    Enabled  bool    `json:"enabled"`
-    Strength float64 `json:"strength"`
-    FloorDB  float64 `json:"floor_db"`
-}
 ```
+
+The JSONB column holds the entire config. Null sub-objects mean that filter is unconfigured (disabled). Adding a sixth filter later is just adding a new struct and a new field to `FilterConfig` — the existing JSONB rows silently omit the new key, which Go unmarshals as `nil`.
 
 ### Filter Ordering
 
-Filters always execute in a fixed order, regardless of the order they appear in the JSON config. The order is chosen for signal quality:
+Filters always execute in a fixed order, regardless of which are enabled. The order is chosen for signal quality:
 
 ```
 1. High-Pass        ← remove DC/hum first (protects downstream filters from DC bias)
-2. Noise Reduction  ← spectral subtraction works best on the rawest signal
-3. Noise Gate       ← gate decision is based on the cleaned signal
-4. Low-Pass         ← shape the frequency response after noise processing
-5. Soft Clipper     ← tame peaks after all other processing
+2. Noise Gate       ← gate decision is based on the cleaned signal
+3. Low-Pass         ← shape the frequency response after noise processing
+4. Soft Clipper     ← tame peaks after all other processing
+(Phase 2: Noise Reduction will slot in at position 2, before Noise Gate)
 ```
 
 This ordering is not user-configurable. Reordering DSP filters without understanding the implications produces bad results. A fixed, well-chosen order is the right default.
 
 ### Integration with Stream Model
 
-Add a `filters` JSONB column to the `streams` table:
-
-```sql
-ALTER TABLE streams ADD COLUMN filters JSONB NOT NULL DEFAULT '{}';
-```
-
-The Go model gets a corresponding field:
+Add a `filters` JSONB column to the `streams` table and a corresponding field on the Go model:
 
 ```go
 type Stream struct {
@@ -326,14 +319,16 @@ type Stream struct {
 }
 ```
 
+The `Filters` field serializes to/from the JSONB column automatically via `pgx`'s JSON support. In `GetStreamByID` and `ListStreamsByTenant`, the column is scanned with `&stream.Filters` — pgx handles the JSON unmarshaling.
+
 The existing `PATCH /api/streams/:id` endpoint and the WebSocket `patch` message type both accept a `filters` field. When filters change, the backend:
 
-1. Persists the new config to the DB.
+1. Persists the new config to the `filters` JSONB column.
 2. Builds a new filter chain from the config.
 3. Calls `chain.Reconfigure()` on the active stream.
 4. Broadcasts a `stream_updated` event so all connected clients see the new filter state.
 
-No new API endpoints are needed — filters ride the existing stream update mechanism.
+No new API endpoints needed — filters ride the existing stream update mechanism.
 
 ### Integration with `streammgr`
 
@@ -393,9 +388,7 @@ func BuildChain(cfg FilterConfig, sampleRate int) *Chain {
     if cfg.HighPass != nil && cfg.HighPass.Enabled {
         filters = append(filters, NewHighPass(cfg.HighPass.CutoffHz, float64(sampleRate)))
     }
-    if cfg.NoiseReducer != nil && cfg.NoiseReducer.Enabled {
-        filters = append(filters, NewNoiseReducer(cfg.NoiseReducer.Strength, cfg.NoiseReducer.FloorDB, sampleRate))
-    }
+    // Phase 2: NoiseReducer will go here
     if cfg.NoiseGate != nil && cfg.NoiseGate.Enabled {
         filters = append(filters, NewNoiseGate(cfg.NoiseGate, sampleRate))
     }
@@ -422,8 +415,8 @@ Filters run in the pump goroutine's hot path. At ~23.4 frames/sec with ~512 samp
 | Low-Pass (biquad) | ~2 µs | Same as high-pass |
 | Noise Gate | ~5 µs | RMS computation + envelope smoothing |
 | Soft Clipper | ~3 µs | tanh per sample (or polynomial approximation) |
-| Noise Reduction | ~50 µs | 512-point FFT + IFFT + bin processing |
-| **Full chain** | **~62 µs** | **< 0.15% of frame budget** |
+| Noise Reduction (phase 2) | ~50 µs | 512-point FFT + IFFT + bin processing |
+| **Full chain (phase 1)** | **~12 µs** | **< 0.03% of frame budget** |
 
 All filters are zero-allocation in steady state. The initial `BuildChain` allocates filter structs and their internal buffers once. `Process` calls modify samples in-place (or into pre-allocated buffers for the FFT path) with no per-frame allocation.
 
@@ -439,7 +432,7 @@ ALTER TABLE streams ADD COLUMN filters JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE streams DROP COLUMN filters;
 ```
 
-A single column addition. No data migration — all existing streams start with an empty filter config (no filters enabled).
+A single column addition. No data migration — all existing streams start with an empty filter config (`{}` unmarshals to a `FilterConfig` with all nil sub-objects, meaning no filters enabled).
 
 ---
 
@@ -573,7 +566,7 @@ When filters are reconfigured while the stream is active:
 
 ### Overview
 
-A collapsible "Post-Processing" panel in the stream player page sidebar that exposes all five filter controls. Each filter gets a section with an enable/disable toggle and parameter sliders. Changes are sent as patches over the WebSocket and take effect immediately for all listeners.
+A collapsible "Post-Processing" panel in the stream player page sidebar that exposes the four phase-1 filter controls. Each filter gets a section with an enable/disable toggle and parameter sliders. Changes are sent as patches over the WebSocket and take effect immediately for all listeners.
 
 ### Panel Location
 
@@ -641,7 +634,7 @@ type FilterConfig = {
     release_ms: number;
   };
   soft_clipper?: { enabled: boolean; drive_db: number; ceiling_db: number };
-  noise_reducer?: { enabled: boolean; strength: number; floor_db: number };
+  // noise_reducer added in phase 2
 };
 
 type PostProcessingPanelProps = {
@@ -738,14 +731,9 @@ Attack and release are not exposed in the UI — they use sensible defaults (5 m
 | Drive | Slider | 0–24 dB | 1 | 6 | `{value} dB` |
 | Ceiling | Slider | -12 to 0 dB | 0.5 | -1 | `{value} dB` |
 
-#### Noise Reduction
+#### Noise Reduction — Phase 2
 
-| Control | Type | Range | Step | Default | Display |
-|---------|------|-------|------|---------|---------|
-| Enabled | Switch | — | — | off | — |
-| Strength | Slider | 0–100% | 1 | 50 | `{value}%` |
-
-The `floor_db` parameter is not exposed in the UI — it uses the default (-20 dB) which prevents the hollow "underwater" artifacts that aggressive spectral subtraction produces. Like attack/release on the noise gate, it remains configurable via the API for advanced tuning.
+UI controls for noise reduction will be added when the backend filter is implemented.
 
 ### Integration with `stream-player-page.tsx`
 
@@ -773,7 +761,7 @@ The panel is placed inside the sidebar's scroll container, between the Source se
 </section>
 ```
 
-The `Stream` type in `api.ts` needs a `filters` field:
+The `Stream` type in `api.ts` gets a `filters` field:
 
 ```typescript
 export type Stream = {
@@ -810,7 +798,7 @@ On narrow viewports where the sidebar is closed, the post-processing panel is no
 | `internal/filter/biquad.go` | Low-pass and high-pass biquad implementations |
 | `internal/filter/gate.go` | Noise gate implementation |
 | `internal/filter/clipper.go` | Soft clipper implementation |
-| `internal/filter/nr.go` | Noise reduction (spectral subtraction) implementation |
+| `internal/filter/nr.go` | Noise reduction (spectral subtraction) — phase 2 |
 | `internal/filter/filter_test.go` | Tests for all filters |
 | `frontend/src/components/post-processing-panel.tsx` | Post-processing panel UI |
 | `frontend/src/components/ui/slider.tsx` | Slider primitive (shadcn) |
@@ -832,15 +820,15 @@ On narrow viewports where the sidebar is closed, the post-processing panel is no
 | 6 | Extend `patchStreamRequest` to accept `filters`, trigger `ReconfigureFilters` | Backend | Steps 3, 5 |
 | 7 | `NoiseGate` | Backend | Step 1 |
 | 8 | `SoftClipper` | Backend | Step 1 |
-| 9 | `NoiseReducer` (spectral subtraction) | Backend | Step 1 |
+| 9 | `NoiseReducer` (spectral subtraction) — **phase 2** | Backend | Step 1 |
 | 10 | Tests for all filters | Backend | Steps 2, 7–9 |
 | 11 | Add `slider.tsx` + `switch.tsx` UI primitives | Frontend | Nothing |
 | 12 | `post-processing-panel.tsx` — filter controls UI | Frontend | Step 11 |
-| 13 | Integrate panel into `stream-player-page.tsx` — toolbar button + sidebar section | Frontend | Steps 6, 12 |
+| 13 | Integrate panel into `stream-player-page.tsx` — sidebar section | Frontend | Steps 6, 12 |
 
 Steps 1, 4, 7–9, 11 are independent and can be developed in parallel. Step 3 is the critical backend integration point. Step 13 closes the loop end-to-end.
 
-**Recommended sequencing:** Build steps 1–3 first with the biquad filters. Verify end-to-end by patching a stream with `"low_pass": {"enabled": true, "cutoff_hz": 2000}` and confirming the audio sounds muffled for all connected clients. Then add the remaining filters (steps 7–9) one at a time, testing each in isolation before integrating. Build the frontend panel (steps 11–13) in parallel with the remaining backend filters.
+**Recommended sequencing:** Build steps 1–3 first with the biquad filters, plus steps 4–6 for the data layer. Verify end-to-end by patching a stream with `"filters": {"low_pass": {"enabled": true, "cutoff_hz": 2000}}` and confirming the audio sounds muffled for all connected clients. Then add the remaining filters (steps 7–9) one at a time, testing each in isolation before integrating. Build the frontend panel (steps 11–13) in parallel with the remaining backend filters.
 
 ---
 

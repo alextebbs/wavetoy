@@ -19,20 +19,15 @@ export function SourceDetailsPanel({
   return (
     <div className={cn("space-y-3 text-xs text-muted-foreground", className)}>
       {showPickerSummary ? (
-        <>
-          <div className="flex items-center justify-between border-b border-border/80 pb-2 text-xs uppercase tracking-widest text-muted-foreground">
-            <span>Pick Source</span>
-            <span className="font-xanh-mono normal-case tracking-normal">
-              {counts?.included ?? 0}/{counts?.omitted ?? 0} shown/omitted
-            </span>
-          </div>
-          <p>Selected source ID: {selectedSourceId || "none selected"}</p>
-        </>
-      ) : (
-        <p>Source ID: {selectedSourceId || "none selected"}</p>
-      )}
+        <div className="flex items-center justify-between border-b border-border/80 pb-2 text-xs uppercase tracking-widest text-muted-foreground">
+          <span>Pick Source</span>
+          <span className="font-xanh-mono normal-case tracking-normal">
+            {counts?.included ?? 0}/{counts?.omitted ?? 0} shown/omitted
+          </span>
+        </div>
+      ) : null}
 
-      <div className="space-y-1 border-t border-border/80 pt-3">
+      <div className="space-y-1">
         <p className="font-medium text-foreground">
           {source?.name ?? "Hover or click a source"}
         </p>
@@ -102,15 +97,6 @@ export function SourceDetailsPanel({
                 title={source.antenna ?? "n/a"}
               >
                 {source.antenna ?? "n/a"}
-              </span>
-            </div>
-            <div className="flex items-start gap-4">
-              <span className="w-20 shrink-0 text-muted-foreground">id</span>
-              <span
-                className="min-w-0 flex-1 truncate text-right text-white"
-                title={source.id}
-              >
-                {source.id}
               </span>
             </div>
           </>

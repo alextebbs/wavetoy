@@ -200,13 +200,13 @@ export function StreamsPage() {
         </Button>
       </div>
 
-      <div className="border-t border-zinc-500/60" />
+      <div className="border-t border-border" />
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       <section>
         {(loading ? [] : streams).length === 0 ? (
-          <p className="font-xanh-mono py-10 text-center text-sm text-zinc-500">
+          <p className="font-xanh-mono py-10 text-center text-sm text-muted-foreground">
             no streams :(
           </p>
         ) : (

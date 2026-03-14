@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sammy/sdr-radio/internal/db"
+	"github.com/sammy/sdr-radio/internal/filter"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/sammy/sdr-radio/internal/ringbuf"
@@ -35,10 +36,12 @@ type activeStream struct {
 	generation   uint64
 	reconnecting bool
 
-	subscribers   map[chan []byte]struct{}
-	wfSubscribers map[chan kiwi.WFFrame]struct{}
-	startedAt     time.Time
+	subscribers    map[chan []byte]struct{}
+	wfSubscribers  map[chan kiwi.WFFrame]struct{}
+	logSubscribers map[chan string]struct{}
+	startedAt      time.Time
 	ringBuf       *ringbuf.RingBuffer
+	filterChain   *filter.Chain
 
 	framesFromKiwi     atomic.Int64
 	bytesFromKiwi      atomic.Int64
@@ -118,6 +121,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 		}); err != nil {
 			return err
 		}
+		existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, m.SampleRate(stream.ID)))
 		return nil
 	}
 
@@ -139,6 +143,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	existing.mu.Unlock()
 
 	_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
+	existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, client.SampleRate()))
 	m.startPump(existing, client, gen)
 	if wfClient != nil {
 		m.startWFPump(existing, wfClient, gen)
@@ -226,10 +231,12 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 		client:        client,
 		wfClient:      wfClient,
 		generation:    1,
-		subscribers:   make(map[chan []byte]struct{}),
-		wfSubscribers: make(map[chan kiwi.WFFrame]struct{}),
+		subscribers:    make(map[chan []byte]struct{}),
+		wfSubscribers:  make(map[chan kiwi.WFFrame]struct{}),
+		logSubscribers: make(map[chan string]struct{}),
 		startedAt:     time.Now(),
 		ringBuf:       ringbuf.New(bufDuration, bufCapacity),
+		filterChain:   filter.NewChain(stream.Filters, client.SampleRate()),
 	}
 
 	m.mu.Lock()
@@ -345,6 +352,45 @@ func (m *Manager) SubscribeWaterfall(streamID string) (<-chan kiwi.WFFrame, func
 	return ch, unsubscribe, nil
 }
 
+func (m *Manager) SubscribeLogs(streamID string) (<-chan string, func(), error) {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, nil, ErrStreamNotActive
+	}
+
+	ch := make(chan string, 16)
+	as.mu.Lock()
+	if as.logSubscribers == nil {
+		as.logSubscribers = make(map[chan string]struct{})
+	}
+	as.logSubscribers[ch] = struct{}{}
+	as.mu.Unlock()
+
+	unsubscribe := func() {
+		as.mu.Lock()
+		if _, exists := as.logSubscribers[ch]; exists {
+			delete(as.logSubscribers, ch)
+			close(ch)
+		}
+		as.mu.Unlock()
+	}
+
+	return ch, unsubscribe, nil
+}
+
+func (as *activeStream) broadcastLog(msg string) {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	for ch := range as.logSubscribers {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
 func (m *Manager) MaxFreqKHz(streamID string) int64 {
 	m.mu.RLock()
 	as, ok := m.streams[streamID]
@@ -409,6 +455,10 @@ func (m *Manager) Remove(streamID string) error {
 		delete(as.wfSubscribers, ch)
 		close(ch)
 	}
+	for ch := range as.logSubscribers {
+		delete(as.logSubscribers, ch)
+		close(ch)
+	}
 	as.mu.Unlock()
 
 	log.Printf("[STREAM] removed stream=%s disconnecting_subscribers=%d wf_subscribers=%d", streamID, subCount, wfSubCount)
@@ -458,17 +508,18 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				return
 			case <-ticker.C:
 				m.logAudioMetrics(as, client, generation)
-			case frame, ok := <-client.Samples():
-				if !ok {
-					log.Printf("[STREAM] pump stopping stream=%s gen=%d (sample channel closed)", as.id, generation)
-					return
-				}
-				as.framesFromKiwi.Add(1)
-				as.bytesFromKiwi.Add(int64(len(frame)))
-				if as.ringBuf != nil {
-					as.ringBuf.Write(time.Now(), frame)
-				}
-				as.broadcast(frame)
+		case frame, ok := <-client.Samples():
+			if !ok {
+				log.Printf("[STREAM] pump stopping stream=%s gen=%d (sample channel closed)", as.id, generation)
+				return
+			}
+			as.framesFromKiwi.Add(1)
+			as.bytesFromKiwi.Add(int64(len(frame)))
+			filtered := as.filterChain.Process(frame)
+			if as.ringBuf != nil {
+				as.ringBuf.Write(time.Now(), filtered)
+			}
+			as.broadcast(filtered)
 			}
 		}
 	}()
@@ -486,15 +537,32 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 			log.Printf("[STREAM] wf pump exited stream=%s gen=%d", as.id, generation)
 		}()
 
+		const wfTimeout = 15 * time.Second
+		timer := time.NewTimer(wfTimeout)
+		defer timer.Stop()
+		gotFirstFrame := false
+
 		for {
 			select {
 			case <-m.runtimeCtx.Done():
 				return
 			case <-wfClient.Done():
+				if !gotFirstFrame {
+					as.broadcastLog("waterfall connection closed before receiving data")
+				}
 				return
+			case <-timer.C:
+				if !gotFirstFrame {
+					log.Printf("[STREAM] wf timeout stream=%s: no waterfall data received in %s", as.id, wfTimeout)
+					as.broadcastLog("source is not sending waterfall data")
+				}
 			case frame, ok := <-wfClient.Frames():
 				if !ok {
 					return
+				}
+				if !gotFirstFrame {
+					gotFirstFrame = true
+					timer.Stop()
 				}
 				as.broadcastWF(frame)
 			}

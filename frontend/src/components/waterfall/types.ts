@@ -1,3 +1,5 @@
+export type { ColorMapFn, ColorMapName } from "@/lib/display-colors";
+
 export interface WaterfallFrame {
   bins: Uint8Array;
   xBin: number;
@@ -5,19 +7,15 @@ export interface WaterfallFrame {
   flags: number;
 }
 
-export type ColorMapFn = (t: number) => [number, number, number];
-
-export type ColorMapName = "turbo" | "viridis" | "grayscale" | "kiwi";
-
 export interface WaterfallOptions {
-  colorMap?: ColorMapName;
+  colorMap?: import("@/lib/display-colors").ColorMapName;
   minLevel?: number;
   maxLevel?: number;
 }
 
 export interface WaterfallHandle {
   pushBins(bins: Uint8Array): void;
-  setColorMap(name: ColorMapName): void;
+  setColorMap(name: import("@/lib/display-colors").ColorMapName): void;
   setLevels(min: number, max: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
 }

@@ -1,3 +1,41 @@
+export type LowPassConfig = {
+  enabled: boolean;
+  cutoff_hz: number;
+};
+
+export type HighPassConfig = {
+  enabled: boolean;
+  cutoff_hz: number;
+};
+
+export type NoiseGateConfig = {
+  enabled: boolean;
+  threshold_db: number;
+  hold_ms: number;
+  attack_ms: number;
+  release_ms: number;
+};
+
+export type SoftClipperConfig = {
+  enabled: boolean;
+  drive_db: number;
+  ceiling_db: number;
+};
+
+export type NotchConfig = {
+  enabled: boolean;
+  center_hz: number;
+  q: number;
+};
+
+export type FilterConfig = {
+  low_pass?: LowPassConfig;
+  high_pass?: HighPassConfig;
+  notch?: NotchConfig;
+  noise_gate?: NoiseGateConfig;
+  soft_clipper?: SoftClipperConfig;
+};
+
 export type Stream = {
   id: string;
   tenant_id: string;
@@ -14,6 +52,7 @@ export type Stream = {
   activity_sensitivity: number;
   state: string;
   version: number;
+  filters?: FilterConfig;
   wf_view_start_khz: number;
   wf_view_end_khz: number;
   created_at: string;
@@ -109,7 +148,14 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(await res.text());
+    const text = await res.text();
+    try {
+      const json = JSON.parse(text);
+      throw new Error(json.error || text);
+    } catch (e) {
+      if (e instanceof Error && e.message !== text) throw e;
+      throw new Error(text);
+    }
   }
   return (await res.json()) as T;
 }

@@ -17,7 +17,10 @@ var (
 	ErrSourceUnavailable = errors.New("source unavailable")
 	ErrSourceAtCapacity  = errors.New("source at listener capacity")
 	ErrVersionConflict   = errors.New("version conflict")
+	ErrTenantAtCapacity  = errors.New("tenant stream limit reached")
 )
+
+const MaxStreamsPerTenant = 5
 
 type CreateStreamParams struct {
 	TenantID        string
@@ -42,9 +45,19 @@ type UpdateStreamParams struct {
 	AGCOn           bool
 	AGCGainDB       *float64
 	BufferMinutes   int
+	Filters         models.FilterConfig
 }
 
 func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.Stream, error) {
+	var count int
+	err := db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM streams WHERE tenant_id = $1`, p.TenantID).Scan(&count)
+	if err != nil {
+		return nil, fmt.Errorf("count tenant streams: %w", err)
+	}
+	if count >= MaxStreamsPerTenant {
+		return nil, ErrTenantAtCapacity
+	}
+
 	source, err := db.GetSourceByID(ctx, p.SourceID)
 	if err != nil {
 		return nil, err
@@ -120,6 +133,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 		return nil, ErrSourceAtCapacity
 	}
 
+	filtersJSON, jsonErr := p.Filters.Value()
+	if jsonErr != nil {
+		return nil, jsonErr
+	}
+
 	var tag pgconn.CommandTag
 	if baseVersion > 0 {
 		tag, err = db.Pool.Exec(ctx, `
@@ -133,10 +151,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    agc_on = $7,
 			    agc_gain_db = $8,
 			    buffer_minutes = $9,
+			    filters = $10,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $10 AND tenant_id = $11 AND version = $12
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, streamID, tenantID, baseVersion)
+			WHERE id = $11 AND tenant_id = $12 AND version = $13
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, streamID, tenantID, baseVersion)
 	} else {
 		tag, err = db.Pool.Exec(ctx, `
 			UPDATE streams
@@ -149,10 +168,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    agc_on = $7,
 			    agc_gain_db = $8,
 			    buffer_minutes = $9,
+			    filters = $10,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $10 AND tenant_id = $11
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, streamID, tenantID)
+			WHERE id = $11 AND tenant_id = $12
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, streamID, tenantID)
 	}
 	if err != nil {
 		return nil, err
@@ -177,14 +197,14 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, wf_view_start_khz, wf_view_end_khz,
+		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
 		       created_at, updated_at
 		FROM streams
 		WHERE id = $1
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 		&stream.CreatedAt, &stream.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -203,7 +223,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, wf_view_start_khz, wf_view_end_khz,
+		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
 		       created_at, updated_at
 		FROM streams
 		WHERE tenant_id = $1
@@ -221,7 +241,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		if err := rows.Scan(
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 			&stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {
 			return nil, err

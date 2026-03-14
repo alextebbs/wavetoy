@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -25,15 +26,16 @@ type createStreamRequest struct {
 }
 
 type patchStreamRequest struct {
-	SourceID        *string  `json:"source_id"`
-	FrequencyKHz    *float64 `json:"frequency_khz"`
-	BandwidthLowHz  *int     `json:"bandwidth_low_hz"`
-	BandwidthHighHz *int     `json:"bandwidth_high_hz"`
-	Mode            *string  `json:"mode"`
-	Name            *string  `json:"name"`
-	AGCOn           *bool    `json:"agc_on"`
-	AGCGainDB       *float64 `json:"agc_gain_db"`
-	BufferMinutes   *int     `json:"buffer_minutes"`
+	SourceID        *string              `json:"source_id"`
+	FrequencyKHz    *float64             `json:"frequency_khz"`
+	BandwidthLowHz  *int                 `json:"bandwidth_low_hz"`
+	BandwidthHighHz *int                 `json:"bandwidth_high_hz"`
+	Mode            *string              `json:"mode"`
+	Name            *string              `json:"name"`
+	AGCOn           *bool                `json:"agc_on"`
+	AGCGainDB       *float64             `json:"agc_gain_db"`
+	BufferMinutes   *int                 `json:"buffer_minutes"`
+	Filters         *models.FilterConfig `json:"filters"`
 }
 
 type patchStreamError struct {
@@ -93,6 +95,8 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, db.ErrTenantAtCapacity):
+			writeError(w, http.StatusConflict, fmt.Sprintf("maximum of %d streams reached", db.MaxStreamsPerTenant), "TENANT_AT_CAPACITY")
 		case errors.Is(err, db.ErrSourceNotFound):
 			writeError(w, http.StatusNotFound, "source not found", "NOT_FOUND")
 		case errors.Is(err, db.ErrSourceUnavailable):
@@ -206,6 +210,7 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		AGCOn:           existing.AGCOn,
 		AGCGainDB:       existing.AGCGainDB,
 		BufferMinutes:   existing.BufferMinutes,
+		Filters:         existing.Filters,
 	}
 
 	changed := false
@@ -261,6 +266,10 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 			return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "buffer_minutes must be > 0", Code: "VALIDATION"}
 		}
 		updated.BufferMinutes = *req.BufferMinutes
+		changed = true
+	}
+	if req.Filters != nil {
+		updated.Filters = *req.Filters
 		changed = true
 	}
 
