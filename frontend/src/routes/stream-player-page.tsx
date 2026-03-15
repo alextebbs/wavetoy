@@ -3,9 +3,10 @@ import { FiltersSection } from "@/components/filters-section";
 import { FrequencyInput } from "@/components/frequency-input";
 import { LogsPanel } from "@/components/logs-panel";
 import { ProbeStatusBox } from "@/components/probe-status-box";
-import { SourceMapPicker } from "@/components/source-map-picker";
+import { SourceMapPicker, type SourceMapPickerHandle } from "@/components/source-map-picker";
+import { SourceSearchPanel } from "@/components/source-search-panel";
 import { SourceSection } from "@/components/source-section";
-import { BottomDrawer } from "@/components/ui/bottom-drawer";
+import { SourceOverlay } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -19,23 +20,33 @@ import type { WaterfallHandle } from "@/components/waterfall/types";
 import { useBandViewStore } from "@/lib/band-view-store";
 import {
   type FilterConfig,
+  type InterpreterConfig,
+  type InterpreterOutput,
   type MapSourceCounts,
   type Peer,
   type ProbeResult,
+  type RecentSource,
   type Source,
   type Stream,
+  addFavorite,
   deleteStream,
   getMapSources,
   getSessionColor,
   getSessionId,
+  getSource,
   getStream,
+  listFavorites,
+  listFavoriteSources,
+  listRecentSources,
   PEER_COLORS,
   probeSource,
+  removeFavorite,
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { LockIcon, LockOpenIcon, DownloadIcon, PanelRightIcon, RefreshCwIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, SlidersHorizontalIcon, ScrollTextIcon } from "lucide-react";
+import { ClockIcon, LockIcon, LockOpenIcon, DownloadIcon, PanelRightIcon, RefreshCwIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, SlidersHorizontalIcon, ScrollTextIcon, BrainCircuitIcon } from "lucide-react";
+import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
@@ -98,6 +109,29 @@ declare global {
   }
 }
 
+function formatTimeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 0) return "";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainMinutes = minutes % 60;
+  return remainMinutes > 0 ? `${hours}h ${remainMinutes}m` : `${hours}h`;
+}
+
 export function StreamPlayerPage() {
   const { streamId } = useParams({ from: "/streams/$streamId" });
   const navigate = useNavigate();
@@ -126,7 +160,50 @@ export function StreamPlayerPage() {
   const [probeStatus, setProbeStatus] = useState<"idle" | "probing" | "done">("idle");
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const probeGenRef = useRef(0);
+  const mapPickerRef = useRef<SourceMapPickerHandle>(null);
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
+  const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [interpreterText, setInterpreterText] = useState("");
+  const [interpreterWpm, setInterpreterWpm] = useState(0);
+  const [detectedSidetoneHz, setDetectedSidetoneHz] = useState(0);
+
+  const refreshFavoriteSources = useCallback(() => {
+    void listFavoriteSources()
+      .then((sources) => setFavoriteSources(sources))
+      .catch(() => {});
+  }, []);
+
+  const refreshRecentSources = useCallback(() => {
+    void listRecentSources(streamId)
+      .then((rs) => setRecentSources(rs))
+      .catch(() => {});
+  }, [streamId]);
+  const refreshRecentSourcesRef = useRef(refreshRecentSources);
+  refreshRecentSourcesRef.current = refreshRecentSources;
+
+  const toggleFavorite = useCallback(async (sourceId: string) => {
+    const isFav = favoriteIds.has(sourceId);
+    setFavoriteIds((prev) => {
+      const next = new Set(prev);
+      if (isFav) next.delete(sourceId);
+      else next.add(sourceId);
+      return next;
+    });
+    try {
+      if (isFav) await removeFavorite(sourceId);
+      else await addFavorite(sourceId);
+      refreshFavoriteSources();
+    } catch {
+      setFavoriteIds((prev) => {
+        const next = new Set(prev);
+        if (isFav) next.add(sourceId);
+        else next.delete(sourceId);
+        return next;
+      });
+    }
+  }, [favoriteIds, refreshFavoriteSources]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
@@ -158,6 +235,7 @@ export function StreamPlayerPage() {
   const sessionColorRef = useRef(getSessionColor());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectBackoffRef = useRef(1000);
+  const reconnectAttemptRef = useRef(0);
   const intentionalCloseRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
@@ -189,7 +267,7 @@ export function StreamPlayerPage() {
 
   const appendLogEntry = useCallback((entry: Omit<LogEntry, "id">) => {
     setLogLines((prev) => [
-      ...prev.slice(-500),
+      ...prev.slice(-2000),
       {
         ...entry,
         id: `${entry.t}-${Math.random().toString(36).slice(2, 8)}`,
@@ -203,7 +281,7 @@ export function StreamPlayerPage() {
         ...e,
         id: `${e.t}-${Math.random().toString(36).slice(2, 8)}`,
       }));
-      return [...prev, ...withIds].slice(-500);
+      return [...prev, ...withIds].slice(-2000);
     });
   }, []);
 
@@ -385,7 +463,11 @@ export function StreamPlayerPage() {
     ws.onopen = () => {
       setStatus("connected");
       intentionalCloseRef.current = false;
+      const wasReconnect = reconnectAttemptRef.current > 0;
+      const attempts = reconnectAttemptRef.current;
       reconnectBackoffRef.current = 1000;
+      reconnectAttemptRef.current = 0;
+      appendLogEntry({ t: Date.now(), level: "info", action: wasReconnect ? "ws.reconnect" : "ws.connect", from: "client", to: "wavetoy", msg: wasReconnect ? `after ${attempts} attempt${attempts !== 1 ? "s" : ""}` : undefined, origin: "client" });
       const currentVersion = versionRef.current;
       const helloMsg: Record<string, unknown> = {
         type: "hello",
@@ -408,7 +490,8 @@ export function StreamPlayerPage() {
       }
     };
     ws.onclose = (ev) => {
-      console.warn(`[WS] closed code=${ev.code} reason=${ev.reason || "(none)"} clean=${ev.wasClean} intentional=${intentionalCloseRef.current}`);
+      const level = intentionalCloseRef.current ? "info" : "warn";
+      appendLogEntry({ t: Date.now(), level, action: "ws.close", from: "client", to: "wavetoy", msg: `code=${ev.code} clean=${ev.wasClean}${ev.reason ? ` reason=${ev.reason}` : ""}`, origin: "client" });
       if (intentionalCloseRef.current) {
         setStatus("closed");
         return;
@@ -417,6 +500,7 @@ export function StreamPlayerPage() {
       scheduleReconnect();
     };
     ws.onerror = () => {
+      appendLogEntry({ t: Date.now(), level: "error", action: "ws.error", from: "client", to: "wavetoy", msg: "connection error", origin: "client" });
       setStatus("error");
     };
     ws.onmessage = (ev) => {
@@ -466,6 +550,7 @@ export function StreamPlayerPage() {
             setMode(s.mode);
             setLo(s.bandwidth_low_hz);
             setHi(s.bandwidth_high_hz);
+            refreshRecentSourcesRef.current();
           } else if (msg.type === "peer_joined" && msg.peer) {
             const peer = msg.peer as Peer;
             setPeers((prev) => {
@@ -479,6 +564,7 @@ export function StreamPlayerPage() {
               prev.filter((p) => p.session_id !== peer.session_id),
             );
           } else if (msg.type === "error") {
+            // Error is logged server-side via streamlog; no client-side entry needed.
             if (msg.code === "CONFLICT" && msg.stream) {
               const s = msg.stream as Stream;
               versionRef.current = s.version;
@@ -492,6 +578,9 @@ export function StreamPlayerPage() {
               setMode(s.mode);
               setLo(s.bandwidth_low_hz);
               setHi(s.bandwidth_high_hz);
+            } else if (msg.code === "VALIDATION" && typeof msg.error === "string" && msg.error.includes("not subscribed")) {
+              appendLogEntry({ t: Date.now(), level: "warn", action: "ws.resub", from: "client", to: "wavetoy", msg: "lost topic subscription, re-subscribing", origin: "client" });
+              ws.send(JSON.stringify({ type: "subscribe", topics: [`stream:${streamId}`, "streams"] }));
             }
           } else if (msg.type === "stream_log") {
             appendLogEntry({
@@ -517,6 +606,19 @@ export function StreamPlayerPage() {
           } else if (msg.type === "wf_view_changed") {
             if (msg.start_khz != null && msg.end_khz != null) {
               setViewRemote(msg.start_khz, msg.end_khz);
+            }
+          } else if (msg.type === "interpreter_output" && msg.payload) {
+            const payload = msg.payload as InterpreterOutput;
+            if (payload.clear) {
+              setInterpreterText("");
+            } else if (payload.text) {
+              setInterpreterText((prev) => prev + payload.text);
+            }
+            if (payload.wpm) {
+              setInterpreterWpm(payload.wpm);
+            }
+            if (payload.sidetone_hz) {
+              setDetectedSidetoneHz(payload.sidetone_hz);
             }
           }
         } catch {
@@ -593,13 +695,15 @@ export function StreamPlayerPage() {
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) return;
+    const attempt = ++reconnectAttemptRef.current;
     const delay = reconnectBackoffRef.current;
     reconnectBackoffRef.current = Math.min(delay * 2, 30000);
+    appendLogEntry({ t: Date.now(), level: "info", action: "ws.backoff", from: "client", to: "wavetoy", msg: `attempt=${attempt} delay=${delay >= 1000 ? `${delay / 1000}s` : `${delay}ms`}`, origin: "client" });
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       void connect();
     }, delay);
-  }, [connect]);
+  }, [connect, appendLogEntry]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -611,7 +715,7 @@ export function StreamPlayerPage() {
     const onMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;
       const delta = startX - ev.clientX;
-      setSidebarWidth(Math.max(200, Math.min(600, startWidth + delta)));
+      setSidebarWidth(Math.max(200, startWidth + delta));
     };
     const onUp = () => {
       draggingRef.current = false;
@@ -659,6 +763,7 @@ export function StreamPlayerPage() {
       bandwidth_high_hz?: number;
       name?: string;
       filters?: FilterConfig;
+      interpreter?: InterpreterConfig;
       auto_fallback?: boolean;
       auto_fallback_kind?: string;
       view_locked?: boolean;
@@ -666,6 +771,7 @@ export function StreamPlayerPage() {
   ) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      appendLogEntry({ t: Date.now(), level: "warn", action: "ws.patch", from: "client", to: "wavetoy", msg: "skipped, ws not open", origin: "client" });
       return;
     }
     ws.send(
@@ -772,7 +878,14 @@ export function StreamPlayerPage() {
     mapSources.find((s) => s.id === sourceId) ?? null;
   const selectedSource =
     mapSources.find((s) => s.id === pendingSourceId) ?? null;
-  const displayedSource = hoveredSource ?? selectedSource;
+  const displayedSource = hoveredSource ?? selectedSource ?? currentSource;
+
+  useEffect(() => {
+    if (!sourceId || currentSource) return;
+    getSource(sourceId)
+      .then((s) => setMapSources((prev) => [...prev, s]))
+      .catch(() => {});
+  }, [sourceId, currentSource]);
 
   const throttledAutoPatch = useThrottle(
     (sid: string, freq: number, m: string, bwLo: number, bwHi: number) => {
@@ -840,6 +953,9 @@ export function StreamPlayerPage() {
       .catch(() => { /* stream load failed */ });
 
     void refreshMapSources();
+    void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
+    refreshFavoriteSources();
+    refreshRecentSources();
     void connect();
     return () => {
       if (reconnectTimerRef.current) {
@@ -857,36 +973,95 @@ export function StreamPlayerPage() {
       icon: <RadioIcon className="size-4" />,
       label: "Source",
       content: (
-        <div>
-          <SourceSection
-            source={currentSource}
-            sourceId={sourceId}
-            action={
-              <Button
-                size="sm"
-                className="shrink-0 text-xs uppercase tracking-widest"
-                onClick={() => {
-                  setPendingSourceId("");
-                  setHoveredSource(null);
-                  setSourceDrawerOpen(true);
-                  if (mapSources.length === 0 && !mapLoading) {
-                    void refreshMapSources();
-                  }
-                }}
-              >
-                <RefreshCwIcon className="size-3" />
-                Change
-              </Button>
-            }
-          />
-          <FallbackSection
-            stream={stream}
-            streamId={streamId}
-            wsRef={wsRef}
-            onToggleFallback={(enabled) => {
-              sendPatch({ auto_fallback: enabled });
-            }}
-          />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-auto">
+            <SourceSection
+              source={currentSource}
+              sourceId={sourceId}
+              isFavorite={currentSource ? favoriteIds.has(currentSource.id) : false}
+              onToggleFavorite={toggleFavorite}
+              action={
+                <Tooltip content="Change source">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Change source"
+                    onClick={() => {
+                      setPendingSourceId(sourceId);
+                      setHoveredSource(null);
+                      setProbeStatus("idle");
+                      setProbeResult(null);
+                      setSourceDrawerOpen(true);
+                      if (mapSources.length === 0 && !mapLoading) {
+                        void refreshMapSources();
+                      }
+                    }}
+                  >
+                    <RefreshCwIcon className="size-3.5" />
+                  </Button>
+                </Tooltip>
+              }
+            />
+            <FallbackSection
+              stream={stream}
+              streamId={streamId}
+              wsRef={wsRef}
+              onToggleFallback={(enabled) => {
+                sendPatch({ auto_fallback: enabled });
+              }}
+            />
+          </div>
+          {recentSources.length > 0 && (
+            <div className="shrink-0 border-t border-border/80">
+              <div className="flex items-center gap-1.5 border-b border-border/80 px-3 py-2">
+                <ClockIcon className="size-3 text-muted-foreground" />
+                <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Recent sources
+                </span>
+              </div>
+              <div className="max-h-[300px] overflow-y-auto divide-y divide-border/50">
+                {recentSources.map((rs, idx) => {
+                  const src = rs.source;
+                  const nextStarted = idx + 1 < recentSources.length ? recentSources[idx + 1].started_at : null;
+                  const duration = nextStarted
+                    ? new Date(rs.started_at).getTime() - new Date(nextStarted).getTime()
+                    : null;
+                  return (
+                    <div
+                      key={`${src.id}-${rs.started_at}`}
+                      className="flex w-full items-center gap-2 px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="font-xanh-mono block truncate text-sm text-foreground">
+                          {src.host}:{src.port}
+                        </p>
+                        {src.name && (
+                          <p className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                            {src.name}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <p className="text-[10px] text-muted-foreground/60">
+                          {formatTimeAgo(rs.started_at)}
+                          {duration != null && duration > 0 && ` · ${formatDuration(duration)}`}
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 gap-1 px-2 text-[10px]"
+                          onClick={() => sendPatch({ source_id: src.id })}
+                        >
+                          <RefreshCwIcon className="size-3" />
+                          Change
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       ),
     },
@@ -894,6 +1069,9 @@ export function StreamPlayerPage() {
       id: "filters",
       icon: <SlidersHorizontalIcon className="size-4" />,
       label: "Filters",
+      active: !!stream?.filters && Object.values(stream.filters).some(
+        (f) => f && typeof f === "object" && "enabled" in f && f.enabled,
+      ),
       content: (
         <FiltersSection
           filters={stream?.filters ?? {}}
@@ -903,98 +1081,37 @@ export function StreamPlayerPage() {
       ),
     },
     {
+      id: "interpreter",
+      icon: <BrainCircuitIcon className="size-4" />,
+      label: "Interpreter",
+      active: !!stream?.interpreter?.enabled,
+      content: (
+        <InterpreterPanel
+          config={stream?.interpreter ?? {}}
+          onConfigChange={(cfg) => sendPatch({ interpreter: cfg })}
+          text={interpreterText}
+          wpm={interpreterWpm}
+          detectedSidetoneHz={detectedSidetoneHz}
+          onClear={() => setInterpreterText("")}
+        />
+      ),
+    },
+    {
       id: "logs",
       icon: <ScrollTextIcon className="size-4" />,
       label: "Logs",
-      content: <LogsPanel lines={logLines} />,
+      content: <LogsPanel lines={logLines} streamId={streamId} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading]);
+  ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading, favoriteIds, toggleFavorite, recentSources, interpreterText, interpreterWpm, detectedSidetoneHz]);
 
   return (
     <div className="flex h-screen overflow-hidden">
       {/* ── Left: top bar + waterfall area ── */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── Top bar (waterfall area only) ── */}
-        <header className="grid h-[54px] shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b bg-background px-4">
-          {/* Left: mode + bandwidth */}
-          <div className="flex items-center gap-3 justify-self-start">
-            <Tooltip content="Demodulation mode">
-              <div className="flex h-8 overflow-hidden rounded-md border border-border">
-                {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => {
-                      setMode(m);
-                      const [defaultLo, defaultHi] = MODE_PASSBAND[m] ?? [-4900, 4900];
-                      setLo(defaultLo);
-                      setHi(defaultHi);
-                    }}
-                    className={`px-3.5 text-xs font-medium transition-colors ${
-                      mode === m
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-transparent text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {m.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </Tooltip>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Lo</span>
-              <Tooltip content="Low cut (Hz)">
-                <Input
-                  type="number"
-                  min={-6000}
-                  max={6000}
-                  value={lo}
-                  onChange={(e) => setLo(Number(e.target.value))}
-                  className="h-8 w-20 text-xs"
-                />
-              </Tooltip>
-              <Tooltip content="High cut (Hz)">
-                <Input
-                  type="number"
-                  min={-6000}
-                  max={6000}
-                  value={hi}
-                  onChange={(e) => setHi(Number(e.target.value))}
-                  className="h-8 w-20 text-xs"
-                />
-              </Tooltip>
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Hi</span>
-            </div>
-          </div>
-
-          {/* Center: knob + freq + lock (truly centered) */}
-          <div className="flex h-full items-center gap-5 justify-self-center">
-            <FrequencyInput
-              value={frequency}
-              onSubmit={(kHz) => setFrequency(Math.min(kHz, 30000))}
-            />
-            <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
-              <Button
-                variant={viewLocked ? "outline" : "ghost"}
-                size="icon"
-                className="size-8"
-                onClick={() => {
-                  const next = !viewLocked;
-                  sendPatch({ view_locked: next });
-                  if (next) {
-                    const { startKHz, endKHz } = useBandViewStore.getState();
-                    const span = endKHz - startKHz;
-                    const newStart = frequency - span / 2;
-                    useBandViewStore.getState().setView(newStart, newStart + span);
-                  }
-                }}
-              >
-                {viewLocked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
-              </Button>
-            </Tooltip>
-          </div>
-
+        <header className="grid h-[54px] shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b bg-background px-4" dir="rtl">
           {/* Right: status + multiplayer + toggle info */}
-          <div className="flex items-center gap-3 justify-self-end">
+          <div className="flex items-center gap-3 justify-self-start pl-4" dir="ltr">
             {status !== "connected" && status !== "idle" && (
               <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
                 status === "connecting" || status === "reconnecting"
@@ -1048,15 +1165,92 @@ export function StreamPlayerPage() {
                 {muted ? <VolumeOffIcon className="size-4" /> : <Volume2Icon className="size-4" />}
               </Button>
             </Tooltip>
-            <Tooltip content="Toggle other stuff">
+            <Tooltip content={sidebarOpen ? "Hide info panel" : "Show info panel"}>
               <Button
-                variant="ghost"
+                variant={sidebarOpen ? "outline" : "ghost"}
                 size="icon"
                 onClick={() => setSidebarOpen((v) => !v)}
               >
                 <PanelRightIcon className="size-4" />
               </Button>
             </Tooltip>
+          </div>
+
+          {/* Center: knob + freq + lock (truly centered) */}
+          <div className="flex h-full items-center gap-5 justify-self-center" dir="ltr">
+            <FrequencyInput
+              value={frequency}
+              onSubmit={(kHz) => setFrequency(Math.min(kHz, 30000))}
+            />
+            <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
+              <Button
+                variant={viewLocked ? "outline" : "ghost"}
+                size="icon"
+                className="size-8"
+                onClick={() => {
+                  const next = !viewLocked;
+                  sendPatch({ view_locked: next });
+                  if (next) {
+                    const { startKHz, endKHz } = useBandViewStore.getState();
+                    const span = endKHz - startKHz;
+                    const newStart = frequency - span / 2;
+                    useBandViewStore.getState().setView(newStart, newStart + span);
+                  }
+                }}
+              >
+                {viewLocked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
+              </Button>
+            </Tooltip>
+          </div>
+
+          {/* Left: mode + bandwidth */}
+          <div className="flex items-center gap-3 justify-self-end pr-4" dir="ltr">
+            <Tooltip content="Demodulation mode">
+              <div className="flex h-8 overflow-hidden rounded-md border border-border">
+                {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => {
+                      setMode(m);
+                      const [defaultLo, defaultHi] = MODE_PASSBAND[m] ?? [-4900, 4900];
+                      setLo(defaultLo);
+                      setHi(defaultHi);
+                    }}
+                    className={`px-3.5 text-xs font-medium transition-colors ${
+                      mode === m
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {m.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </Tooltip>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Lo</span>
+              <Tooltip content="Low cut (Hz)">
+                <Input
+                  type="number"
+                  min={-6000}
+                  max={6000}
+                  value={lo}
+                  onChange={(e) => setLo(Number(e.target.value))}
+                  className="h-8 w-20 text-xs"
+                />
+              </Tooltip>
+              <Tooltip content="High cut (Hz)">
+                <Input
+                  type="number"
+                  min={-6000}
+                  max={6000}
+                  value={hi}
+                  onChange={(e) => setHi(Number(e.target.value))}
+                  className="h-8 w-20 text-xs"
+                />
+              </Tooltip>
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Hi</span>
+            </div>
           </div>
         </header>
 
@@ -1111,16 +1305,16 @@ export function StreamPlayerPage() {
 
       {/* Right: info panel (full height, animated) */}
       <aside
-        className={`relative flex shrink-0 flex-col border-l overflow-hidden ${isResizing ? "" : "transition-[width] duration-200 ease-in-out"}`}
+        className={`relative flex shrink-0 flex-col border-l ${isResizing ? "" : "transition-[width] duration-200 ease-in-out"}`}
         style={{ width: sidebarOpen ? sidebarWidth : 0, borderLeftWidth: sidebarOpen ? 1 : 0 }}
       >
-        {/* Resize handle */}
+        {/* Resize handle — positioned outside the overflow-hidden content wrapper */}
         <div
-          className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize transition-colors hover:border-l hover:border-primary"
+          className="absolute inset-y-0 -left-1.5 z-20 w-3 cursor-col-resize hover:bg-primary/30"
           onMouseDown={onResizeStart}
         />
         <div
-          className="flex min-h-0 flex-1 flex-col"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
           style={{ minWidth: sidebarWidth }}
         >
           <InfoPanelHolder
@@ -1216,71 +1410,90 @@ export function StreamPlayerPage() {
         </div>
       )}
 
-      {/* ── Source picker drawer ── */}
-      <BottomDrawer
+      {/* ── Source picker overlay ── */}
+      <SourceOverlay
         open={sourceDrawerOpen}
         onClose={() => setSourceDrawerOpen(false)}
-        className="h-[65vh]"
-        hideHeader
-      >
-        <div className="h-full">
-          <div className="flex h-full">
-            <div className="min-w-0 flex-1">
-              {mapLoading ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  Loading map sources...
-                </div>
-              ) : (
-                <SourceMapPicker
-                  sources={mapSources}
-                  counts={mapCounts}
-                  selectedSourceId={pendingSourceId}
-                  showCounts={false}
-                  className="h-full"
-                  onHoverSource={onMapHoverSource}
-                  onSelectSource={onMapSelectSource}
+        leftPanel={
+          <SourceSearchPanel
+            sources={mapSources}
+            favoriteSources={favoriteSources}
+            favoriteIds={favoriteIds}
+            counts={mapCounts}
+            selectedSourceId={pendingSourceId}
+            onSelectSource={(source) => {
+              onMapSelectSource(source);
+            }}
+            onFlyTo={(source) => {
+              if (source.latitude != null && source.longitude != null) {
+                mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
+              }
+            }}
+          />
+        }
+        globe={
+          mapLoading ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              Loading map sources...
+            </div>
+          ) : (
+            <SourceMapPicker
+              ref={mapPickerRef}
+              sources={mapSources}
+              counts={mapCounts}
+              selectedSourceId={pendingSourceId}
+              favoriteIds={favoriteIds}
+              showCounts={false}
+              className="h-full"
+              onHoverSource={onMapHoverSource}
+              onSelectSource={onMapSelectSource}
+              onDeselectSource={() => {
+                setPendingSourceId(sourceId);
+                setProbeStatus("idle");
+                setProbeResult(null);
+              }}
+            />
+          )
+        }
+        sidebar={
+          <>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {displayedSource ? (
+                <SourceSection
+                  source={displayedSource}
+                  sourceId={pendingSourceId}
+                  isFavorite={favoriteIds.has(displayedSource.id)}
+                  onToggleFavorite={toggleFavorite}
                 />
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <p className="text-xs uppercase tracking-widest text-muted-foreground">No source selected</p>
+                </div>
               )}
             </div>
-            <aside className="h-full w-[380px] shrink-0 border-l border-border/80">
-              <div className="flex h-full flex-col">
-                <div className="min-h-0 flex-1 overflow-auto">
-                  {displayedSource ? (
-                    <SourceSection
-                      source={displayedSource}
-                      sourceId={pendingSourceId}
-                    />
-                  ) : (
-                    <div className="flex h-full items-center justify-center">
-                      <p className="text-xs uppercase tracking-widest text-muted-foreground">Click on a dot</p>
-                    </div>
-                  )}
-                </div>
-                {pendingSourceId && pendingSourceId !== sourceId && (
-                  <div className="shrink-0 border-t border-border/80 p-3">
-                    <ProbeStatusBox
-                      status={probeStatus}
-                      result={probeResult}
-                      actionLabel="Change"
-                      onAction={() => {
-                        patchSource(pendingSourceId);
-                        setSourceDrawerOpen(false);
-                        setProbeStatus("idle");
-                        setProbeResult(null);
-                      }}
-                      onSkip={() => {
-                        probeGenRef.current++;
-                        setProbeStatus("idle");
-                        setProbeResult(null);
-                      }}
-                    />
-                  </div>
-                )}
+            {pendingSourceId && pendingSourceId !== sourceId && (
+              <div className="shrink-0 border-t border-border/80 p-3">
+                <ProbeStatusBox
+                  status={probeStatus}
+                  result={probeResult}
+                  actionLabel="Change"
+                  onAction={() => {
+                    patchSource(pendingSourceId);
+                    setSourceDrawerOpen(false);
+                    setProbeStatus("idle");
+                    setProbeResult(null);
+                  }}
+                  onSkip={() => {
+                    probeGenRef.current++;
+                    setProbeStatus("idle");
+                    setProbeResult(null);
+                  }}
+                />
               </div>
-            </aside>
-          </div>
-        </div>
-      </BottomDrawer>
+            )}
+          </>
+        }
+      />
     </div>
   );
 }

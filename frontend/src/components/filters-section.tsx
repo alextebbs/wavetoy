@@ -15,7 +15,7 @@ export function FiltersSection({
   samplesRef,
 }: FiltersSectionProps) {
   return (
-    <section>
+    <section className="overflow-auto">
       <AudioWaveform samplesRef={samplesRef} height={120} />
       <PostProcessingPanel
         filters={filters}

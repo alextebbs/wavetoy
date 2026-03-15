@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
@@ -39,8 +40,9 @@ type patchStreamRequest struct {
 	AGCOn            *bool                `json:"agc_on"`
 	AGCGainDB        *float64             `json:"agc_gain_db"`
 	BufferMinutes    *int                 `json:"buffer_minutes"`
-	Filters          *models.FilterConfig `json:"filters"`
-	AutoFallback     *bool                `json:"auto_fallback"`
+	Filters          *models.FilterConfig  `json:"filters"`
+	Interpreter      *interpreter.Config   `json:"interpreter"`
+	AutoFallback     *bool                 `json:"auto_fallback"`
 	AutoFallbackKind *string              `json:"auto_fallback_kind"`
 	ViewLocked       *bool                `json:"view_locked"`
 }
@@ -210,7 +212,11 @@ func (s *Server) deleteStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, req patchStreamRequest, baseVersion int64) (*models.Stream, *patchStreamError) {
+func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, req patchStreamRequest, baseVersion int64, patchBy ...string) (*models.Stream, *patchStreamError) {
+	by := ""
+	if len(patchBy) > 0 {
+		by = patchBy[0]
+	}
 	updated := db.UpdateStreamParams{
 		SourceID:         existing.SourceID,
 		FrequencyKHz:     existing.FrequencyKHz,
@@ -222,6 +228,7 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		AGCGainDB:        existing.AGCGainDB,
 		BufferMinutes:    existing.BufferMinutes,
 		Filters:          existing.Filters,
+		Interpreter:      existing.Interpreter,
 		AutoFallback:     existing.AutoFallback,
 		AutoFallbackKind: existing.AutoFallbackKind,
 		ViewLocked:       existing.ViewLocked,
@@ -286,6 +293,10 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		updated.Filters = *req.Filters
 		changed = true
 	}
+	if req.Interpreter != nil {
+		updated.Interpreter = *req.Interpreter
+		changed = true
+	}
 	if req.AutoFallback != nil {
 		updated.AutoFallback = *req.AutoFallback
 		changed = true
@@ -335,7 +346,223 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		s.fallbackManager.OnStreamUpdated(*stream)
 	}
 
+	s.logPatchChanges(existing, stream, by)
+
 	return stream, nil
+}
+
+func (s *Server) logPatchChanges(before *models.Stream, after *models.Stream, by string) {
+	sid := before.ID
+	byTag := ""
+	if by != "" {
+		byTag = " by=" + by
+	}
+	if before.FrequencyKHz != after.FrequencyKHz {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "tune", "client", "kiwi",
+			fmt.Sprintf("%.3f→%.3f kHz%s", before.FrequencyKHz, after.FrequencyKHz, byTag))
+	}
+	if before.Mode != after.Mode {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "mode", "client", "kiwi",
+			fmt.Sprintf("%s→%s%s", before.Mode, after.Mode, byTag))
+	}
+	if before.BandwidthLowHz != after.BandwidthLowHz || before.BandwidthHighHz != after.BandwidthHighHz {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "bandwidth", "client", "kiwi",
+			fmt.Sprintf("%d..%d→%d..%d Hz%s", before.BandwidthLowHz, before.BandwidthHighHz, after.BandwidthLowHz, after.BandwidthHighHz, byTag))
+	}
+	if before.AGCOn != after.AGCOn {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "agc", "client", "kiwi",
+			fmt.Sprintf("%v→%v%s", before.AGCOn, after.AGCOn, byTag))
+	}
+	if before.Name != after.Name {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "rename", "client", "wavetoy",
+			fmt.Sprintf("%s→%s%s", before.Name, after.Name, byTag))
+	}
+	if !filtersEqual(before.Filters, after.Filters) {
+		desc := describeFilterChanges(before.Filters, after.Filters)
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "filters", "client", "wavetoy",
+			fmt.Sprintf("%s%s", desc, byTag))
+	}
+	if !interpreterEqual(before.Interpreter, after.Interpreter) {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "interpreter", "client", "wavetoy",
+			fmt.Sprintf("type=%s enabled=%v%s", after.Interpreter.Type, after.Interpreter.Enabled, byTag))
+	}
+	if before.AutoFallback != after.AutoFallback {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "auto_fallback", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.AutoFallback, after.AutoFallback, byTag))
+	}
+	if before.ViewLocked != after.ViewLocked {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "view_locked", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.ViewLocked, after.ViewLocked, byTag))
+	}
+}
+
+func filtersEqual(a, b models.FilterConfig) bool {
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) == string(bj)
+}
+
+func describeFilterChanges(before, after models.FilterConfig) string {
+	var parts []string
+
+	type filterPair struct {
+		name   string
+		before enabledCfg
+		after  enabledCfg
+	}
+	pairs := []filterPair{
+		{"low_pass", wrapFilter(before.LowPass), wrapFilter(after.LowPass)},
+		{"high_pass", wrapFilter(before.HighPass), wrapFilter(after.HighPass)},
+		{"notch", wrapFilter(before.Notch), wrapFilter(after.Notch)},
+		{"noise_gate", wrapFilter(before.NoiseGate), wrapFilter(after.NoiseGate)},
+		{"soft_clipper", wrapFilter(before.SoftClipper), wrapFilter(after.SoftClipper)},
+		{"noise_reducer", wrapFilter(before.NoiseReducer), wrapFilter(after.NoiseReducer)},
+	}
+	for _, p := range pairs {
+		bOn, aOn := p.before.enabled, p.after.enabled
+		bJSON, _ := json.Marshal(p.before.raw)
+		aJSON, _ := json.Marshal(p.after.raw)
+		bStr, aStr := string(bJSON), string(aJSON)
+
+		if bStr == aStr {
+			continue
+		}
+		if !bOn && aOn {
+			parts = append(parts, p.name+" on"+filterParamSummary(p.name, p.after))
+		} else if bOn && !aOn {
+			parts = append(parts, p.name+" off")
+		} else {
+			parts = append(parts, p.name+filterParamDiff(p.name, p.before, p.after))
+		}
+	}
+	if len(parts) == 0 {
+		return "filters updated"
+	}
+	return strings.Join(parts, ", ")
+}
+
+type enabledCfg struct {
+	enabled bool
+	raw     any
+}
+
+func wrapFilter[T interface{ IsEnabled() bool }](f *T) enabledCfg {
+	if f == nil {
+		return enabledCfg{enabled: false, raw: nil}
+	}
+	return enabledCfg{enabled: (*f).IsEnabled(), raw: *f}
+}
+
+func filterParamSummary(name string, c enabledCfg) string {
+	switch name {
+	case "low_pass":
+		if v, ok := c.raw.(models.LowPassConfig); ok {
+			return fmt.Sprintf(" cutoff=%.0fHz", v.CutoffHz)
+		}
+	case "high_pass":
+		if v, ok := c.raw.(models.HighPassConfig); ok {
+			return fmt.Sprintf(" cutoff=%.0fHz", v.CutoffHz)
+		}
+	case "notch":
+		if v, ok := c.raw.(models.NotchConfig); ok {
+			return fmt.Sprintf(" center=%.0fHz q=%.1f", v.CenterHz, v.Q)
+		}
+	case "noise_gate":
+		if v, ok := c.raw.(models.NoiseGateConfig); ok {
+			return fmt.Sprintf(" thresh=%.0fdB", v.ThresholdDB)
+		}
+	case "soft_clipper":
+		if v, ok := c.raw.(models.SoftClipperConfig); ok {
+			return fmt.Sprintf(" drive=%.0fdB ceil=%.0fdB", v.DriveDB, v.CeilingDB)
+		}
+	case "noise_reducer":
+		if v, ok := c.raw.(models.NoiseReducerConfig); ok {
+			return fmt.Sprintf(" strength=%.1f floor=%.0fdB", v.Strength, v.FloorDB)
+		}
+	}
+	return ""
+}
+
+func filterParamDiff(name string, before, after enabledCfg) string {
+	switch name {
+	case "low_pass":
+		b, _ := before.raw.(models.LowPassConfig)
+		a, _ := after.raw.(models.LowPassConfig)
+		if b.CutoffHz != a.CutoffHz {
+			return fmt.Sprintf(" cutoff %.0f→%.0fHz", b.CutoffHz, a.CutoffHz)
+		}
+	case "high_pass":
+		b, _ := before.raw.(models.HighPassConfig)
+		a, _ := after.raw.(models.HighPassConfig)
+		if b.CutoffHz != a.CutoffHz {
+			return fmt.Sprintf(" cutoff %.0f→%.0fHz", b.CutoffHz, a.CutoffHz)
+		}
+	case "notch":
+		b, _ := before.raw.(models.NotchConfig)
+		a, _ := after.raw.(models.NotchConfig)
+		var diffs []string
+		if b.CenterHz != a.CenterHz {
+			diffs = append(diffs, fmt.Sprintf("center %.0f→%.0fHz", b.CenterHz, a.CenterHz))
+		}
+		if b.Q != a.Q {
+			diffs = append(diffs, fmt.Sprintf("q %.1f→%.1f", b.Q, a.Q))
+		}
+		if len(diffs) > 0 {
+			return " " + strings.Join(diffs, " ")
+		}
+	case "noise_gate":
+		b, _ := before.raw.(models.NoiseGateConfig)
+		a, _ := after.raw.(models.NoiseGateConfig)
+		var diffs []string
+		if b.ThresholdDB != a.ThresholdDB {
+			diffs = append(diffs, fmt.Sprintf("thresh %.0f→%.0fdB", b.ThresholdDB, a.ThresholdDB))
+		}
+		if b.HoldMs != a.HoldMs {
+			diffs = append(diffs, fmt.Sprintf("hold %.0f→%.0fms", b.HoldMs, a.HoldMs))
+		}
+		if b.AttackMs != a.AttackMs {
+			diffs = append(diffs, fmt.Sprintf("attack %.0f→%.0fms", b.AttackMs, a.AttackMs))
+		}
+		if b.ReleaseMs != a.ReleaseMs {
+			diffs = append(diffs, fmt.Sprintf("release %.0f→%.0fms", b.ReleaseMs, a.ReleaseMs))
+		}
+		if len(diffs) > 0 {
+			return " " + strings.Join(diffs, " ")
+		}
+	case "soft_clipper":
+		b, _ := before.raw.(models.SoftClipperConfig)
+		a, _ := after.raw.(models.SoftClipperConfig)
+		var diffs []string
+		if b.DriveDB != a.DriveDB {
+			diffs = append(diffs, fmt.Sprintf("drive %.0f→%.0fdB", b.DriveDB, a.DriveDB))
+		}
+		if b.CeilingDB != a.CeilingDB {
+			diffs = append(diffs, fmt.Sprintf("ceil %.0f→%.0fdB", b.CeilingDB, a.CeilingDB))
+		}
+		if len(diffs) > 0 {
+			return " " + strings.Join(diffs, " ")
+		}
+	case "noise_reducer":
+		b, _ := before.raw.(models.NoiseReducerConfig)
+		a, _ := after.raw.(models.NoiseReducerConfig)
+		var diffs []string
+		if b.Strength != a.Strength {
+			diffs = append(diffs, fmt.Sprintf("strength %.1f→%.1f", b.Strength, a.Strength))
+		}
+		if b.FloorDB != a.FloorDB {
+			diffs = append(diffs, fmt.Sprintf("floor %.0f→%.0fdB", b.FloorDB, a.FloorDB))
+		}
+		if len(diffs) > 0 {
+			return " " + strings.Join(diffs, " ")
+		}
+	}
+	return ""
+}
+
+func interpreterEqual(a, b interpreter.Config) bool {
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) == string(bj)
 }
 
 func (s *Server) getStreamLogs(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +594,26 @@ func (s *Server) getStreamLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stream_id": streamID,
 		"level":     s.streamLog.GetLevel(streamID),
+		"count":     len(entries),
+		"entries":   entries,
+	})
+}
+
+func (s *Server) downloadStreamLogs(w http.ResponseWriter, r *http.Request) {
+	streamID := chi.URLParam(r, "id")
+	if strings.TrimSpace(streamID) == "" {
+		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
+		return
+	}
+
+	level := s.streamLog.GetLevel(streamID)
+	entries := s.streamLog.Snapshot(streamID, level, streamlog.DefaultBufferSize)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="logs-%s.json"`, streamID))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"stream_id": streamID,
+		"level":     level,
 		"count":     len(entries),
 		"entries":   entries,
 	})

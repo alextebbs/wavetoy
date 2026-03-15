@@ -85,6 +85,10 @@ func (l *Logger) Debug(streamID, action, msg string) {
 	l.emit(streamID, LevelDebug, action, "", "", msg)
 }
 
+func (l *Logger) Log(streamID string, level LogLevel, action, msg string) {
+	l.emit(streamID, level, action, "", "", msg)
+}
+
 func (l *Logger) Wire(streamID string, level LogLevel, action, from, to, msg string) {
 	l.emit(streamID, level, action, from, to, msg)
 }

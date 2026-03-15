@@ -1,5 +1,6 @@
 import { ClipperCurve } from "@/components/clipper-curve";
 import { NoiseGateMeter } from "@/components/noise-gate-meter";
+import { NoiseReducerSpectrum } from "@/components/noise-reducer-spectrum";
 import { NotchSpectrum } from "@/components/notch-spectrum";
 import { PassFilterSpectrum } from "@/components/pass-filter-spectrum";
 import { Label } from "@/components/ui/label";
@@ -27,6 +28,7 @@ const DEFAULTS: Required<FilterConfig> = {
     release_ms: 50,
   },
   soft_clipper: { enabled: false, drive_db: 6, ceiling_db: -3 },
+  noise_reducer: { enabled: false, strength: 0.5, floor_db: -20 },
 };
 
 function merge(filters: FilterConfig): Required<FilterConfig> {
@@ -36,6 +38,7 @@ function merge(filters: FilterConfig): Required<FilterConfig> {
     notch: { ...DEFAULTS.notch, ...filters.notch },
     noise_gate: { ...DEFAULTS.noise_gate, ...filters.noise_gate },
     soft_clipper: { ...DEFAULTS.soft_clipper, ...filters.soft_clipper },
+    noise_reducer: { ...DEFAULTS.noise_reducer, ...filters.noise_reducer },
   };
 }
 
@@ -47,13 +50,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
   }, [filters]);
 
   const emitDebounced = useDebounce((next: Required<FilterConfig>) => {
-    const out: FilterConfig = {};
-    if (next.low_pass.enabled) out.low_pass = next.low_pass;
-    if (next.high_pass.enabled) out.high_pass = next.high_pass;
-    if (next.notch.enabled) out.notch = next.notch;
-    if (next.noise_gate.enabled) out.noise_gate = next.noise_gate;
-    if (next.soft_clipper.enabled) out.soft_clipper = next.soft_clipper;
-    onFiltersChange(out);
+    onFiltersChange(next);
   }, CONTROL_THROTTLE_MS);
 
   const push = (next: Required<FilterConfig>) => {
@@ -146,6 +143,54 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
             push({
               ...local,
               notch: { ...local.notch, q: v },
+            })
+          }
+        />
+      </FilterSection>
+
+      {/* ── Noise Reduction ── */}
+      <FilterSection
+        label="Noise Reduction"
+        enabled={local.noise_reducer.enabled}
+        onToggle={(on) =>
+          push({
+            ...local,
+            noise_reducer: { ...local.noise_reducer, enabled: on },
+          })
+        }
+      >
+        <NoiseReducerSpectrum
+          samplesRef={samplesRef}
+          strength={local.noise_reducer.strength}
+          floorDb={local.noise_reducer.floor_db}
+          height={72}
+          className="rounded border border-border/40"
+        />
+        <SliderRow
+          label="Strength"
+          value={Math.round(local.noise_reducer.strength * 100)}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) =>
+            push({
+              ...local,
+              noise_reducer: { ...local.noise_reducer, strength: v / 100 },
+            })
+          }
+        />
+        <SliderRow
+          label="Floor"
+          value={local.noise_reducer.floor_db}
+          min={-40}
+          max={0}
+          step={1}
+          unit="dB"
+          onChange={(v) =>
+            push({
+              ...local,
+              noise_reducer: { ...local.noise_reducer, floor_db: v },
             })
           }
         />

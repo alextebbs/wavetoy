@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/segmentio/ksuid"
 )
@@ -46,6 +47,7 @@ type UpdateStreamParams struct {
 	AGCGainDB        *float64
 	BufferMinutes    int
 	Filters          models.FilterConfig
+	Interpreter      interpreter.Config
 	AutoFallback     bool
 	AutoFallbackKind string
 	ViewLocked       bool
@@ -140,11 +142,26 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 	if !source.Available {
 		return nil, ErrSourceUnavailable
 	}
+
+	// Only enforce capacity when switching to a different source.
+	// If the stream is already on this source, we already hold a connection
+	// and shouldn't be blocked by other listeners filling it up.
 	if source.Users >= source.MaxListeners {
-		return nil, ErrSourceAtCapacity
+		var currentSourceID string
+		qErr := db.Pool.QueryRow(ctx,
+			`SELECT source_id FROM streams WHERE id = $1 AND tenant_id = $2`,
+			streamID, tenantID,
+		).Scan(&currentSourceID)
+		if qErr != nil || currentSourceID != p.SourceID {
+			return nil, ErrSourceAtCapacity
+		}
 	}
 
 	filtersJSON, jsonErr := p.Filters.Value()
+	if jsonErr != nil {
+		return nil, jsonErr
+	}
+	interpreterJSON, jsonErr := p.Interpreter.Value()
 	if jsonErr != nil {
 		return nil, jsonErr
 	}
@@ -163,13 +180,14 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    agc_gain_db = $8,
 			    buffer_minutes = $9,
 			    filters = $10,
-			    auto_fallback = $11,
-			    auto_fallback_kind = $12,
-			    view_locked = $13,
+			    interpreter = $11,
+			    auto_fallback = $12,
+			    auto_fallback_kind = $13,
+			    view_locked = $14,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $14 AND tenant_id = $15 AND version = $16
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID, baseVersion)
+			WHERE id = $15 AND tenant_id = $16 AND version = $17
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID, baseVersion)
 	} else {
 		tag, err = db.Pool.Exec(ctx, `
 			UPDATE streams
@@ -183,13 +201,14 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    agc_gain_db = $8,
 			    buffer_minutes = $9,
 			    filters = $10,
-			    auto_fallback = $11,
-			    auto_fallback_kind = $12,
-			    view_locked = $13,
+			    interpreter = $11,
+			    auto_fallback = $12,
+			    auto_fallback_kind = $13,
+			    view_locked = $14,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $14 AND tenant_id = $15
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID)
+			WHERE id = $15 AND tenant_id = $16
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID)
 	}
 	if err != nil {
 		return nil, err
@@ -214,7 +233,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
+		       activity_sensitivity, state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_fallback, auto_fallback_kind, view_locked,
 		       created_at, updated_at
 		FROM streams
@@ -222,7 +241,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 		&stream.AutoFallback, &stream.AutoFallbackKind, &stream.ViewLocked,
 		&stream.CreatedAt, &stream.UpdatedAt,
 	)
@@ -242,7 +261,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
+		       activity_sensitivity, state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_fallback, auto_fallback_kind, view_locked,
 		       created_at, updated_at
 		FROM streams
@@ -261,7 +280,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		if err := rows.Scan(
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 			&stream.AutoFallback, &stream.AutoFallbackKind, &stream.ViewLocked,
 			&stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {

@@ -8,6 +8,7 @@ export interface InfoPanelTab {
   icon: ReactNode;
   label: string;
   content: ReactNode;
+  active?: boolean;
 }
 
 interface InfoPanelHolderProps {
@@ -39,6 +40,7 @@ export function InfoPanelHolder({
                 tab.id === activeId
                   ? "text-foreground"
                   : "text-muted-foreground/60",
+                tab.active && "ring-1 ring-primary/50",
               )}
             >
               {tab.icon}
@@ -51,7 +53,7 @@ export function InfoPanelHolder({
           </div>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {activeTab?.content}
       </div>
     </div>

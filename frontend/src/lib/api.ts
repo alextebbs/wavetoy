@@ -28,12 +28,34 @@ export type NotchConfig = {
   q: number;
 };
 
+export type NoiseReducerConfig = {
+  enabled: boolean;
+  strength: number;
+  floor_db: number;
+};
+
 export type FilterConfig = {
   low_pass?: LowPassConfig;
   high_pass?: HighPassConfig;
   notch?: NotchConfig;
   noise_gate?: NoiseGateConfig;
   soft_clipper?: SoftClipperConfig;
+  noise_reducer?: NoiseReducerConfig;
+};
+
+export type InterpreterConfig = {
+  type?: string;
+  enabled?: boolean;
+  sidetone_hz?: number;
+  wpm?: number;
+};
+
+export type InterpreterOutput = {
+  interpreter: string;
+  text?: string;
+  wpm?: number;
+  sidetone_hz?: number;
+  clear?: boolean;
 };
 
 export type Stream = {
@@ -53,6 +75,7 @@ export type Stream = {
   state: string;
   version: number;
   filters?: FilterConfig;
+  interpreter?: InterpreterConfig;
   wf_view_start_khz: number;
   wf_view_end_khz: number;
   auto_fallback: boolean;
@@ -247,6 +270,10 @@ export async function listSources(): Promise<Source[]> {
   return asArray<Source>(await apiGet<unknown>("/sources?limit=50&offset=0"));
 }
 
+export async function getSource(sourceId: string): Promise<Source> {
+  return apiGet<Source>(`/sources/${sourceId}`);
+}
+
 export async function getMapSources(): Promise<MapSourcesResponse> {
   const response = await apiGet<Partial<MapSourcesResponse>>("/sources/map");
   return {
@@ -306,4 +333,65 @@ export async function probeSource(
   return apiPost<ProbeResult>(`/sources/${sourceId}/probe`, {
     stream_id: streamId,
   });
+}
+
+export async function listFavorites(): Promise<string[]> {
+  return asArray<string>(await apiGet<unknown>("/favorites"));
+}
+
+export async function listFavoriteSources(): Promise<Source[]> {
+  return asArray<Source>(await apiGet<unknown>("/favorites/sources"));
+}
+
+export async function addFavorite(sourceId: string): Promise<void> {
+  const res = await fetch(`/api/favorites/${sourceId}`, {
+    method: "PUT",
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function removeFavorite(sourceId: string): Promise<void> {
+  const res = await fetch(`/api/favorites/${sourceId}`, {
+    method: "DELETE",
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export type RecentSource = {
+  source: Source;
+  started_at: string;
+};
+
+export async function listRecentSources(
+  streamId: string,
+): Promise<RecentSource[]> {
+  return asArray<RecentSource>(
+    await apiGet<unknown>(`/streams/${streamId}/recent-sources`),
+  );
+}
+
+export async function setStreamDebug(
+  streamId: string,
+  level: "debug" | "info",
+): Promise<void> {
+  await apiPost(`/streams/${streamId}/debug`, { level });
+}
+
+export async function downloadStreamLogs(streamId: string): Promise<void> {
+  const res = await fetch(`/api/streams/${streamId}/logs/download`, {
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `logs-${streamId}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }

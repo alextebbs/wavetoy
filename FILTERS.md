@@ -162,9 +162,7 @@ For small inputs, `tanh(x) ≈ x`, so the signal passes through unchanged. For l
 | `drive_db` | 0–24 | 6 | How much gain to apply before the saturation curve |
 | `ceiling_db` | -12 to 0 | -1 | Output ceiling in dB relative to full scale |
 
-### 5. Noise Reduction (Spectral Subtraction) — Phase 2
-
-> **Deferred to phase 2.** The four filters above are implemented. Noise reduction requires an FFT, overlap-add buffering, and noise floor estimation — significantly more complexity. It will be added separately once the core pipeline is proven.
+### 5. Noise Reduction (Spectral Subtraction)
 
 Estimates and subtracts background noise from the signal, improving clarity by reducing stationary noise (receiver hiss, atmospheric static). This is a frequency-domain filter — the only one in the chain that requires an FFT.
 
@@ -263,7 +261,7 @@ type FilterConfig struct {
     HighPass     *HighPassConfig     `json:"high_pass,omitempty"`
     NoiseGate    *NoiseGateConfig    `json:"noise_gate,omitempty"`
     SoftClipper  *SoftClipperConfig  `json:"soft_clipper,omitempty"`
-    // NoiseReducer will be added in phase 2
+    NoiseReducer *NoiseReducerConfig `json:"noise_reducer,omitempty"`
 }
 
 type LowPassConfig struct {
@@ -300,10 +298,11 @@ Filters always execute in a fixed order, regardless of which are enabled. The or
 
 ```
 1. High-Pass        ← remove DC/hum first (protects downstream filters from DC bias)
-2. Noise Gate       ← gate decision is based on the cleaned signal
-3. Low-Pass         ← shape the frequency response after noise processing
-4. Soft Clipper     ← tame peaks after all other processing
-(Phase 2: Noise Reduction will slot in at position 2, before Noise Gate)
+2. Notch            ← kill tonal interference before downstream filters see it
+3. Noise Reducer    ← spectral subtraction before gating/shaping
+4. Noise Gate       ← gate decision is based on the cleaned signal
+5. Low-Pass         ← shape the frequency response after noise processing
+6. Soft Clipper     ← tame peaks after all other processing
 ```
 
 This ordering is not user-configurable. Reordering DSP filters without understanding the implications produces bad results. A fixed, well-chosen order is the right default.
@@ -388,7 +387,9 @@ func BuildChain(cfg FilterConfig, sampleRate int) *Chain {
     if cfg.HighPass != nil && cfg.HighPass.Enabled {
         filters = append(filters, NewHighPass(cfg.HighPass.CutoffHz, float64(sampleRate)))
     }
-    // Phase 2: NoiseReducer will go here
+    if cfg.NoiseReducer != nil && cfg.NoiseReducer.Enabled {
+        filters = append(filters, NewNoiseReducer(cfg.NoiseReducer.Strength, cfg.NoiseReducer.FloorDB))
+    }
     if cfg.NoiseGate != nil && cfg.NoiseGate.Enabled {
         filters = append(filters, NewNoiseGate(cfg.NoiseGate, sampleRate))
     }
@@ -415,8 +416,8 @@ Filters run in the pump goroutine's hot path. At ~23.4 frames/sec with ~512 samp
 | Low-Pass (biquad) | ~2 µs | Same as high-pass |
 | Noise Gate | ~5 µs | RMS computation + envelope smoothing |
 | Soft Clipper | ~3 µs | tanh per sample (or polynomial approximation) |
-| Noise Reduction (phase 2) | ~50 µs | 512-point FFT + IFFT + bin processing |
-| **Full chain (phase 1)** | **~12 µs** | **< 0.03% of frame budget** |
+| Noise Reduction | ~50 µs | 512-point FFT + IFFT + bin processing |
+| **Full chain** | **~62 µs** | **< 0.15% of frame budget** |
 
 All filters are zero-allocation in steady state. The initial `BuildChain` allocates filter structs and their internal buffers once. `Process` calls modify samples in-place (or into pre-allocated buffers for the FFT path) with no per-frame allocation.
 
@@ -634,7 +635,7 @@ type FilterConfig = {
     release_ms: number;
   };
   soft_clipper?: { enabled: boolean; drive_db: number; ceiling_db: number };
-  // noise_reducer added in phase 2
+  noise_reducer?: { enabled: boolean; strength: number; floor_db: number };
 };
 
 type PostProcessingPanelProps = {
@@ -731,9 +732,13 @@ Attack and release are not exposed in the UI — they use sensible defaults (5 m
 | Drive | Slider | 0–24 dB | 1 | 6 | `{value} dB` |
 | Ceiling | Slider | -12 to 0 dB | 0.5 | -1 | `{value} dB` |
 
-#### Noise Reduction — Phase 2
+#### Noise Reduction
 
-UI controls for noise reduction will be added when the backend filter is implemented.
+| Control | Type | Range | Step | Default | Display |
+|---------|------|-------|------|---------|---------|
+| Enabled | Switch | — | — | off | — |
+| Strength | Slider | 0–100% | 5 | 50 | `{value}%` |
+| Floor | Slider | -40 to 0 dB | 1 | -20 | `{value} dB` |
 
 ### Integration with `stream-player-page.tsx`
 
@@ -798,7 +803,8 @@ On narrow viewports where the sidebar is closed, the post-processing panel is no
 | `internal/filter/biquad.go` | Low-pass and high-pass biquad implementations |
 | `internal/filter/gate.go` | Noise gate implementation |
 | `internal/filter/clipper.go` | Soft clipper implementation |
-| `internal/filter/nr.go` | Noise reduction (spectral subtraction) — phase 2 |
+| `internal/filter/nr.go` | Noise reduction (spectral subtraction) |
+| `internal/filter/fft.go` | Pure-Go radix-2 Cooley-Tukey FFT/IFFT |
 | `internal/filter/filter_test.go` | Tests for all filters |
 | `frontend/src/components/post-processing-panel.tsx` | Post-processing panel UI |
 | `frontend/src/components/ui/slider.tsx` | Slider primitive (shadcn) |
@@ -820,7 +826,7 @@ On narrow viewports where the sidebar is closed, the post-processing panel is no
 | 6 | Extend `patchStreamRequest` to accept `filters`, trigger `ReconfigureFilters` | Backend | Steps 3, 5 |
 | 7 | `NoiseGate` | Backend | Step 1 |
 | 8 | `SoftClipper` | Backend | Step 1 |
-| 9 | `NoiseReducer` (spectral subtraction) — **phase 2** | Backend | Step 1 |
+| 9 | `NoiseReducer` (spectral subtraction) | Backend | Step 1 |
 | 10 | Tests for all filters | Backend | Steps 2, 7–9 |
 | 11 | Add `slider.tsx` + `switch.tsx` UI primitives | Frontend | Nothing |
 | 12 | `post-processing-panel.tsx` — filter controls UI | Frontend | Step 11 |

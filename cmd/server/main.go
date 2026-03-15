@@ -18,6 +18,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/config"
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 	srcsync "github.com/sammy/sdr-radio/internal/sync"
 )
@@ -93,6 +94,12 @@ func main() {
 		srv.BroadcastToStream(streamID, map[string]any{
 			"type":  "stream_state_changed",
 			"state": state,
+		})
+	})
+	srv.StreamManager().SetOnInterpreterOutput(func(streamID string, output interpreter.Output) {
+		srv.BroadcastToStream(streamID, map[string]any{
+			"type":    "interpreter_output",
+			"payload": output,
 		})
 	})
 

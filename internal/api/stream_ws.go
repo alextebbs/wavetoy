@@ -95,10 +95,10 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 	client.joinedAt = time.Now()
 
 	s.registerWSClient(streamID, client)
-	s.streamLog.Info(streamID, "ws.connect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+	s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.connect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 	defer func() {
 		s.unregisterWSClient(streamID, client)
-		s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+		s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.disconnect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 		s.broadcastStreamEvent(streamID, map[string]any{
 			"type": "peer_left",
 			"peer": map[string]string{"session_id": client.sessionID},
@@ -261,8 +261,9 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 		}
 
 		changedFields := collectChangedFields(latest, msg.Patch)
-		updated, apiErr := s.applyPatchStream(r.Context(), latest, msg.Patch, msg.Version)
+		updated, apiErr := s.applyPatchStream(r.Context(), latest, msg.Patch, msg.Version, client.sessionID[:min(8, len(client.sessionID))])
 		if apiErr != nil {
+			s.streamLog.Wire(streamID, streamlog.LevelWarn, "ws.error", "wavetoy", "client", fmt.Sprintf("%s: %s", apiErr.Code, apiErr.Error))
 			resp := map[string]any{
 				"type":  "error",
 				"error": apiErr.Error,
@@ -325,6 +326,9 @@ func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []s
 	}
 	if patch.Filters != nil {
 		fields = append(fields, "filters")
+	}
+	if patch.Interpreter != nil {
+		fields = append(fields, "interpreter")
 	}
 	if patch.ViewLocked != nil && *patch.ViewLocked != existing.ViewLocked {
 		fields = append(fields, "view_locked")

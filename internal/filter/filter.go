@@ -78,11 +78,12 @@ func (c *Chain) Reconfigure(filters []Filter) {
 
 // BuildFilters constructs the ordered filter slice from a FilterConfig.
 // The execution order is fixed for signal quality:
-//  1. High-Pass    (remove DC/hum)
-//  2. Notch        (kill tonal interference before downstream filters see it)
-//  3. Noise Gate   (gate on cleaned signal)
-//  4. Low-Pass     (shape frequency response)
-//  5. Soft Clipper  (tame peaks last)
+//  1. High-Pass       (remove DC/hum)
+//  2. Notch           (kill tonal interference before downstream filters see it)
+//  3. Noise Reducer   (spectral subtraction — best before gating/shaping)
+//  4. Noise Gate      (gate on cleaned signal)
+//  5. Low-Pass        (shape frequency response)
+//  6. Soft Clipper    (tame peaks last)
 func BuildFilters(cfg models.FilterConfig, sampleRate int) []Filter {
 	var filters []Filter
 
@@ -91,6 +92,9 @@ func BuildFilters(cfg models.FilterConfig, sampleRate int) []Filter {
 	}
 	if cfg.Notch != nil && cfg.Notch.Enabled {
 		filters = append(filters, NewNotch(cfg.Notch.CenterHz, cfg.Notch.Q, float64(sampleRate)))
+	}
+	if cfg.NoiseReducer != nil && cfg.NoiseReducer.Enabled {
+		filters = append(filters, NewNoiseReducer(cfg.NoiseReducer.Strength, cfg.NoiseReducer.FloorDB))
 	}
 	if cfg.NoiseGate != nil && cfg.NoiseGate.Enabled {
 		filters = append(filters, NewNoiseGate(

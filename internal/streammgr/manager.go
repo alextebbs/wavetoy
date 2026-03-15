@@ -12,6 +12,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
 	"github.com/sammy/sdr-radio/internal/filter"
+	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/sammy/sdr-radio/internal/ringbuf"
@@ -32,6 +33,17 @@ type Manager struct {
 	onDegraded      func(streamID, reason string)
 	onStateChangeMu sync.RWMutex
 	onStateChange   func(streamID, state string)
+
+	onInterpreterOutputMu sync.RWMutex
+	onInterpreterOutput   func(streamID string, output interpreter.Output)
+}
+
+type listenSession struct {
+	sourceID  string
+	startedAt time.Time
+	gotSound  atomic.Bool
+	gotWF     atomic.Bool
+	committed atomic.Bool
 }
 
 type activeStream struct {
@@ -51,11 +63,23 @@ type activeStream struct {
 	filterChain   *filter.Chain
 	autoFallback  bool
 	qualityMon    *fallback.QualityMonitor
+	listen        *listenSession
+
+	interp interpreter.Interpreter
 
 	framesFromKiwi     atomic.Int64
 	bytesFromKiwi      atomic.Int64
 	fanoutDelivered    atomic.Int64
 	fanoutDroppedFinal atomic.Int64
+
+	// Pump performance tracking (updated per-frame, read every 10s)
+	perfMu          sync.Mutex
+	perfFrames      int64
+	perfTotalUs     int64
+	perfMaxUs       int64
+	perfFilterUs    int64
+	perfInterpUs    int64
+	perfBroadcastUs int64
 }
 
 func New(database *db.DB, logger *streamlog.Logger) *Manager {
@@ -79,6 +103,21 @@ func (m *Manager) SetOnStateChange(fn func(streamID, state string)) {
 	m.onStateChangeMu.Unlock()
 }
 
+func (m *Manager) SetOnInterpreterOutput(fn func(streamID string, output interpreter.Output)) {
+	m.onInterpreterOutputMu.Lock()
+	m.onInterpreterOutput = fn
+	m.onInterpreterOutputMu.Unlock()
+}
+
+func (m *Manager) notifyInterpreterOutput(streamID string, output interpreter.Output) {
+	m.onInterpreterOutputMu.RLock()
+	fn := m.onInterpreterOutput
+	m.onInterpreterOutputMu.RUnlock()
+	if fn != nil {
+		fn(streamID, output)
+	}
+}
+
 func (m *Manager) notifyStateChange(streamID, state string) {
 	m.onStateChangeMu.RLock()
 	fn := m.onStateChange
@@ -86,6 +125,33 @@ func (m *Manager) notifyStateChange(streamID, state string) {
 	if fn != nil {
 		fn(streamID, state)
 	}
+}
+
+func newListenSession(sourceID string) *listenSession {
+	return &listenSession{
+		sourceID:  sourceID,
+		startedAt: time.Now(),
+	}
+}
+
+func (m *Manager) tryCommitListen(as *activeStream) {
+	ls := as.listen
+	if ls == nil {
+		return
+	}
+	if !ls.gotSound.Load() || !ls.gotWF.Load() {
+		return
+	}
+	if ls.committed.Swap(true) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.db.InsertRecentSource(ctx, as.id, ls.sourceID, ls.startedAt); err != nil {
+			m.log.Warn(as.id, "recent.insert", fmt.Sprintf("err=%v", err))
+		}
+	}()
 }
 
 func (m *Manager) SetAutoFallback(streamID string, enabled bool) {
@@ -142,6 +208,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 		if as.startedAt.IsZero() {
 			as.startedAt = time.Now()
 		}
+		as.listen = newListenSession(stream.SourceID)
 		gen := as.generation
 		as.mu.Unlock()
 		_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
@@ -172,7 +239,6 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	existing.mu.RUnlock()
 
 	if currentClient != nil && currentSourceID == stream.SourceID {
-		m.log.Info(stream.ID, "retune", fmt.Sprintf("freq=%.3fkHz mode=%s", stream.FrequencyKHz, stream.Mode))
 		if err := currentClient.Reconfigure(kiwi.Config{
 			Name:          stream.Name,
 			FrequencyKHz:  stream.FrequencyKHz,
@@ -185,10 +251,11 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 			return err
 		}
 		existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, m.SampleRate(stream.ID)))
+		m.reconfigureInterpreter(existing, stream)
 		return nil
 	}
 
-	m.log.Info(stream.ID, "source.switch", fmt.Sprintf("%s → %s", currentSourceID, stream.SourceID))
+	m.log.Wire(stream.ID, streamlog.LevelInfo, "source.switch", "wavetoy", "kiwi", fmt.Sprintf("%s → %s", currentSourceID, stream.SourceID))
 	client, wfClient, err := m.connectClient(ctx, stream)
 	if err != nil {
 		_ = m.db.UpdateStreamState(ctx, stream.ID, "stopped")
@@ -203,12 +270,14 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	existing.wfClient = wfClient
 	existing.sourceID = stream.SourceID
 	existing.generation++
+	existing.listen = newListenSession(stream.SourceID)
 	gen := existing.generation
 	existing.mu.Unlock()
 
 	_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
 	m.notifyStateChange(stream.ID, "active")
 	existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, client.SampleRate()))
+	m.reconfigureInterpreter(existing, stream)
 	m.startPump(existing, client, gen)
 	if wfClient != nil {
 		m.startWFPump(existing, wfClient, gen)
@@ -253,10 +322,10 @@ func (m *Manager) connectClient(ctx context.Context, stream models.Stream) (*kiw
 		AGCGainDB:     stream.AGCGainDB,
 	}, ts, logFn)
 	if err != nil {
-		m.log.Error(stream.ID, "connect.fail", fmt.Sprintf("source=%s:%d err=%v", source.Host, source.Port, err))
+		m.log.Wire(stream.ID, streamlog.LevelError, "connect.fail", "wavetoy", "kiwi", fmt.Sprintf("source=%s:%d err=%v", source.Host, source.Port, err))
 		return nil, nil, err
 	}
-	m.log.Info(stream.ID, "connect", fmt.Sprintf("source=%s:%d freq=%.3fkHz mode=%s", source.Host, source.Port, stream.FrequencyKHz, stream.Mode))
+	m.log.Wire(stream.ID, streamlog.LevelInfo, "connect", "wavetoy", "kiwi", fmt.Sprintf("source=%s:%d freq=%.3fkHz mode=%s", source.Host, source.Port, stream.FrequencyKHz, stream.Mode))
 
 	wfZoom, wfCenter := wfParamsFromView(stream.WFViewStartKHz, stream.WFViewEndKHz)
 	wfClient, err := kiwi.ConnectWF(ctx, kiwi.WFConfig{
@@ -270,10 +339,10 @@ func (m *Manager) connectClient(ctx context.Context, stream models.Stream) (*kiw
 		Compress:  false,
 	}, ts, logFn)
 	if err != nil {
-		m.log.Warn(stream.ID, "wf.connect.fail", fmt.Sprintf("source=%s:%d err=%v (continuing without waterfall)", source.Host, source.Port, err))
+		m.log.Wire(stream.ID, streamlog.LevelWarn, "wf.connect.fail", "wavetoy", "kiwi", fmt.Sprintf("source=%s:%d err=%v (continuing without waterfall)", source.Host, source.Port, err))
 		return client, nil, nil
 	}
-	m.log.Info(stream.ID, "wf.connect", fmt.Sprintf("source=%s:%d", source.Host, source.Port))
+	m.log.Wire(stream.ID, streamlog.LevelInfo, "wf.connect", "wavetoy", "kiwi", fmt.Sprintf("source=%s:%d", source.Host, source.Port))
 
 	return client, wfClient, nil
 }
@@ -323,7 +392,9 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 		startedAt:     time.Now(),
 		ringBuf:       ringbuf.New(bufDuration, bufCapacity),
 		filterChain:   filter.NewChain(stream.Filters, client.SampleRate()),
+		interp:        interpreter.New(stream.Interpreter, client.SampleRate()),
 		autoFallback:  stream.AutoFallback,
+		listen:        newListenSession(stream.SourceID),
 	}
 
 	m.mu.Lock()
@@ -559,7 +630,7 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				m.log.Info(as.id, "pump.stop", fmt.Sprintf("gen=%d reason=shutdown", generation))
 				return
 			case <-client.Done():
-				m.log.Warn(as.id, "disconnect", "kiwi connection closed")
+				m.log.Wire(as.id, streamlog.LevelWarn, "disconnect", "wavetoy", "kiwi", "kiwi connection closed")
 				return
 			case <-metricsTicker.C:
 				m.logAudioMetrics(as, client, generation)
@@ -570,25 +641,66 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				if qm != nil {
 					qm.CheckTimeout()
 				}
-			case frame, ok := <-client.Samples():
-				if !ok {
-					m.log.Warn(as.id, "disconnect", "sample channel closed")
-					return
-				}
-				as.framesFromKiwi.Add(1)
-				as.bytesFromKiwi.Add(int64(len(frame)))
-				filtered := as.filterChain.Process(frame)
-				if as.ringBuf != nil {
-					as.ringBuf.Write(time.Now(), filtered)
-				}
-				as.broadcast(filtered)
+		case frame, ok := <-client.Samples():
+			if !ok {
+				m.log.Wire(as.id, streamlog.LevelWarn, "disconnect", "wavetoy", "kiwi", "sample channel closed")
+				return
+			}
+			frameStart := time.Now()
 
-				as.mu.RLock()
-				frameQM := as.qualityMon
-				as.mu.RUnlock()
-				if frameQM != nil {
-					frameQM.RecordFrame()
+			as.framesFromKiwi.Add(1)
+			as.bytesFromKiwi.Add(int64(len(frame)))
+
+			t0 := time.Now()
+			filtered := as.filterChain.Process(frame)
+			filterElapsed := time.Since(t0)
+
+			if as.ringBuf != nil {
+				as.ringBuf.Write(time.Now(), filtered)
+			}
+
+			t1 := time.Now()
+			as.broadcast(filtered)
+			broadcastElapsed := time.Since(t1)
+
+			as.mu.RLock()
+			interp := as.interp
+			as.mu.RUnlock()
+
+			var interpElapsed time.Duration
+			if interp != nil {
+				t2 := time.Now()
+				outputs := interp.Feed(filtered)
+				interpElapsed = time.Since(t2)
+				for _, o := range outputs {
+					m.notifyInterpreterOutput(as.id, o)
 				}
+			}
+
+			totalElapsed := time.Since(frameStart)
+			as.perfMu.Lock()
+			as.perfFrames++
+			us := totalElapsed.Microseconds()
+			as.perfTotalUs += us
+			if us > as.perfMaxUs {
+				as.perfMaxUs = us
+			}
+			as.perfFilterUs += filterElapsed.Microseconds()
+			as.perfInterpUs += interpElapsed.Microseconds()
+			as.perfBroadcastUs += broadcastElapsed.Microseconds()
+			as.perfMu.Unlock()
+
+			if ls := as.listen; ls != nil && !ls.gotSound.Load() {
+				ls.gotSound.Store(true)
+				m.tryCommitListen(as)
+			}
+
+			as.mu.RLock()
+			frameQM := as.qualityMon
+			as.mu.RUnlock()
+			if frameQM != nil {
+				frameQM.RecordFrame()
+			}
 			}
 		}
 	}()
@@ -617,22 +729,27 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 				return
 			case <-wfClient.Done():
 				if !gotFirstFrame {
-					m.log.Warn(as.id, "wf.disconnect", "closed before receiving data")
+					m.log.Wire(as.id, streamlog.LevelWarn, "wf.disconnect", "wavetoy", "kiwi", "closed before receiving data")
 				}
 				return
 			case <-timer.C:
 				if !gotFirstFrame {
 					m.log.Warn(as.id, "wf.timeout", fmt.Sprintf("no data in %s", wfTimeout))
 				}
-			case frame, ok := <-wfClient.Frames():
-				if !ok {
-					return
-				}
-				if !gotFirstFrame {
-					gotFirstFrame = true
-					timer.Stop()
-				}
-				as.broadcastWF(frame)
+		case frame, ok := <-wfClient.Frames():
+			if !ok {
+				return
+			}
+			if !gotFirstFrame {
+				gotFirstFrame = true
+				timer.Stop()
+			}
+			as.broadcastWF(frame)
+
+			if ls := as.listen; ls != nil && !ls.gotWF.Load() {
+				ls.gotWF.Store(true)
+				m.tryCommitListen(as)
+			}
 			}
 		}
 	}()
@@ -671,6 +788,46 @@ func (m *Manager) logAudioMetrics(as *activeStream, client *kiwi.Client, generat
 		as.fanoutDelivered.Load(),
 		as.fanoutDroppedFinal.Load(),
 	))
+
+	as.perfMu.Lock()
+	frames := as.perfFrames
+	totalUs := as.perfTotalUs
+	maxUs := as.perfMaxUs
+	filterUs := as.perfFilterUs
+	interpUs := as.perfInterpUs
+	broadcastUs := as.perfBroadcastUs
+	as.perfFrames = 0
+	as.perfTotalUs = 0
+	as.perfMaxUs = 0
+	as.perfFilterUs = 0
+	as.perfInterpUs = 0
+	as.perfBroadcastUs = 0
+	as.perfMu.Unlock()
+
+	if frames > 0 {
+		avgUs := totalUs / frames
+		avgFilterUs := filterUs / frames
+		avgInterpUs := interpUs / frames
+		avgBcastUs := broadcastUs / frames
+
+		budgetUs := int64(10_000_000) / frames // per-frame budget based on observed rate
+		maxPct := float64(0)
+		if budgetUs > 0 {
+			maxPct = float64(maxUs) * 100 / float64(budgetUs)
+		}
+
+		level := streamlog.LevelDebug
+		if maxPct >= 100 {
+			level = streamlog.LevelError
+		} else if maxPct >= 80 {
+			level = streamlog.LevelWarn
+		}
+
+		m.log.Log(as.id, level, "pump.perf", fmt.Sprintf(
+			"frames=%d avg=%dµs max=%dµs filter=%dµs interp=%dµs broadcast=%dµs max_budget=%.1f%%",
+			frames, avgUs, maxUs, avgFilterUs, avgInterpUs, avgBcastUs, maxPct,
+		))
+	}
 }
 
 func (m *Manager) ensureReconnect(as *activeStream) {
@@ -682,7 +839,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 	as.reconnecting = true
 	as.mu.Unlock()
 
-	m.log.Info(as.id, "reconnect.start", "initiating reconnection")
+	m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.start", "wavetoy", "kiwi", "initiating reconnection")
 
 	go func() {
 		defer func() {
@@ -749,10 +906,11 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			if as.startedAt.IsZero() {
 				as.startedAt = time.Now()
 			}
+			as.listen = newListenSession(stream.SourceID)
 			gen := as.generation
 			as.mu.Unlock()
 
-			m.log.Info(as.id, "reconnect.ok", fmt.Sprintf("after %d attempts gen=%d", attempt, gen))
+			m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.ok", "wavetoy", "kiwi", fmt.Sprintf("after %d attempts gen=%d", attempt, gen))
 			_ = m.db.UpdateStreamState(context.Background(), as.id, "active")
 			m.notifyStateChange(as.id, "active")
 			m.log.Info(as.id, "state.change", "stopped → active")
@@ -842,6 +1000,25 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+func (m *Manager) reconfigureInterpreter(as *activeStream, stream models.Stream) {
+	sampleRate := m.SampleRate(stream.ID)
+	as.mu.Lock()
+	defer as.mu.Unlock()
+
+	if stream.Interpreter.Enabled {
+		if as.interp != nil && stream.Interpreter.Type != "" {
+			as.interp.Reconfigure(stream.Interpreter)
+		} else {
+			as.interp = interpreter.New(stream.Interpreter, sampleRate)
+		}
+	} else {
+		if as.interp != nil {
+			as.interp.Reset()
+			as.interp = nil
+		}
+	}
 }
 
 func (as *activeStream) broadcast(frame []byte) {

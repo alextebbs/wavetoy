@@ -1,5 +1,6 @@
 import type { MapSourceCounts, Source } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { StarIcon } from "lucide-react";
 
 type SourceDetailsPanelProps = {
   source: Source | null;
@@ -9,6 +10,8 @@ type SourceDetailsPanelProps = {
   hideHostname?: boolean;
   hideSourceName?: boolean;
   className?: string;
+  isFavorite?: boolean;
+  onToggleFavorite?: (sourceId: string) => void;
 };
 
 export function SourceDetailsPanel({
@@ -19,6 +22,8 @@ export function SourceDetailsPanel({
   hideHostname = false,
   hideSourceName = false,
   className,
+  isFavorite,
+  onToggleFavorite,
 }: SourceDetailsPanelProps) {
   return (
     <div className={cn("space-y-3 text-xs text-muted-foreground", className)}>
@@ -35,15 +40,31 @@ export function SourceDetailsPanel({
         {source ? (
           <>
             {!hideHostname && (
-              <a
-                href={`http${source.use_tls ? "s" : ""}://${source.host}:${source.port}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block truncate text-sm uppercase text-foreground hover:text-primary transition-colors"
-                title={`${source.host}:${source.port}`}
-              >
-                {source.host}:{source.port}
-              </a>
+              <div className="flex items-center justify-between gap-2">
+                <a
+                  href={`http${source.use_tls ? "s" : ""}://${source.host}:${source.port}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block min-w-0 truncate text-sm uppercase text-foreground hover:text-primary transition-colors"
+                  title={`${source.host}:${source.port}`}
+                >
+                  {source.host}:{source.port}
+                </a>
+                {onToggleFavorite && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleFavorite(source.id)}
+                    className="shrink-0 p-0.5 transition-colors hover:text-[#f59e0b]"
+                    aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                  >
+                    <StarIcon
+                      className="size-4"
+                      fill={isFavorite ? "currentColor" : "none"}
+                      color={isFavorite ? "#f59e0b" : "currentColor"}
+                    />
+                  </button>
+                )}
+              </div>
             )}
             {!hideSourceName && (
               <p className="truncate text-muted-foreground" title={source.name}>

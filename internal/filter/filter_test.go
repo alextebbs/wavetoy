@@ -272,6 +272,204 @@ func TestNotchPassesOffFrequency(t *testing.T) {
 	}
 }
 
+func TestFFTRoundTrip(t *testing.T) {
+	n := 512
+	re := make([]float64, n)
+	im := make([]float64, n)
+	for i := range re {
+		re[i] = math.Sin(2*math.Pi*3*float64(i)/float64(n)) + 0.5*math.Cos(2*math.Pi*7*float64(i)/float64(n))
+	}
+	orig := make([]float64, n)
+	copy(orig, re)
+
+	fft(re, im)
+	ifft(re, im)
+
+	for i := range re {
+		if math.Abs(re[i]-orig[i]) > 1e-10 {
+			t.Fatalf("FFT round-trip mismatch at %d: got %f, want %f", i, re[i], orig[i])
+		}
+	}
+}
+
+func TestFFTKnownFrequency(t *testing.T) {
+	n := 256
+	re := make([]float64, n)
+	im := make([]float64, n)
+	// Pure tone at bin 10
+	for i := range re {
+		re[i] = math.Cos(2 * math.Pi * 10 * float64(i) / float64(n))
+	}
+	fft(re, im)
+
+	// Bin 10 should have the dominant magnitude
+	peakBin := 0
+	peakMag := 0.0
+	for k := 0; k < n/2; k++ {
+		mag := math.Sqrt(re[k]*re[k] + im[k]*im[k])
+		if mag > peakMag {
+			peakMag = mag
+			peakBin = k
+		}
+	}
+	if peakBin != 10 {
+		t.Errorf("expected peak at bin 10, got bin %d", peakBin)
+	}
+}
+
+func TestNoiseReducerReducesNoise(t *testing.T) {
+	// Generate a 1kHz signal buried in noise
+	dur := 1.0 // 1 second
+	n := int(float64(sampleRate) * dur)
+	signalAmp := 0.3
+	noiseAmp := 0.15
+
+	rng := newDeterministicRng(42)
+
+	// Build the noisy PCM
+	pcm := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		s := signalAmp*math.Sin(2*math.Pi*1000*float64(i)/float64(sampleRate)) + noiseAmp*rng.normalFloat64()
+		if s > 1.0 {
+			s = 1.0
+		} else if s < -1.0 {
+			s = -1.0
+		}
+		v := int16(s * 32767)
+		pcm[i*2] = byte(v)
+		pcm[i*2+1] = byte(v >> 8)
+	}
+
+	// Also generate pure noise for comparison
+	noisePcm := make([]byte, n*2)
+	rng2 := newDeterministicRng(99)
+	for i := 0; i < n; i++ {
+		s := noiseAmp * rng2.normalFloat64()
+		if s > 1.0 {
+			s = 1.0
+		} else if s < -1.0 {
+			s = -1.0
+		}
+		v := int16(s * 32767)
+		noisePcm[i*2] = byte(v)
+		noisePcm[i*2+1] = byte(v >> 8)
+	}
+
+	noiseBefore := measureRMS(noisePcm)
+
+	chain := NewChain(models.FilterConfig{
+		NoiseReducer: &models.NoiseReducerConfig{
+			Enabled:  true,
+			Strength: 1.0,
+			FloorDB:  -20,
+		},
+	}, sampleRate)
+
+	// Prime the noise estimator with pure noise
+	chain.Process(noisePcm)
+	noiseAfter := measureRMS(noisePcm)
+
+	db := rmsRatioDB(noiseBefore, noiseAfter)
+	t.Logf("Pure noise: before=%.4f after=%.4f reduction=%.1f dB", noiseBefore, noiseAfter, db)
+	if db > -3 {
+		t.Errorf("expected at least 3 dB noise reduction on pure noise, got %.1f dB", db)
+	}
+
+	// Now process the signal+noise — the signal should survive
+	signalBefore := measureRMS(pcm)
+	chain.Process(pcm)
+	signalAfter := measureRMS(pcm)
+	signalDB := rmsRatioDB(signalBefore, signalAfter)
+	t.Logf("Signal+noise: before=%.4f after=%.4f change=%.1f dB", signalBefore, signalAfter, signalDB)
+
+	// Signal should not be destroyed (less than 6 dB loss)
+	if signalDB < -6 {
+		t.Errorf("noise reducer destroyed the signal: %.1f dB loss", signalDB)
+	}
+}
+
+func TestNoiseReducerPreservesCleanSignal(t *testing.T) {
+	// In practice, the reducer sees quiet noise before signal starts.
+	// Feed low-level noise to calibrate, then a clean 1kHz tone.
+	noiseAmp := 0.01
+	rng := newDeterministicRng(77)
+
+	// Calibration: ~0.5s of quiet noise
+	calN := sampleRate / 2
+	calPcm := make([]byte, calN*2)
+	for i := 0; i < calN; i++ {
+		s := noiseAmp * rng.normalFloat64()
+		if s > 1.0 {
+			s = 1.0
+		} else if s < -1.0 {
+			s = -1.0
+		}
+		v := int16(s * 32767)
+		calPcm[i*2] = byte(v)
+		calPcm[i*2+1] = byte(v >> 8)
+	}
+
+	chain := NewChain(models.FilterConfig{
+		NoiseReducer: &models.NoiseReducerConfig{
+			Enabled:  true,
+			Strength: 0.5,
+			FloorDB:  -20,
+		},
+	}, sampleRate)
+	chain.Process(calPcm) // prime noise estimate
+
+	// Now feed a clean 1kHz tone — should pass through mostly intact
+	dur := 0.5
+	n := int(float64(sampleRate) * dur)
+	pcm := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		s := 0.5 * math.Sin(2*math.Pi*1000*float64(i)/float64(sampleRate))
+		v := int16(s * 32767)
+		pcm[i*2] = byte(v)
+		pcm[i*2+1] = byte(v >> 8)
+	}
+	before := measureRMS(pcm)
+
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	db := rmsRatioDB(before, after)
+	t.Logf("Clean signal after noise calibration: before=%.4f after=%.4f change=%.1f dB", before, after, db)
+	if db < -3 {
+		t.Errorf("noise reducer damaged clean signal: %.1f dB loss", db)
+	}
+}
+
+// deterministic PRNG for reproducible noise tests
+type detRng struct {
+	state uint64
+}
+
+func newDeterministicRng(seed uint64) *detRng {
+	return &detRng{state: seed}
+}
+
+func (r *detRng) uint64() uint64 {
+	r.state ^= r.state << 13
+	r.state ^= r.state >> 7
+	r.state ^= r.state << 17
+	return r.state
+}
+
+func (r *detRng) float64() float64 {
+	return float64(r.uint64()>>11) / (1 << 53)
+}
+
+func (r *detRng) normalFloat64() float64 {
+	// Box-Muller
+	u1 := r.float64()
+	u2 := r.float64()
+	if u1 < 1e-15 {
+		u1 = 1e-15
+	}
+	return math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
+}
+
 func TestReconfigure(t *testing.T) {
 	chain := NewChain(models.FilterConfig{}, sampleRate)
 

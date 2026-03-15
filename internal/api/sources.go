@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/go-chi/chi/v5"
 )
 
 type mapSourcesResponse struct {
@@ -23,6 +25,24 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sources)
+}
+
+func (s *Server) getSource(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing source id", "BAD_REQUEST")
+		return
+	}
+	source, err := s.db.GetSourceByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+		return
+	}
+	if source == nil {
+		writeError(w, http.StatusNotFound, "source not found", "NOT_FOUND")
+		return
+	}
+	writeJSON(w, http.StatusOK, source)
 }
 
 func (s *Server) listMapSources(w http.ResponseWriter, r *http.Request) {

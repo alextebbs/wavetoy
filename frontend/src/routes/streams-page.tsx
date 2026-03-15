@@ -1,9 +1,10 @@
 import { ProbeStatusBox } from "@/components/probe-status-box";
+import { SourceSearchPanel } from "@/components/source-search-panel";
 import { SourceSection } from "@/components/source-section";
 import { WavetoyLogo } from "@/components/wavetoy-logo";
-import { SourceMapPicker } from "@/components/source-map-picker";
+import { SourceMapPicker, type SourceMapPickerHandle } from "@/components/source-map-picker";
 import { SourceMiniMap } from "@/components/source-mini-map";
-import { BottomDrawer } from "@/components/ui/bottom-drawer";
+import { SourceOverlay } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -11,12 +12,17 @@ import {
   type ProbeResult,
   type Source,
   type Stream,
+  addFavorite,
   createStream,
   getMapSources,
   getSessionColor,
   getSessionId,
+  getSource,
+  listFavorites,
+  listFavoriteSources,
   listStreams,
   probeSource,
+  removeFavorite,
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -47,6 +53,37 @@ export function StreamsPage() {
   const [probeStatus, setProbeStatus] = useState<"idle" | "probing" | "done">("idle");
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const probeGenRef = useRef(0);
+  const mapPickerRef = useRef<SourceMapPickerHandle>(null);
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
+
+  const refreshFavoriteSources = useCallback(() => {
+    void listFavoriteSources()
+      .then((sources) => setFavoriteSources(sources))
+      .catch(() => {});
+  }, []);
+
+  const toggleFavorite = useCallback(async (sourceId: string) => {
+    const isFav = favoriteIds.has(sourceId);
+    setFavoriteIds((prev) => {
+      const next = new Set(prev);
+      if (isFav) next.delete(sourceId);
+      else next.add(sourceId);
+      return next;
+    });
+    try {
+      if (isFav) await removeFavorite(sourceId);
+      else await addFavorite(sourceId);
+      refreshFavoriteSources();
+    } catch {
+      setFavoriteIds((prev) => {
+        const next = new Set(prev);
+        if (isFav) next.add(sourceId);
+        else next.delete(sourceId);
+        return next;
+      });
+    }
+  }, [favoriteIds, refreshFavoriteSources]);
 
   const refreshStreams = useCallback(async () => {
     setLoading(true);
@@ -154,6 +191,8 @@ export function StreamsPage() {
   useEffect(() => {
     void refreshStreams();
     void refreshMapSources();
+    void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
+    refreshFavoriteSources();
     connectWS();
     return () => {
       if (reconnectTimerRef.current) {
@@ -163,7 +202,23 @@ export function StreamsPage() {
       intentionalCloseRef.current = true;
       wsRef.current?.close();
     };
-  }, [refreshStreams, refreshMapSources, connectWS]);
+  }, [refreshStreams, refreshMapSources, refreshFavoriteSources, connectWS]);
+
+  useEffect(() => {
+    if (streams.length === 0 || mapSources.length === 0) return;
+    const missing = streams
+      .map((s) => s.source_id)
+      .filter((id) => !mapSources.some((ms) => ms.id === id));
+    const unique = [...new Set(missing)];
+    if (unique.length === 0) return;
+    Promise.all(unique.map((id) => getSource(id).catch(() => null)))
+      .then((results) => {
+        const found = results.filter((s): s is Source => s !== null);
+        if (found.length > 0) {
+          setMapSources((prev) => [...prev, ...found]);
+        }
+      });
+  }, [streams, mapSources.length]);
 
   const openCreateDrawer = () => {
     setSelectedSource(null);
@@ -267,89 +322,131 @@ export function StreamsPage() {
         )}
       </section>
 
-      <BottomDrawer
+      <SourceOverlay
         open={createDrawerOpen}
         onClose={() => setCreateDrawerOpen(false)}
-        className="h-[65vh]"
-        hideHeader
-      >
-        <div className="h-full">
-          <div className="flex h-full">
-            <div className="min-w-0 flex-1">
-              {mapLoading ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  Loading map sources...
-                </div>
-              ) : (
-                <SourceMapPicker
-                  sources={mapSources}
-                  counts={mapCounts}
-                  selectedSourceId={selectedSource?.id}
-                  showCounts={false}
-                  className="h-full"
-                  onHoverSource={setHoveredSource}
-                  onSelectSource={(source) => {
-                    setSelectedSource(source);
-                    setProbeStatus("probing");
-                    setProbeResult(null);
-                    const gen = ++probeGenRef.current;
-                    probeSource(source.id, "")
-                      .then((result) => {
-                        if (gen !== probeGenRef.current) return;
-                        setProbeStatus("done");
-                        setProbeResult(result);
-                      })
-                      .catch(() => {
-                        if (gen !== probeGenRef.current) return;
-                        setProbeStatus("done");
-                        setProbeResult({
-                          source_id: source.id,
-                          connected: false,
-                          snd_ok: false,
-                          wf_ok: false,
-                          latency_ms: 0,
-                          error: "Probe request failed",
-                        });
-                      });
-                  }}
+        title="Create Stream"
+        showSidebar
+        leftPanel={
+          <SourceSearchPanel
+            sources={mapSources}
+            favoriteSources={favoriteSources}
+            favoriteIds={favoriteIds}
+            counts={mapCounts}
+            selectedSourceId={selectedSource?.id}
+            onSelectSource={(source) => {
+              setSelectedSource(source);
+              setProbeStatus("probing");
+              setProbeResult(null);
+              const gen = ++probeGenRef.current;
+              probeSource(source.id, "")
+                .then((result) => {
+                  if (gen !== probeGenRef.current) return;
+                  setProbeStatus("done");
+                  setProbeResult(result);
+                })
+                .catch(() => {
+                  if (gen !== probeGenRef.current) return;
+                  setProbeStatus("done");
+                  setProbeResult({
+                    source_id: source.id,
+                    connected: false,
+                    snd_ok: false,
+                    wf_ok: false,
+                    latency_ms: 0,
+                    error: "Probe request failed",
+                  });
+                });
+            }}
+            onFlyTo={(source) => {
+              if (source.latitude != null && source.longitude != null) {
+                mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
+              }
+            }}
+          />
+        }
+        globe={
+          mapLoading ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              Loading map sources...
+            </div>
+          ) : (
+            <SourceMapPicker
+              ref={mapPickerRef}
+              sources={mapSources}
+              counts={mapCounts}
+              selectedSourceId={selectedSource?.id}
+              favoriteIds={favoriteIds}
+              showCounts={false}
+              className="h-full"
+              onHoverSource={setHoveredSource}
+              onDeselectSource={() => {
+                setSelectedSource(null);
+                setProbeStatus("idle");
+                setProbeResult(null);
+              }}
+              onSelectSource={(source) => {
+                setSelectedSource(source);
+                setProbeStatus("probing");
+                setProbeResult(null);
+                const gen = ++probeGenRef.current;
+                probeSource(source.id, "")
+                  .then((result) => {
+                    if (gen !== probeGenRef.current) return;
+                    setProbeStatus("done");
+                    setProbeResult(result);
+                  })
+                  .catch(() => {
+                    if (gen !== probeGenRef.current) return;
+                    setProbeStatus("done");
+                    setProbeResult({
+                      source_id: source.id,
+                      connected: false,
+                      snd_ok: false,
+                      wf_ok: false,
+                      latency_ms: 0,
+                      error: "Probe request failed",
+                    });
+                  });
+              }}
+            />
+          )
+        }
+        sidebar={
+          <>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {displayedSource ? (
+                <SourceSection
+                  source={displayedSource}
+                  sourceId={selectedSource?.id ?? ""}
+                  isFavorite={favoriteIds.has(displayedSource.id)}
+                  onToggleFavorite={toggleFavorite}
                 />
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <p className="text-xs uppercase tracking-widest text-muted-foreground">No source selected</p>
+                </div>
               )}
             </div>
-            <aside className="h-full w-[380px] shrink-0 border-l border-border/80">
-              <div className="flex h-full flex-col">
-                <div className="min-h-0 flex-1 overflow-auto">
-                  {displayedSource ? (
-                    <SourceSection
-                      source={displayedSource}
-                      sourceId={selectedSource?.id ?? ""}
-                    />
-                  ) : (
-                    <div className="flex h-full items-center justify-center">
-                      <p className="text-xs uppercase tracking-widest text-muted-foreground">Click on a dot</p>
-                    </div>
-                  )}
-                </div>
-                {selectedSource && (
-                  <div className="shrink-0 border-t border-border/80 p-3">
-                    <ProbeStatusBox
-                      status={probeStatus}
-                      result={probeResult}
-                      actionLabel={creating ? "Creating..." : "Create"}
-                      disabled={creating}
-                      onAction={() => void onCreate()}
-                      onSkip={() => {
-                        probeGenRef.current++;
-                        setProbeStatus("idle");
-                        setProbeResult(null);
-                      }}
-                    />
-                  </div>
-                )}
+            {selectedSource && (
+              <div className="shrink-0 border-t border-border/80 p-3">
+                <ProbeStatusBox
+                  status={probeStatus}
+                  result={probeResult}
+                  actionLabel={creating ? "Creating..." : "Create"}
+                  disabled={creating}
+                  onAction={() => void onCreate()}
+                  onSkip={() => {
+                    probeGenRef.current++;
+                    setProbeStatus("idle");
+                    setProbeResult(null);
+                  }}
+                />
               </div>
-            </aside>
-          </div>
-        </div>
-      </BottomDrawer>
+            )}
+          </>
+        }
+      />
     </div>
   );
 }

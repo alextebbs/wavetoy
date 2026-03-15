@@ -95,13 +95,11 @@ export function TuningOverlay({
 
       if (d.kind === "left" && onBandwidthChange) {
         if (e.shiftKey) {
-          let newLo = Math.round(d.origLo + deltaHz);
-          let newHi = Math.round(d.origHi - deltaHz);
-          newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
-          newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
-          setLocalLo(newLo);
-          setLocalHi(newHi);
-          onBandwidthChange(newLo, newHi);
+          const raw = Math.round(d.origLo + deltaHz);
+          const abs = Math.min(MAX_BW_HZ, Math.max(50, Math.abs(raw)));
+          setLocalLo(-abs);
+          setLocalHi(abs);
+          onBandwidthChange(-abs, abs);
         } else {
           let newLo = Math.round(d.origLo + deltaHz);
           newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, d.origHi - 100));
@@ -110,13 +108,11 @@ export function TuningOverlay({
         }
       } else if (d.kind === "right" && onBandwidthChange) {
         if (e.shiftKey) {
-          let newLo = Math.round(d.origLo - deltaHz);
-          let newHi = Math.round(d.origHi + deltaHz);
-          newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
-          newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
-          setLocalLo(newLo);
-          setLocalHi(newHi);
-          onBandwidthChange(newLo, newHi);
+          const raw = Math.round(d.origHi + deltaHz);
+          const abs = Math.min(MAX_BW_HZ, Math.max(50, Math.abs(raw)));
+          setLocalLo(-abs);
+          setLocalHi(abs);
+          onBandwidthChange(-abs, abs);
         } else {
           let newHi = Math.round(d.origHi + deltaHz);
           newHi = Math.min(MAX_BW_HZ, Math.max(newHi, d.origLo + 100));
@@ -162,7 +158,7 @@ export function TuningOverlay({
     <div ref={containerRef} className="absolute inset-0 z-30 pointer-events-none">
       {/* Passband group: fill + edge handles */}
       <div
-        className="absolute inset-y-0 pointer-events-auto"
+        className={`absolute inset-y-0 ${onFrequencyChange ? "pointer-events-auto" : ""}`}
         style={{
           left: `${Math.max(0, leftPct)}%`,
           right: `${Math.max(0, 100 - rightPct)}%`,
@@ -185,7 +181,7 @@ export function TuningOverlay({
         />
         {/* Left edge drag handle */}
         <div
-          className="absolute inset-y-0 cursor-ew-resize"
+          className="absolute inset-y-0 pointer-events-auto cursor-ew-resize"
           style={{
             left: 0,
             width: HANDLE_PX,
@@ -200,7 +196,7 @@ export function TuningOverlay({
         />
         {/* Right edge drag handle */}
         <div
-          className="absolute inset-y-0 cursor-ew-resize"
+          className="absolute inset-y-0 pointer-events-auto cursor-ew-resize"
           style={{
             right: 0,
             left: "auto",
@@ -219,7 +215,7 @@ export function TuningOverlay({
       {centerPct >= 0 && centerPct <= 100 && (
         <>
           <div
-            className="absolute inset-y-0 pointer-events-none transition-[width] duration-150"
+            className="absolute inset-y-0 z-10 pointer-events-none transition-[width] duration-150"
             style={{
               left: `${centerPct}%`,
               width: thickElement === "center" ? 3 : 1,
@@ -228,7 +224,7 @@ export function TuningOverlay({
             }}
           />
           <div
-            className={`absolute inset-y-0 ${onFrequencyChange ? "pointer-events-auto cursor-grab active:cursor-grabbing" : "pointer-events-none"}`}
+            className={`absolute inset-y-0 z-10 ${onFrequencyChange ? "pointer-events-auto cursor-grab active:cursor-grabbing" : ""}`}
             style={{
               left: `${centerPct}%`,
               width: HANDLE_PX,

@@ -246,6 +246,7 @@ export function BandViewport({
     const el = overlayRef.current;
     if (el) el.releasePointerCapture(e.pointerId);
     const d = dragRef.current;
+    if (!d.active) return;
     const wasDrag = d.wasDrag;
     const velocity = d.velocityX;
     d.active = false;

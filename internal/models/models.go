@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/sammy/sdr-radio/internal/interpreter"
 )
 
 type FilterConfig struct {
-	LowPass     *LowPassConfig     `json:"low_pass,omitempty"`
-	HighPass    *HighPassConfig    `json:"high_pass,omitempty"`
-	Notch       *NotchConfig       `json:"notch,omitempty"`
-	NoiseGate   *NoiseGateConfig   `json:"noise_gate,omitempty"`
-	SoftClipper *SoftClipperConfig `json:"soft_clipper,omitempty"`
+	LowPass       *LowPassConfig       `json:"low_pass,omitempty"`
+	HighPass      *HighPassConfig      `json:"high_pass,omitempty"`
+	Notch         *NotchConfig         `json:"notch,omitempty"`
+	NoiseGate     *NoiseGateConfig     `json:"noise_gate,omitempty"`
+	SoftClipper   *SoftClipperConfig   `json:"soft_clipper,omitempty"`
+	NoiseReducer  *NoiseReducerConfig  `json:"noise_reducer,omitempty"`
 }
 
 type LowPassConfig struct {
@@ -20,10 +23,14 @@ type LowPassConfig struct {
 	CutoffHz float64 `json:"cutoff_hz"`
 }
 
+func (c LowPassConfig) IsEnabled() bool { return c.Enabled }
+
 type HighPassConfig struct {
 	Enabled  bool    `json:"enabled"`
 	CutoffHz float64 `json:"cutoff_hz"`
 }
+
+func (c HighPassConfig) IsEnabled() bool { return c.Enabled }
 
 type NoiseGateConfig struct {
 	Enabled     bool    `json:"enabled"`
@@ -33,17 +40,31 @@ type NoiseGateConfig struct {
 	ReleaseMs   float64 `json:"release_ms"`
 }
 
+func (c NoiseGateConfig) IsEnabled() bool { return c.Enabled }
+
 type SoftClipperConfig struct {
 	Enabled   bool    `json:"enabled"`
 	DriveDB   float64 `json:"drive_db"`
 	CeilingDB float64 `json:"ceiling_db"`
 }
 
+func (c SoftClipperConfig) IsEnabled() bool { return c.Enabled }
+
 type NotchConfig struct {
 	Enabled  bool    `json:"enabled"`
 	CenterHz float64 `json:"center_hz"`
 	Q        float64 `json:"q"`
 }
+
+func (c NotchConfig) IsEnabled() bool { return c.Enabled }
+
+type NoiseReducerConfig struct {
+	Enabled  bool    `json:"enabled"`
+	Strength float64 `json:"strength"` // 0.0–1.0
+	FloorDB  float64 `json:"floor_db"` // e.g. -20
+}
+
+func (c NoiseReducerConfig) IsEnabled() bool { return c.Enabled }
 
 func (fc *FilterConfig) Scan(src interface{}) error {
 	if src == nil {
@@ -116,9 +137,10 @@ type Stream struct {
 	ActivityDetectionEnabled bool      `json:"activity_detection_enabled"`
 	ActivitySensitivity      float64   `json:"activity_sensitivity"`
 	State                    string    `json:"state"`
-	Version                  int64        `json:"version"`
-	Filters                  FilterConfig `json:"filters"`
-	WFViewStartKHz           float64      `json:"wf_view_start_khz"`
+	Version                  int64              `json:"version"`
+	Filters                  FilterConfig       `json:"filters"`
+	Interpreter              interpreter.Config `json:"interpreter"`
+	WFViewStartKHz           float64            `json:"wf_view_start_khz"`
 	WFViewEndKHz             float64      `json:"wf_view_end_khz"`
 	AutoFallback             bool         `json:"auto_fallback"`
 	AutoFallbackKind         string       `json:"auto_fallback_kind"`

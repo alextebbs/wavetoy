@@ -43,30 +43,39 @@ export function ProbeStatusBox({
 
       {status === "done" && result && (
         <>
-          <div className="space-y-1 text-muted-foreground">
-            <p>
-              Connect:{" "}
-              <span className={result.connected ? "text-primary" : "text-destructive"}>
-                {result.connected ? "OK" : "Failed"}
+          {!passed && (
+            <div className="mb-4 flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">
+                {!result.connected
+                  ? "Source didn't establish connection with us"
+                  : !result.snd_ok
+                    ? "Source never sent us sound"
+                    : "Source never sent us waterfall data"}
+              </p>
+              <span className="text-destructive">:(</span>
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
+              <span>
+                <span className="text-muted-foreground/50">INIT</span>{" "}
+                <span className={result.connected ? "text-primary" : "text-destructive"}>
+                  {result.connected ? "PASS" : "FAIL"}
+                </span>
               </span>
-            </p>
-            <p>
-              Audio (SND):{" "}
-              <span className={result.snd_ok ? "text-primary" : "text-destructive"}>
-                {result.snd_ok ? "OK" : "Failed"}
+              <span>
+                <span className="text-muted-foreground/50">SND</span>{" "}
+                <span className={result.snd_ok ? "text-primary" : "text-destructive"}>
+                  {result.snd_ok ? "PASS" : "FAIL"}
+                </span>
               </span>
-            </p>
-            <p>
-              Waterfall (WF):{" "}
-              <span className={result.wf_ok ? "text-primary" : "text-destructive"}>
-                {result.wf_ok ? "OK" : "Failed"}
+              <span>
+                <span className="text-muted-foreground/50">WF</span>{" "}
+                <span className={result.wf_ok ? "text-primary" : "text-destructive"}>
+                  {result.wf_ok ? "PASS" : "FAIL"}
+                </span>
               </span>
-            </p>
-            {result.error && (
-              <p className="mt-1 text-destructive/80">{result.error}</p>
-            )}
-          </div>
-          <div className="mt-3 flex justify-end">
+            </div>
             <Button
               variant={passed ? "default" : "destructive"}
               size="sm"

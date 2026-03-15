@@ -3,11 +3,7 @@ import { useThemeStore } from "@/lib/theme";
 import type { FeatureCollection } from "geojson";
 import WorldData from "geojson-world-map/lib/world";
 import { useMemo } from "react";
-import MapLibreMap, {
-  Layer,
-  Marker,
-  Source as MapSource,
-} from "react-map-gl/maplibre";
+import MapLibreMap, { Marker } from "react-map-gl/maplibre";
 
 const COUNTRIES_GEOJSON = WorldData as FeatureCollection;
 
@@ -26,16 +22,31 @@ export function SourceMiniMap({ source, className }: SourceMiniMapProps) {
   const mapStyle = useMemo(
     () => ({
       version: 8,
-      sources: {},
+      sources: {
+        countries: {
+          type: "geojson",
+          data: COUNTRIES_GEOJSON,
+        },
+      },
       layers: [
         {
           id: "background",
           type: "background",
           paint: { "background-color": mapColors.background },
         },
+        {
+          id: "country-lines",
+          type: "line",
+          source: "countries",
+          paint: {
+            "line-color": mapColors.countryLines,
+            "line-opacity": mapColors.countryLineOpacity,
+            "line-width": 0.8,
+          },
+        },
       ],
     }),
-    [mapColors.background]
+    [mapColors.background, mapColors.countryLines, mapColors.countryLineOpacity]
   );
 
   return (
@@ -52,17 +63,6 @@ export function SourceMiniMap({ source, className }: SourceMiniMapProps) {
         attributionControl={false}
         style={{ width: "100%", height: "100%" }}
       >
-        <MapSource id="countries" type="geojson" data={COUNTRIES_GEOJSON}>
-          <Layer
-            id="country-lines"
-            type="line"
-            paint={{
-              "line-color": mapColors.countryLines,
-              "line-opacity": mapColors.countryLineOpacity,
-              "line-width": 0.8,
-            }}
-          />
-        </MapSource>
         {hasCoords && (
           <Marker
             latitude={source.latitude!}

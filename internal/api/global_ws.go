@@ -52,7 +52,7 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 		for _, topic := range topics {
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
-				s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.disconnect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 				s.registry.broadcast(topic, map[string]any{
 					"type": "peer_left",
 					"peer": map[string]string{"session_id": client.sessionID},
@@ -70,7 +70,7 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
-				s.streamLog.Info(streamID, "ws.resume", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.resume", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil {
@@ -171,7 +171,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
-				s.streamLog.Info(streamID, "ws.connect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
+				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.connect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil || stream.TenantID != TenantID(r.Context()) {
@@ -223,7 +223,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			s.registry.unsubscribe(client, topic)
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
-				s.streamLog.Info(streamID, "ws.disconnect", fmt.Sprintf("session=%s (unsubscribe)", client.sessionID[:min(8, len(client.sessionID))]))
+				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.disconnect", "client", "wavetoy", fmt.Sprintf("session=%s (unsubscribe)", client.sessionID[:min(8, len(client.sessionID))]))
 				s.registry.broadcast(topic, map[string]any{
 					"type": "peer_left",
 					"peer": map[string]string{"session_id": client.sessionID},
@@ -234,6 +234,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 	case "patch":
 		streamID := s.findStreamTopicForClient(client)
 		if streamID == "" {
+			log.Printf("[WS] patch rejected: session=%s has no stream subscription", client.sessionID[:min(8, len(client.sessionID))])
 			_ = client.writeJSON(map[string]any{
 				"type":  "error",
 				"error": "not subscribed to any stream topic",
@@ -319,7 +320,7 @@ func (s *Server) handleSwitchFallback(r *http.Request, streamID, sourceID string
 	prevSourceID := existing.SourceID
 
 	patchReq := patchStreamRequest{SourceID: &sourceID}
-	stream, apiErr := s.applyPatchStream(r.Context(), existing, patchReq, 0)
+	stream, apiErr := s.applyPatchStream(r.Context(), existing, patchReq, 0, client.sessionID[:min(8, len(client.sessionID))])
 	if apiErr != nil {
 		_ = client.writeJSON(map[string]any{
 			"type":  "error",
@@ -397,7 +398,7 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 
 func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) {
 	// Send log history first
-	history := s.streamLog.Snapshot(streamID, streamlog.LevelInfo, 200)
+	history := s.streamLog.Snapshot(streamID, s.streamLog.GetLevel(streamID), 2000)
 	if len(history) > 0 {
 		entries := make([]map[string]any, len(history))
 		for i, e := range history {
