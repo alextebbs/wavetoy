@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 
+export const CONTROL_THROTTLE_MS = 400;
+
 /**
  * Throttle: fires immediately on the first call, then at most once per `ms`.
  * A trailing call is guaranteed if invocations arrive during the cooldown.

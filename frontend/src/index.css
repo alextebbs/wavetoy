@@ -1,8 +1,5 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
-@import "@fontsource/jetbrains-mono/700.css";
 @import "@fontsource/xanh-mono/400.css";
 @tailwind base;
 @tailwind components;
@@ -10,7 +7,7 @@
 
 @layer base {
   :root {
-    --radius: 0.35rem;
+    --radius: 0.7rem;
     color-scheme: dark;
   }
 
@@ -24,8 +21,8 @@
   }
 
   html {
-    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
-      Consolas, "Liberation Mono", "Courier New", monospace;
+    font-family: "Iosevka Charon Mono", ui-monospace, SFMono-Regular, Menlo,
+      Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   }
 
   body,
@@ -40,7 +37,7 @@
 
   .source-map-tooltip .maplibregl-popup-content {
     border: 1px solid hsl(var(--border));
-    border-radius: 0.35rem;
+    border-radius: 0.7rem;
     background: hsl(var(--background));
     color: hsl(var(--foreground));
     box-shadow: none;

@@ -57,6 +57,7 @@ export type Stream = {
   wf_view_end_khz: number;
   auto_fallback: boolean;
   auto_fallback_kind: string;
+  view_locked: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -97,7 +98,7 @@ export type Peer = {
   color: string;
 };
 
-const PEER_COLORS = [
+export const PEER_COLORS = [
   "#4f87e2",
   "#e24f87",
   "#4fe287",
@@ -162,8 +163,37 @@ export type MapSourcesResponse = {
   counts: MapSourceCounts;
 };
 
+import { getToken, clearToken, setToken } from "./auth";
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function handleUnauthorized(res: Response): void {
+  if (res.status === 401) {
+    clearToken();
+    window.location.reload();
+  }
+}
+
+export async function authenticate(passphrase: string): Promise<string> {
+  const res = await fetch("/api/auth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase }),
+  });
+  if (!res.ok) throw new Error("Invalid passphrase");
+  const { token } = (await res.json()) as { token: string };
+  setToken(token);
+  return token;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`/api${path}`);
+  const res = await fetch(`/api${path}`, {
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
   if (!res.ok) {
     throw new Error(await res.text());
   }
@@ -177,9 +207,10 @@ function asArray<T>(value: unknown): T[] {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
+  handleUnauthorized(res);
   if (!res.ok) {
     const text = await res.text();
     try {
@@ -196,7 +227,9 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 export async function apiDelete(path: string): Promise<void> {
   const res = await fetch(`/api${path}`, {
     method: "DELETE",
+    headers: { ...authHeaders() },
   });
+  handleUnauthorized(res);
   if (!res.ok) {
     throw new Error(await res.text());
   }
@@ -255,4 +288,22 @@ export function fallbackRefAudioUrl(streamId: string): string {
 
 export function fallbackProbeAudioUrl(streamId: string, rank: number): string {
   return `/api/streams/${streamId}/fallbacks/${rank}/probe-audio`;
+}
+
+export type ProbeResult = {
+  source_id: string;
+  connected: boolean;
+  snd_ok: boolean;
+  wf_ok: boolean;
+  latency_ms: number;
+  error?: string;
+};
+
+export async function probeSource(
+  sourceId: string,
+  streamId: string,
+): Promise<ProbeResult> {
+  return apiPost<ProbeResult>(`/sources/${sourceId}/probe`, {
+    stream_id: streamId,
+  });
 }

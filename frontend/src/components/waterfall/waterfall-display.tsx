@@ -39,11 +39,17 @@ export const WaterfallDisplay = forwardRef<
       pushBins(bins: Uint8Array) {
         rendererRef.current?.pushBins(bins);
       },
+      pushFrame(bins: Uint8Array, xBin: number, zoom: number) {
+        rendererRef.current?.pushFrame(bins, xBin, zoom);
+      },
       setColorMap(name: ColorMapName) {
         rendererRef.current?.setColorMap(name);
       },
       setLevels(min: number, max: number) {
         rendererRef.current?.setLevels(min, max);
+      },
+      setMaxBandwidth(maxKHz: number) {
+        rendererRef.current?.setMaxBandwidth(maxKHz);
       },
       setDataCoverage(startKHz: number, endKHz: number) {
         rendererRef.current?.setDataCoverage(startKHz, endKHz);
@@ -62,6 +68,7 @@ export const WaterfallDisplay = forwardRef<
 
     const s = useBandViewStore.getState();
     renderer.setView(s.startKHz, s.endKHz);
+    renderer.setMaxBandwidth(s.maxBandwidthKHz || 30000);
     renderer.setDataCoverage(0, s.maxBandwidthKHz || 30000);
 
     renderer.startRenderLoop();

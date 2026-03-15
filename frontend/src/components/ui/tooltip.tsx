@@ -1,91 +1,43 @@
-import { useCallback, useRef, useState } from "react";
-
-const DELAY_MS = 400;
-const OFFSET_PX = 6;
-
-type Side = "top" | "bottom" | "left" | "right";
+import { Tooltip as TooltipPrimitive } from "radix-ui";
+import { cn } from "@/lib/utils";
 
 interface TooltipProps {
   content: string;
-  side?: Side;
-  children: React.ReactElement<React.HTMLAttributes<HTMLElement>>;
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "center" | "end";
+  delayDuration?: number;
+  children: React.ReactNode;
 }
 
-export function Tooltip({ content, side = "bottom", children }: TooltipProps) {
-  const [visible, setVisible] = useState(false);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const triggerRef = useRef<HTMLElement | null>(null);
-
-  const show = useCallback(() => {
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    let x: number;
-    let y: number;
-    switch (side) {
-      case "top":
-        x = r.left + r.width / 2;
-        y = r.top - OFFSET_PX;
-        break;
-      case "bottom":
-        x = r.left + r.width / 2;
-        y = r.bottom + OFFSET_PX;
-        break;
-      case "left":
-        x = r.left - OFFSET_PX;
-        y = r.top + r.height / 2;
-        break;
-      case "right":
-        x = r.right + OFFSET_PX;
-        y = r.top + r.height / 2;
-        break;
-    }
-    setPos({ x, y });
-    setVisible(true);
-  }, [side]);
-
-  const onEnter = useCallback(() => {
-    timerRef.current = setTimeout(show, DELAY_MS);
-  }, [show]);
-
-  const onLeave = useCallback(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    setVisible(false);
-  }, []);
-
-  const transform = {
-    top: "translate(-50%, -100%)",
-    bottom: "translate(-50%, 0)",
-    left: "translate(-100%, -50%)",
-    right: "translate(0, -50%)",
-  }[side];
-
+export function Tooltip({
+  content,
+  side = "bottom",
+  align = "center",
+  delayDuration = 400,
+  children,
+}: TooltipProps) {
   return (
-    <>
-      <span
-        ref={triggerRef as React.Ref<HTMLSpanElement>}
-        onPointerEnter={onEnter}
-        onPointerLeave={onLeave}
-        className="inline-flex"
-      >
-        {children}
-      </span>
-      {visible && (
-        <div
-          className="fixed z-[100] max-w-xs rounded bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md border border-border pointer-events-none"
-          style={{
-            left: pos.x,
-            top: pos.y,
-            transform,
-          }}
-        >
-          {content}
-        </div>
-      )}
-    </>
+    <TooltipPrimitive.Provider delayDuration={delayDuration}>
+      <TooltipPrimitive.Root>
+        <TooltipPrimitive.Trigger asChild>
+          <span className="inline-flex">{children}</span>
+        </TooltipPrimitive.Trigger>
+        <TooltipPrimitive.Portal>
+          <TooltipPrimitive.Content
+            side={side}
+            align={align}
+            sideOffset={6}
+            collisionPadding={8}
+            className={cn(
+              "z-[100] max-w-xs rounded bg-popover px-2 py-1 text-[11px] uppercase tracking-widest text-popover-foreground shadow-md border border-border",
+              "animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
+              "data-[side=top]:slide-in-from-bottom-2 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2",
+            )}
+          >
+            {content}
+          </TooltipPrimitive.Content>
+        </TooltipPrimitive.Portal>
+      </TooltipPrimitive.Root>
+    </TooltipPrimitive.Provider>
   );
 }

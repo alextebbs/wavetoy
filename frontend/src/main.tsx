@@ -1,3 +1,4 @@
+import { LoginGate } from "@/components/login-gate";
 import { router } from "@/router";
 import { initTheme } from "@/lib/theme";
 import { RouterProvider } from "@tanstack/react-router";
@@ -10,6 +11,8 @@ initTheme();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <LoginGate>
+      <RouterProvider router={router} />
+    </LoginGate>
   </React.StrictMode>,
 );

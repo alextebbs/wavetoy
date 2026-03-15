@@ -1,12 +1,14 @@
-import { SourceDetailsPanel } from "@/components/source-details-panel";
+import { ProbeStatusBox } from "@/components/probe-status-box";
+import { SourceSection } from "@/components/source-section";
+import { WavetoyLogo } from "@/components/wavetoy-logo";
 import { SourceMapPicker } from "@/components/source-map-picker";
 import { SourceMiniMap } from "@/components/source-mini-map";
 import { BottomDrawer } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   type MapSourceCounts,
+  type ProbeResult,
   type Source,
   type Stream,
   createStream,
@@ -14,7 +16,9 @@ import {
   getSessionColor,
   getSessionId,
   listStreams,
+  probeSource,
 } from "@/lib/api";
+import { getToken } from "@/lib/auth";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,7 +29,10 @@ export function StreamsPage() {
   const [streams, setStreams] = useState<Stream[]>([]);
   const [error, setError] = useState("");
 
-  const [name, setName] = useState("");
+  useEffect(() => {
+    document.title = "wavetoy - streams";
+  }, []);
+
   const [creating, setCreating] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
   const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
@@ -37,6 +44,9 @@ export function StreamsPage() {
   });
   const [selectedSource, setSelectedSource] = useState<Source | null>(null);
   const [hoveredSource, setHoveredSource] = useState<Source | null>(null);
+  const [probeStatus, setProbeStatus] = useState<"idle" | "probing" | "done">("idle");
+  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const probeGenRef = useRef(0);
 
   const refreshStreams = useCallback(async () => {
     setLoading(true);
@@ -80,8 +90,9 @@ export function StreamsPage() {
       wsRef.current.close();
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const token = getToken();
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/api/ws`,
+      `${protocol}//${window.location.host}/api/ws${token ? `?token=${token}` : ""}`,
     );
     wsRef.current = ws;
 
@@ -164,7 +175,7 @@ export function StreamsPage() {
   };
 
   const onCreate = async () => {
-    if (!selectedSource || !name.trim()) return;
+    if (!selectedSource) return;
     setCreating(true);
     setError("");
     try {
@@ -172,7 +183,7 @@ export function StreamsPage() {
         source_id: selectedSource.id,
         frequency_khz: 10000,
         mode: "am",
-        name: name.trim(),
+        name: "untitled",
         bandwidth_low_hz: -5000,
         bandwidth_high_hz: 5000,
       });
@@ -191,16 +202,14 @@ export function StreamsPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
-      <div className="flex items-end justify-between gap-4">
-        <h1 className="font-xanh-mono text-3xl leading-none lowercase">
-          wavetoy
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="leading-none">
+          <WavetoyLogo className="text-3xl" />
         </h1>
         <Button type="button" variant="ghost" onClick={openCreateDrawer}>
           <PlusIcon className="size-4" />
         </Button>
       </div>
-
-      <div className="border-t border-border" />
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
@@ -219,26 +228,36 @@ export function StreamsPage() {
                   to="/streams/$streamId"
                   params={{ streamId: stream.id }}
                 >
-                  <Card className="p-0 transition-colors hover:ring-foreground/25">
+                  <Card className="relative overflow-hidden p-0 transition-colors hover:ring-foreground/25" style={{ backgroundColor: "#000" }}>
                     <SourceMiniMap
                       source={source}
-                      className="h-28 w-full overflow-hidden"
+                      className="h-[26rem] w-full"
                     />
-                    <div className="flex items-center justify-between gap-2 px-3 py-2.5">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{stream.name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {stream.frequency_khz} kHz · {stream.mode.toUpperCase()}
-                        </p>
-                        {source?.name && (
-                          <p className="truncate text-[11px] text-muted-foreground/60">
-                            {source.name}
+                    <div className="relative z-10 -mt-80 px-3 pb-3">
+                      <div
+                        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-gradient-to-t from-black to-transparent"
+                        aria-hidden
+                      />
+                      <div className="relative flex items-end justify-between gap-4 pt-64">
+                        <div className="min-w-0">
+                          <p className="font-xanh-mono truncate text-base text-foreground">
+                            {stream.name}
                           </p>
-                        )}
+                          <p className="mt-0.5 text-[11px] text-muted-foreground/60">
+                            {stream.frequency_khz} kHz · {stream.mode.toUpperCase()}
+                          </p>
+                        </div>
+                        <div className="min-w-0 text-right">
+                          <p className="font-xanh-mono truncate text-base text-muted-foreground">
+                            {source ? `${source.host}:${source.port}` : "—"}
+                          </p>
+                          {source?.name && (
+                            <p className="mt-0.5 truncate text-[11px] text-muted-foreground/60">
+                              {source.name}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
-                        {stream.state}
-                      </span>
                     </div>
                   </Card>
                 </Link>
@@ -251,7 +270,7 @@ export function StreamsPage() {
       <BottomDrawer
         open={createDrawerOpen}
         onClose={() => setCreateDrawerOpen(false)}
-        className="h-[95vh]"
+        className="h-[65vh]"
         hideHeader
       >
         <div className="h-full">
@@ -271,37 +290,61 @@ export function StreamsPage() {
                   onHoverSource={setHoveredSource}
                   onSelectSource={(source) => {
                     setSelectedSource(source);
+                    setProbeStatus("probing");
+                    setProbeResult(null);
+                    const gen = ++probeGenRef.current;
+                    probeSource(source.id, "")
+                      .then((result) => {
+                        if (gen !== probeGenRef.current) return;
+                        setProbeStatus("done");
+                        setProbeResult(result);
+                      })
+                      .catch(() => {
+                        if (gen !== probeGenRef.current) return;
+                        setProbeStatus("done");
+                        setProbeResult({
+                          source_id: source.id,
+                          connected: false,
+                          snd_ok: false,
+                          wf_ok: false,
+                          latency_ms: 0,
+                          error: "Probe request failed",
+                        });
+                      });
                   }}
                 />
               )}
             </div>
-            <aside className="h-full w-[380px] shrink-0 border-l border-border/80 px-4 py-4 md:px-6">
+            <aside className="h-full w-[380px] shrink-0 border-l border-border/80">
               <div className="flex h-full flex-col">
                 <div className="min-h-0 flex-1 overflow-auto">
-                  <SourceDetailsPanel
-                    source={displayedSource}
-                    selectedSourceId={selectedSource?.id}
-                    counts={mapCounts}
-                    showPickerSummary
-                  />
-                </div>
-                <div className="mt-3 pt-3">
-                  <div className="flex items-center gap-2">
-                    <Input
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="Stream name"
-                      className="flex-1"
+                  {displayedSource ? (
+                    <SourceSection
+                      source={displayedSource}
+                      sourceId={selectedSource?.id ?? ""}
                     />
-                    <Button
-                      variant="ghost"
-                      disabled={creating || !selectedSource || !name.trim()}
-                      onClick={() => void onCreate()}
-                    >
-                      {creating ? "Creating..." : "Create Stream"}
-                    </Button>
-                  </div>
+                  ) : (
+                    <div className="flex h-full items-center justify-center">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">Click on a dot</p>
+                    </div>
+                  )}
                 </div>
+                {selectedSource && (
+                  <div className="shrink-0 border-t border-border/80 p-3">
+                    <ProbeStatusBox
+                      status={probeStatus}
+                      result={probeResult}
+                      actionLabel={creating ? "Creating..." : "Create"}
+                      disabled={creating}
+                      onAction={() => void onCreate()}
+                      onSkip={() => {
+                        probeGenRef.current++;
+                        setProbeStatus("idle");
+                        setProbeResult(null);
+                      }}
+                    />
+                  </div>
+                )}
               </div>
             </aside>
           </div>

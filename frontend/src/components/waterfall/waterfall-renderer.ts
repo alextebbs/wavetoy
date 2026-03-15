@@ -48,6 +48,7 @@ export class WaterfallRenderer {
 
   private dataStartKHz = 0;
   private dataEndKHz = 30000;
+  private maxBandwidthKHz = 30000;
 
   private viewStartKHz = 0;
   private viewEndKHz = 30000;
@@ -160,6 +161,28 @@ export class WaterfallRenderer {
     this.timeLabelsDirty = true;
     this.initOffscreen();
     this.needsRepaint = true;
+  }
+
+  setMaxBandwidth(maxKHz: number): void {
+    this.maxBandwidthKHz = maxKHz;
+  }
+
+  private static readonly MAX_ZOOM = 14;
+
+  pushFrame(bins: Uint8Array, xBin: number, zoom: number): void {
+    const totalBins = this.numBins * (1 << WaterfallRenderer.MAX_ZOOM);
+    const binScale = 1 << (WaterfallRenderer.MAX_ZOOM - zoom);
+    const frameStart = (xBin / totalBins) * this.maxBandwidthKHz;
+    const frameEnd = ((xBin + this.numBins * binScale) / totalBins) * this.maxBandwidthKHz;
+
+    if (
+      Math.abs(frameStart - this.dataStartKHz) > 0.5 ||
+      Math.abs(frameEnd - this.dataEndKHz) > 0.5
+    ) {
+      this.setDataCoverage(frameStart, frameEnd);
+    }
+
+    this.queue.push(bins);
   }
 
   pushBins(bins: Uint8Array): void {

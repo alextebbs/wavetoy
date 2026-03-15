@@ -25,7 +25,7 @@ export function SourceDetailsPanel({
       {showPickerSummary ? (
         <div className="flex items-center justify-between border-b border-border/80 pb-2 text-xs uppercase tracking-widest text-muted-foreground">
           <span>Pick Source</span>
-          <span className="font-xanh-mono normal-case tracking-normal">
+          <span className="normal-case tracking-normal">
             {counts?.included ?? 0}/{counts?.omitted ?? 0} shown/omitted
           </span>
         </div>
@@ -39,7 +39,7 @@ export function SourceDetailsPanel({
                 href={`http${source.use_tls ? "s" : ""}://${source.host}:${source.port}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-xanh-mono block truncate text-sm text-foreground hover:text-primary transition-colors"
+                className="block truncate text-sm uppercase text-foreground hover:text-primary transition-colors"
                 title={`${source.host}:${source.port}`}
               >
                 {source.host}:{source.port}
@@ -50,29 +50,29 @@ export function SourceDetailsPanel({
                 {source.name}
               </p>
             )}
-            <div className="mt-3 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1">
-              <span className="shrink-0 text-muted-foreground">users</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={`${source.users}/${source.max_listeners}`}>
+            <div className="mt-3 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2.5">
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">users</span>
+              <span className="min-w-0 truncate text-right text-white" title={`${source.users}/${source.max_listeners}`}>
                 {source.users}/{source.max_listeners}
               </span>
-              <span className="shrink-0 text-muted-foreground">status</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.status ?? "n/a"}>
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">status</span>
+              <span className="min-w-0 truncate text-right text-white" title={source.status ?? "n/a"}>
                 {source.status ?? "n/a"}
               </span>
-              <span className="shrink-0 text-muted-foreground">snr dbm</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={String(source.snr_dbm ?? "n/a")}>
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">snr dbm</span>
+              <span className="min-w-0 truncate text-right text-white" title={String(source.snr_dbm ?? "n/a")}>
                 {source.snr_dbm ?? "n/a"}
               </span>
-              <span className="shrink-0 text-muted-foreground">grid</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.grid ?? "n/a"}>
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">grid</span>
+              <span className="min-w-0 truncate text-right text-white" title={source.grid ?? "n/a"}>
                 {source.grid ?? "n/a"}
               </span>
-              <span className="shrink-0 text-muted-foreground">location</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.location ?? "n/a"}>
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">location</span>
+              <span className="min-w-0 truncate text-right text-white" title={source.location ?? "n/a"}>
                 {source.location ?? "n/a"}
               </span>
-              <span className="shrink-0 text-muted-foreground">antenna</span>
-              <span className="min-w-0 font-xanh-mono truncate text-right text-white" title={source.antenna ?? "n/a"}>
+              <span className="shrink-0 uppercase tracking-widest text-muted-foreground">antenna</span>
+              <span className="min-w-0 truncate text-right text-white" title={source.antenna ?? "n/a"}>
                 {source.antenna ?? "n/a"}
               </span>
             </div>

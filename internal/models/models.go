@@ -68,6 +68,14 @@ func (fc FilterConfig) Value() (driver.Value, error) {
 	return json.Marshal(fc)
 }
 
+type Tenant struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	MagicPhraseHash string    `json:"-"`
+	MaxStreams      int       `json:"max_streams"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 type Source struct {
 	ID                string     `json:"id"`
 	Type              string     `json:"type"`
@@ -114,6 +122,7 @@ type Stream struct {
 	WFViewEndKHz             float64      `json:"wf_view_end_khz"`
 	AutoFallback             bool         `json:"auto_fallback"`
 	AutoFallbackKind         string       `json:"auto_fallback_kind"`
+	ViewLocked               bool         `json:"view_locked"`
 	CreatedAt                time.Time    `json:"created_at"`
 	UpdatedAt                time.Time    `json:"updated_at"`
 }

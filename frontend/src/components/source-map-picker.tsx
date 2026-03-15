@@ -161,8 +161,8 @@ export const SourceMapPicker = memo(function SourceMapPicker({
                   <span
                     className="absolute left-1/2 top-1/2 block -translate-x-1/2 -translate-y-1/2 rounded-full"
                     style={{
-                      width: selected ? 13 : hoveredOnDot ? 12 : 9,
-                      height: selected ? 13 : hoveredOnDot ? 12 : 9,
+                      width: selected ? 13 : hoveredOnDot ? 12 : 5,
+                      height: selected ? 13 : hoveredOnDot ? 12 : 5,
                       background: snrToDotColor(
                         source.snr_dbm,
                         snrStats.min,

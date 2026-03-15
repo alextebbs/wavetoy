@@ -1,3 +1,4 @@
+import { clearToken } from "@/lib/auth";
 import { StreamPlayerPage } from "@/routes/stream-player-page";
 import { StreamsPage } from "@/routes/streams-page";
 import {
@@ -33,7 +34,17 @@ const streamPlayerRoute = createRoute({
   component: StreamPlayerPage,
 });
 
-const routeTree = rootRoute.addChildren([streamsRoute, streamPlayerRoute]);
+const logoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/logout",
+  component: () => {
+    clearToken();
+    window.location.href = "/";
+    return null;
+  },
+});
+
+const routeTree = rootRoute.addChildren([streamsRoute, streamPlayerRoute, logoutRoute]);
 
 export const router = createRouter({ routeTree });
 

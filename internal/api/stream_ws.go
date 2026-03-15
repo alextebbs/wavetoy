@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
-	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
 	"github.com/sammy/sdr-radio/internal/streamlog"
@@ -53,7 +52,7 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
-	if stream == nil || stream.TenantID != db.DefaultTenantID {
+	if stream == nil || stream.TenantID != TenantID(r.Context()) {
 		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
 		return
 	}
@@ -326,6 +325,9 @@ func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []s
 	}
 	if patch.Filters != nil {
 		fields = append(fields, "filters")
+	}
+	if patch.ViewLocked != nil && *patch.ViewLocked != existing.ViewLocked {
+		fields = append(fields, "view_locked")
 	}
 	return fields
 }

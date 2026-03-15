@@ -10,6 +10,8 @@ import { SpectrumRenderer } from "./spectrum-renderer";
 
 export interface SpectrumHandle {
   pushBins(bins: Uint8Array): void;
+  pushFrame(bins: Uint8Array, xBin: number, zoom: number): void;
+  setMaxBandwidth(maxKHz: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
 }
 
@@ -39,6 +41,12 @@ export const SpectrumDisplay = forwardRef<SpectrumHandle, SpectrumDisplayProps>(
         pushBins(bins: Uint8Array) {
           rendererRef.current?.pushBins(bins);
         },
+        pushFrame(bins: Uint8Array, xBin: number, zoom: number) {
+          rendererRef.current?.pushFrame(bins, xBin, zoom);
+        },
+        setMaxBandwidth(maxKHz: number) {
+          rendererRef.current?.setMaxBandwidth(maxKHz);
+        },
         setDataCoverage(startKHz: number, endKHz: number) {
           rendererRef.current?.setDataCoverage(startKHz, endKHz);
         },
@@ -56,6 +64,7 @@ export const SpectrumDisplay = forwardRef<SpectrumHandle, SpectrumDisplayProps>(
 
       const s = useBandViewStore.getState();
       renderer.setView(s.startKHz, s.endKHz);
+      renderer.setMaxBandwidth(s.maxBandwidthKHz || 30000);
       renderer.setDataCoverage(0, s.maxBandwidthKHz || 30000);
       renderer.startRenderLoop();
 

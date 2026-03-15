@@ -14,6 +14,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/sammy/sdr-radio/internal/api"
+	"github.com/sammy/sdr-radio/internal/auth"
 	"github.com/sammy/sdr-radio/internal/config"
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
@@ -24,6 +25,10 @@ import (
 func main() {
 	_ = godotenv.Load()
 	cfg := config.Load()
+
+	if cfg.JWTSecret == "" {
+		log.Fatal("JWT_SECRET is required")
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -44,7 +49,15 @@ func main() {
 	}
 	defer database.Close()
 
-	if err := database.Seed(ctx); err != nil {
+	var passphraseHash string
+	if cfg.DefaultPassphrase != "" {
+		h, err := auth.HashPassphrase(cfg.DefaultPassphrase)
+		if err != nil {
+			log.Fatalf("hash passphrase: %v", err)
+		}
+		passphraseHash = h
+	}
+	if err := database.Seed(ctx, passphraseHash); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
 
@@ -67,7 +80,7 @@ func main() {
 		}
 	}()
 
-	srv := api.New(database, streamLogger)
+	srv := api.New(database, streamLogger, cfg.JWTSecret, cfg.JWTExpiry)
 
 	fallbackMgr := fallback.NewManager(database, streamLogger, healthChecker, srv.StreamManager(), func(streamID string, event map[string]any) {
 		srv.BroadcastToStream(streamID, event)
@@ -75,6 +88,12 @@ func main() {
 	srv.SetFallbackManager(fallbackMgr)
 	srv.StreamManager().SetOnDegraded(func(streamID, reason string) {
 		fallbackMgr.HandleDegraded(streamID, reason)
+	})
+	srv.StreamManager().SetOnStateChange(func(streamID, state string) {
+		srv.BroadcastToStream(streamID, map[string]any{
+			"type":  "stream_state_changed",
+			"state": state,
+		})
 	})
 
 	go func() {

@@ -163,7 +163,7 @@ export function FallbackSection({
   };
 
   return (
-    <section className="border-b">
+    <section className="border-t border-border/60">
       <div className="px-3 py-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">

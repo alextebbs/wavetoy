@@ -1,9 +1,12 @@
+import { ClipperCurve } from "@/components/clipper-curve";
+import { NoiseGateMeter } from "@/components/noise-gate-meter";
 import { NotchSpectrum } from "@/components/notch-spectrum";
+import { PassFilterSpectrum } from "@/components/pass-filter-spectrum";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import type { FilterConfig } from "@/lib/api";
-import { useDebounce } from "@/lib/timing";
+import { useDebounce, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { type RefObject, useEffect, useState } from "react";
 
 type Props = {
@@ -51,7 +54,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
     if (next.noise_gate.enabled) out.noise_gate = next.noise_gate;
     if (next.soft_clipper.enabled) out.soft_clipper = next.soft_clipper;
     onFiltersChange(out);
-  }, 150);
+  }, CONTROL_THROTTLE_MS);
 
   const push = (next: Required<FilterConfig>) => {
     setLocal(next);
@@ -59,7 +62,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
   };
 
   return (
-    <div className="space-y-4">
+    <div className="border-t border-border/60">
       {/* ── High-Pass ── */}
       <FilterSection
         label="High-Pass"
@@ -68,6 +71,19 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
           push({ ...local, high_pass: { ...local.high_pass, enabled: on } })
         }
       >
+        <PassFilterSpectrum
+          samplesRef={samplesRef}
+          type="high-pass"
+          cutoffHz={local.high_pass.cutoff_hz}
+          height={72}
+          className="rounded border border-border/40"
+          onCutoffChange={(hz) =>
+            push({
+              ...local,
+              high_pass: { ...local.high_pass, cutoff_hz: hz },
+            })
+          }
+        />
         <SliderRow
           label="Cutoff"
           value={local.high_pass.cutoff_hz}
@@ -143,11 +159,24 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
           push({ ...local, low_pass: { ...local.low_pass, enabled: on } })
         }
       >
+        <PassFilterSpectrum
+          samplesRef={samplesRef}
+          type="low-pass"
+          cutoffHz={local.low_pass.cutoff_hz}
+          height={72}
+          className="rounded border border-border/40"
+          onCutoffChange={(hz) =>
+            push({
+              ...local,
+              low_pass: { ...local.low_pass, cutoff_hz: hz },
+            })
+          }
+        />
         <SliderRow
           label="Cutoff"
           value={local.low_pass.cutoff_hz}
           min={500}
-          max={6000}
+          max={3000}
           step={50}
           unit="Hz"
           onChange={(v) =>
@@ -170,6 +199,12 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
           })
         }
       >
+        <NoiseGateMeter
+          samplesRef={samplesRef}
+          thresholdDb={local.noise_gate.threshold_db}
+          height={32}
+          className="rounded border border-border/40"
+        />
         <SliderRow
           label="Threshold"
           value={local.noise_gate.threshold_db}
@@ -225,6 +260,12 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef }: Pr
           })
         }
       >
+        <ClipperCurve
+          driveDb={local.soft_clipper.drive_db}
+          ceilingDb={local.soft_clipper.ceiling_db}
+          height={72}
+          className="rounded border border-border/40"
+        />
         <SliderRow
           label="Drive"
           value={local.soft_clipper.drive_db}
@@ -270,14 +311,14 @@ function FilterSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2.5">
+    <div className="border-b border-border/60 px-3 py-4">
       <div className="flex items-center justify-between">
         <Label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
           {label}
         </Label>
         <Switch checked={enabled} onCheckedChange={onToggle} />
       </div>
-      {enabled && <div className="space-y-2 pl-0.5">{children}</div>}
+      {enabled && <div className="mt-3 space-y-2">{children}</div>}
     </div>
   );
 }
@@ -300,8 +341,8 @@ function SliderRow({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="space-y-1">
-      <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between text-xs uppercase tracking-widest text-muted-foreground">
         <span>{label}</span>
         <span className="tabular-nums">
           {value} {unit}

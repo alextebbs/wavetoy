@@ -42,6 +42,7 @@ type patchStreamRequest struct {
 	Filters          *models.FilterConfig `json:"filters"`
 	AutoFallback     *bool                `json:"auto_fallback"`
 	AutoFallbackKind *string              `json:"auto_fallback_kind"`
+	ViewLocked       *bool                `json:"view_locked"`
 }
 
 type patchStreamError struct {
@@ -66,10 +67,10 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.BandwidthLowHz == 0 {
-		req.BandwidthLowHz = -5000
+		req.BandwidthLowHz = -4900
 	}
 	if req.BandwidthHighHz == 0 {
-		req.BandwidthHighHz = 5000
+		req.BandwidthHighHz = 4900
 	}
 	if req.Mode == "" {
 		req.Mode = "am"
@@ -88,7 +89,7 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream, err := s.db.CreateStream(r.Context(), db.CreateStreamParams{
-		TenantID:        db.DefaultTenantID,
+		TenantID:        TenantID(r.Context()),
 		SourceID:        req.SourceID,
 		FrequencyKHz:    req.FrequencyKHz,
 		BandwidthLowHz:  req.BandwidthLowHz,
@@ -102,7 +103,7 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, db.ErrTenantAtCapacity):
-			writeError(w, http.StatusConflict, fmt.Sprintf("maximum of %d streams reached", db.MaxStreamsPerTenant), "TENANT_AT_CAPACITY")
+			writeError(w, http.StatusConflict, "tenant stream limit reached", "TENANT_AT_CAPACITY")
 		case errors.Is(err, db.ErrSourceNotFound):
 			writeError(w, http.StatusNotFound, "source not found", "NOT_FOUND")
 		case errors.Is(err, db.ErrSourceUnavailable):
@@ -138,7 +139,7 @@ func (s *Server) patchStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
-	if existing == nil || existing.TenantID != db.DefaultTenantID {
+	if existing == nil || existing.TenantID != TenantID(r.Context()) {
 		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
 		return
 	}
@@ -174,7 +175,7 @@ func (s *Server) deleteStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
-	if existing == nil || existing.TenantID != db.DefaultTenantID {
+	if existing == nil || existing.TenantID != TenantID(r.Context()) {
 		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
 		return
 	}
@@ -186,7 +187,7 @@ func (s *Server) deleteStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := s.db.DeleteStream(r.Context(), streamID, db.DefaultTenantID)
+	deleted, err := s.db.DeleteStream(r.Context(), streamID, TenantID(r.Context()))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
@@ -223,6 +224,7 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		Filters:          existing.Filters,
 		AutoFallback:     existing.AutoFallback,
 		AutoFallbackKind: existing.AutoFallbackKind,
+		ViewLocked:       existing.ViewLocked,
 	}
 
 	changed := false
@@ -296,12 +298,16 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		updated.AutoFallbackKind = kind
 		changed = true
 	}
+	if req.ViewLocked != nil {
+		updated.ViewLocked = *req.ViewLocked
+		changed = true
+	}
 
 	if !changed {
 		return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "no fields provided to update", Code: "VALIDATION"}
 	}
 
-	stream, err := s.db.UpdateStream(ctx, existing.ID, db.DefaultTenantID, updated, baseVersion)
+	stream, err := s.db.UpdateStream(ctx, existing.ID, existing.TenantID, updated, baseVersion)
 	if err != nil {
 		switch {
 		case errors.Is(err, db.ErrVersionConflict):

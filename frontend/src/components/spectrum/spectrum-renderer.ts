@@ -34,8 +34,12 @@ export class SpectrumRenderer {
 
   private dataStartKHz = 0;
   private dataEndKHz = 30000;
+  private maxBandwidthKHz = 30000;
   private viewStartKHz = 0;
   private viewEndKHz = 30000;
+
+  private static readonly MAX_ZOOM = 14;
+  private static readonly NUM_BINS = 1024;
 
   private passbandCenterKHz = 0;
   private passbandLowHz = 0;
@@ -83,11 +87,31 @@ export class SpectrumRenderer {
     this.dirty = true;
   }
 
+  setMaxBandwidth(maxKHz: number): void {
+    this.maxBandwidthKHz = maxKHz;
+  }
+
   setDataCoverage(startKHz: number, endKHz: number): void {
     if (startKHz === this.dataStartKHz && endKHz === this.dataEndKHz) return;
     this.dataStartKHz = startKHz;
     this.dataEndKHz = endKHz;
     this.dirty = true;
+  }
+
+  pushFrame(bins: Uint8Array, xBin: number, zoom: number): void {
+    const totalBins = SpectrumRenderer.NUM_BINS * (1 << SpectrumRenderer.MAX_ZOOM);
+    const binScale = 1 << (SpectrumRenderer.MAX_ZOOM - zoom);
+    const frameStart = (xBin / totalBins) * this.maxBandwidthKHz;
+    const frameEnd = ((xBin + SpectrumRenderer.NUM_BINS * binScale) / totalBins) * this.maxBandwidthKHz;
+
+    if (
+      Math.abs(frameStart - this.dataStartKHz) > 0.5 ||
+      Math.abs(frameEnd - this.dataEndKHz) > 0.5
+    ) {
+      this.setDataCoverage(frameStart, frameEnd);
+    }
+
+    this.pushBins(bins);
   }
 
   setPassband(centerKHz: number, lowHz: number, highHz: number): void {

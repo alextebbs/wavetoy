@@ -29,6 +29,11 @@ export function TuningOverlay({
   const [activeElement, setActiveElement] = useState<DragKind | null>(null);
   const [hoveredElement, setHoveredElement] = useState<DragKind | null>(null);
   const [shiftHeld, setShiftHeld] = useState(false);
+
+  const [localFreq, setLocalFreq] = useState<number | null>(null);
+  const [localLo, setLocalLo] = useState<number | null>(null);
+  const [localHi, setLocalHi] = useState<number | null>(null);
+
   const dragRef = useRef<{
     kind: DragKind;
     startX: number;
@@ -36,6 +41,11 @@ export function TuningOverlay({
     origHi: number;
     origFreq: number;
   } | null>(null);
+
+  const isDragging = dragRef.current !== null;
+  const effectiveFreq = isDragging && localFreq !== null ? localFreq : centerFreqKHz;
+  const effectiveLo = isDragging && localLo !== null ? localLo : passbandLowHz;
+  const effectiveHi = isDragging && localHi !== null ? localHi : passbandHighHz;
 
   const thickElement = activeElement ?? hoveredElement;
   const mirrorBandwidth = shiftHeld && (activeElement === "left" || activeElement === "right");
@@ -60,6 +70,9 @@ export function TuningOverlay({
       e.stopPropagation();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       setActiveElement(kind);
+      setLocalFreq(centerFreqKHz);
+      setLocalLo(passbandLowHz);
+      setLocalHi(passbandHighHz);
       dragRef.current = {
         kind,
         startX: e.clientX,
@@ -86,10 +99,13 @@ export function TuningOverlay({
           let newHi = Math.round(d.origHi - deltaHz);
           newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
           newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
+          setLocalLo(newLo);
+          setLocalHi(newHi);
           onBandwidthChange(newLo, newHi);
         } else {
           let newLo = Math.round(d.origLo + deltaHz);
           newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, d.origHi - 100));
+          setLocalLo(newLo);
           onBandwidthChange(newLo, d.origHi);
         }
       } else if (d.kind === "right" && onBandwidthChange) {
@@ -98,17 +114,20 @@ export function TuningOverlay({
           let newHi = Math.round(d.origHi + deltaHz);
           newLo = Math.max(-MAX_BW_HZ, Math.min(newLo, newHi - 100));
           newHi = Math.min(MAX_BW_HZ, Math.max(newHi, newLo + 100));
+          setLocalLo(newLo);
+          setLocalHi(newHi);
           onBandwidthChange(newLo, newHi);
         } else {
           let newHi = Math.round(d.origHi + deltaHz);
           newHi = Math.min(MAX_BW_HZ, Math.max(newHi, d.origLo + 100));
+          setLocalHi(newHi);
           onBandwidthChange(d.origLo, newHi);
         }
       } else if (d.kind === "center" && onFrequencyChange) {
         const deltaKHz = deltaHz / 1000;
-        onFrequencyChange(
-          Math.round((d.origFreq + deltaKHz) * 100) / 100
-        );
+        const newFreq = Math.round((d.origFreq + deltaKHz) * 100) / 100;
+        setLocalFreq(newFreq);
+        onFrequencyChange(newFreq);
       }
     },
     [pxToHz, onBandwidthChange, onFrequencyChange]
@@ -119,17 +138,20 @@ export function TuningOverlay({
     dragRef.current = null;
     setActiveElement(null);
     setShiftHeld(false);
+    setLocalFreq(null);
+    setLocalLo(null);
+    setLocalHi(null);
   }, []);
 
   const span = endKHz - startKHz;
   if (span <= 0) return null;
 
-  const lowKHz = centerFreqKHz + passbandLowHz / 1000;
-  const highKHz = centerFreqKHz + passbandHighHz / 1000;
+  const lowKHz = effectiveFreq + effectiveLo / 1000;
+  const highKHz = effectiveFreq + effectiveHi / 1000;
 
   const leftPct = ((lowKHz - startKHz) / span) * 100;
   const rightPct = ((highKHz - startKHz) / span) * 100;
-  const centerPct = ((centerFreqKHz - startKHz) / span) * 100;
+  const centerPct = ((effectiveFreq - startKHz) / span) * 100;
 
   const tuning = useThemeStore((s) => s.theme.tuning);
 
@@ -138,7 +160,7 @@ export function TuningOverlay({
 
   return (
     <div ref={containerRef} className="absolute inset-0 z-30 pointer-events-none">
-      {/* Passband group: fill + handles */}
+      {/* Passband group: fill + edge handles */}
       <div
         className="absolute inset-y-0 pointer-events-auto"
         style={{
@@ -146,14 +168,20 @@ export function TuningOverlay({
           right: `${Math.max(0, 100 - rightPct)}%`,
         }}
       >
-        {/* Passband fill */}
+        {/* Passband fill — drag to retune */}
         <div
-          className="absolute inset-0 pointer-events-none transition-[border-width] duration-150"
+          className={`absolute inset-0 transition-[border-width] duration-150 ${onFrequencyChange ? "cursor-grab active:cursor-grabbing" : ""}`}
           style={{
             backgroundColor: tuning.passbandFill,
             borderLeft: `${leftThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
             borderRight: `${rightThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
           }}
+          onMouseEnter={() => onFrequencyChange && setHoveredElement("center")}
+          onMouseLeave={() => onFrequencyChange && setHoveredElement(null)}
+          onPointerDown={(e) => onPointerDown(e, "center")}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
         />
         {/* Left edge drag handle */}
         <div
@@ -186,35 +214,34 @@ export function TuningOverlay({
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         />
-        {/* Center drag handle */}
-        {centerPct >= 0 && centerPct <= 100 && leftPct < centerPct && centerPct < rightPct && (
+      </div>
+      {/* Center frequency line + drag handle (independent of passband bounds) */}
+      {centerPct >= 0 && centerPct <= 100 && (
+        <>
           <div
-            className="absolute inset-y-0 cursor-grab active:cursor-grabbing"
+            className="absolute inset-y-0 pointer-events-none transition-[width] duration-150"
             style={{
-              left: `${((centerPct - leftPct) / (rightPct - leftPct)) * 100}%`,
+              left: `${centerPct}%`,
+              width: thickElement === "center" ? 3 : 1,
+              transform: "translateX(-50%)",
+              backgroundColor: tuning.centerLine,
+            }}
+          />
+          <div
+            className={`absolute inset-y-0 ${onFrequencyChange ? "pointer-events-auto cursor-grab active:cursor-grabbing" : "pointer-events-none"}`}
+            style={{
+              left: `${centerPct}%`,
               width: HANDLE_PX,
               transform: "translateX(-50%)",
             }}
-            onMouseEnter={() => setHoveredElement("center")}
-            onMouseLeave={() => setHoveredElement(null)}
+            onMouseEnter={() => onFrequencyChange && setHoveredElement("center")}
+            onMouseLeave={() => onFrequencyChange && setHoveredElement(null)}
             onPointerDown={(e) => onPointerDown(e, "center")}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
           />
-        )}
-      </div>
-      {/* Center frequency line */}
-      {centerPct >= 0 && centerPct <= 100 && (
-        <div
-          className="absolute inset-y-0 pointer-events-none transition-[width] duration-150"
-          style={{
-            left: `${centerPct}%`,
-            width: thickElement === "center" ? 3 : 1,
-            transform: "translateX(-50%)",
-            backgroundColor: tuning.centerLine,
-          }}
-        />
+        </>
       )}
     </div>
   );

@@ -1,5 +1,13 @@
+import { useThemeStore } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { type RefObject, useCallback, useEffect, useRef } from "react";
+
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 
 const FFT_SIZE = 512;
 const NUM_BINS = FFT_SIZE / 2;
@@ -79,6 +87,9 @@ export function NotchSpectrum({
   const qRef = useRef(q);
   const draggingRef = useRef(false);
   const onCenterChangeRef = useRef(onCenterChange);
+  const primaryColor = useThemeStore((s) => s.theme.statusWarning);
+  const colorRef = useRef(primaryColor);
+  colorRef.current = primaryColor;
 
   centerRef.current = centerHz;
   qRef.current = q;
@@ -185,8 +196,9 @@ export function NotchSpectrum({
       ctx.fillStyle = "rgba(251, 146, 60, 0.07)";
       ctx.fillRect(leftX, 0, rightX - leftX, h);
 
-      // Spectrum fill
-      ctx.fillStyle = "rgba(20, 184, 166, 0.10)";
+      const c = colorRef.current;
+
+      ctx.fillStyle = hexToRgba(c, 0.10);
       ctx.beginPath();
       ctx.moveTo(0, h);
       for (let x = 0; x < w; x++) {
@@ -199,8 +211,7 @@ export function NotchSpectrum({
       ctx.closePath();
       ctx.fill();
 
-      // Spectrum stroke
-      ctx.strokeStyle = "rgba(20, 184, 166, 0.45)";
+      ctx.strokeStyle = hexToRgba(c, 0.45);
       ctx.lineWidth = 1;
       ctx.beginPath();
       for (let x = 0; x < w; x++) {

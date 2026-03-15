@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
@@ -138,6 +137,7 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("[WS] read error session=%s: %v", client.sessionID[:min(8, len(client.sessionID))], err)
 			return
 		}
 		var msg wsStreamMessage
@@ -174,7 +174,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 				s.streamLog.Info(streamID, "ws.connect", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
-				if err != nil || stream == nil || stream.TenantID != db.DefaultTenantID {
+				if err != nil || stream == nil || stream.TenantID != TenantID(r.Context()) {
 					_ = client.writeJSON(map[string]any{
 						"type":  "error",
 						"error": "stream not found for topic " + topic,
@@ -366,6 +366,7 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 			packet[0] = wsPacketTypeAudioPCM16
 			copy(packet[1:], frame)
 			if err := client.writeBinary(packet); err != nil {
+				log.Printf("[WS] audio pump write error session=%s: %v", client.sessionID[:min(8, len(client.sessionID))], err)
 				return
 			}
 		}
@@ -385,6 +386,7 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 		for frame := range wfCh {
 			packet := buildWFPacket(frame)
 			if err := client.writeBinary(packet); err != nil {
+				log.Printf("[WS] waterfall pump write error session=%s: %v", client.sessionID[:min(8, len(client.sessionID))], err)
 				return
 			}
 		}
@@ -438,6 +440,7 @@ func (s *Server) evictStaleSession(newClient *streamWSClient) {
 	s.registry.mu.RUnlock()
 
 	for _, c := range stale {
+		log.Printf("[WS] evicting stale session=%s (joined %s ago)", c.sessionID[:min(8, len(c.sessionID))], time.Since(c.joinedAt).Round(time.Millisecond))
 		_ = c.close()
 	}
 }

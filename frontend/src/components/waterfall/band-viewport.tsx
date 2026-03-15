@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
+import { CONTROL_THROTTLE_MS } from "@/lib/timing";
 
 const ZOOM_BASE = 0.9995;
-const THROTTLE_MS = 200;
 
 export function computeOptimalWFConfig(
   viewStartKHz: number,
@@ -49,6 +49,7 @@ export function computeOptimalWFConfig(
 interface BandViewportProps {
   className?: string;
   children: ReactNode;
+  zoomToCenter?: boolean;
   onClickFrequency?: (freqKHz: number) => void;
   onWFConfigChange?: (
     zoom: number,
@@ -62,10 +63,12 @@ interface BandViewportProps {
 export function BandViewport({
   className,
   children,
+  zoomToCenter,
   onClickFrequency,
   onWFConfigChange,
   onDataCoverageChange,
 }: BandViewportProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   // --- WF config orchestration refs ---
@@ -105,6 +108,8 @@ export function BandViewport({
   onDataCoverageChangeRef.current = onDataCoverageChange;
   const onClickFrequencyRef = useRef(onClickFrequency);
   onClickFrequencyRef.current = onClickFrequency;
+  const zoomToCenterRef = useRef(zoomToCenter);
+  zoomToCenterRef.current = zoomToCenter;
 
   // --- Throttled WF config on local view changes ---
   useEffect(
@@ -144,7 +149,7 @@ export function BandViewport({
         };
 
         const elapsed = Date.now() - lastConfigSentRef.current;
-        if (elapsed >= THROTTLE_MS) {
+        if (elapsed >= CONTROL_THROTTLE_MS) {
           if (configTimerRef.current) {
             clearTimeout(configTimerRef.current);
             configTimerRef.current = null;
@@ -154,7 +159,7 @@ export function BandViewport({
           configTimerRef.current = setTimeout(() => {
             configTimerRef.current = null;
             sendConfig();
-          }, THROTTLE_MS - elapsed);
+          }, CONTROL_THROTTLE_MS - elapsed);
         }
       }),
     []
@@ -180,10 +185,12 @@ export function BandViewport({
   // --- Zoom (wheel) ---
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
-    const el = overlayRef.current;
+    const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const normX = (e.clientX - rect.left) / rect.width;
+    const normX = zoomToCenterRef.current
+      ? 0.5
+      : (e.clientX - rect.left) / rect.width;
     let dy = e.deltaY;
     if (e.deltaMode === 1) dy *= 30;
     dy = Math.sign(dy) * Math.min(Math.abs(dy), 300);
@@ -308,7 +315,9 @@ export function BandViewport({
     const el = overlayRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const midX = ((t0.clientX + t1.clientX) / 2 - rect.left) / rect.width;
+    const midX = zoomToCenterRef.current
+      ? 0.5
+      : ((t0.clientX + t1.clientX) / 2 - rect.left) / rect.width;
     useBandViewStore.getState().zoomAtNorm(midX, scale);
     pinch.dist = newDist;
   }, []);
@@ -317,9 +326,9 @@ export function BandViewport({
     touchRef.current = null;
   }, []);
 
-  // --- Attach wheel listener (needs passive:false) ---
+  // --- Attach wheel listener to container so it works over child overlays too ---
   useEffect(() => {
-    const el = overlayRef.current;
+    const el = containerRef.current;
     if (!el) return;
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => {
@@ -334,7 +343,7 @@ export function BandViewport({
   }, [handleWheel]);
 
   return (
-    <div className={`relative flex flex-col ${className ?? ""}`}>
+    <div ref={containerRef} className={`relative flex flex-col ${className ?? ""}`}>
       {children}
       {/* Transparent interaction overlay on top of everything */}
       <div

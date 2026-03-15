@@ -13,6 +13,9 @@ type Config struct {
 	KiwiSourceListURLs []string // for fallbacks (comma-separated in env)
 	SyncInterval       time.Duration
 	HealthInterval     time.Duration
+	JWTSecret          string
+	JWTExpiry          time.Duration
+	DefaultPassphrase  string
 }
 
 func Load() *Config {
@@ -45,6 +48,14 @@ func Load() *Config {
 			healthInterval = parsed
 		}
 	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	jwtExpiry := 8760 * time.Hour // 1 year
+	if d := os.Getenv("JWT_EXPIRY"); d != "" {
+		if parsed, err := time.ParseDuration(d); err == nil {
+			jwtExpiry = parsed
+		}
+	}
+
 	return &Config{
 		DatabaseURL:        dbURL,
 		HTTPAddr:           addr,
@@ -52,5 +63,8 @@ func Load() *Config {
 		KiwiSourceListURLs: listURLs,
 		SyncInterval:       syncInterval,
 		HealthInterval:     healthInterval,
+		JWTSecret:          jwtSecret,
+		JWTExpiry:          jwtExpiry,
+		DefaultPassphrase:  os.Getenv("DEFAULT_PASSPHRASE"),
 	}
 }

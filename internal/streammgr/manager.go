@@ -28,8 +28,10 @@ type Manager struct {
 	mu      sync.RWMutex
 	streams map[string]*activeStream
 
-	onDegradedMu sync.RWMutex
-	onDegraded   func(streamID, reason string)
+	onDegradedMu    sync.RWMutex
+	onDegraded      func(streamID, reason string)
+	onStateChangeMu sync.RWMutex
+	onStateChange   func(streamID, state string)
 }
 
 type activeStream struct {
@@ -69,6 +71,21 @@ func (m *Manager) SetOnDegraded(fn func(streamID, reason string)) {
 	m.onDegradedMu.Lock()
 	m.onDegraded = fn
 	m.onDegradedMu.Unlock()
+}
+
+func (m *Manager) SetOnStateChange(fn func(streamID, state string)) {
+	m.onStateChangeMu.Lock()
+	m.onStateChange = fn
+	m.onStateChangeMu.Unlock()
+}
+
+func (m *Manager) notifyStateChange(streamID, state string) {
+	m.onStateChangeMu.RLock()
+	fn := m.onStateChange
+	m.onStateChangeMu.RUnlock()
+	if fn != nil {
+		fn(streamID, state)
+	}
 }
 
 func (m *Manager) SetAutoFallback(streamID string, enabled bool) {
@@ -114,6 +131,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 		client, wfClient, err := m.connectClient(ctx, stream)
 		if err != nil {
 			_ = m.db.UpdateStreamState(ctx, stream.ID, "stopped")
+			m.notifyStateChange(stream.ID, "stopped")
 			return err
 		}
 		as.mu.Lock()
@@ -127,6 +145,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 		gen := as.generation
 		as.mu.Unlock()
 		_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
+		m.notifyStateChange(stream.ID, "active")
 		m.log.Info(stream.ID, "state.change", "connecting → active")
 		m.startPump(as, client, gen)
 		if wfClient != nil {
@@ -173,6 +192,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	client, wfClient, err := m.connectClient(ctx, stream)
 	if err != nil {
 		_ = m.db.UpdateStreamState(ctx, stream.ID, "stopped")
+		m.notifyStateChange(stream.ID, "stopped")
 		return err
 	}
 
@@ -187,6 +207,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	existing.mu.Unlock()
 
 	_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
+	m.notifyStateChange(stream.ID, "active")
 	existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, client.SampleRate()))
 	m.startPump(existing, client, gen)
 	if wfClient != nil {
@@ -215,6 +236,7 @@ func (m *Manager) connectClient(ctx context.Context, stream models.Stream) (*kiw
 		fmt.Sprintf("%s:%d tls=%v freq=%.3fkHz mode=%s", source.Host, source.Port, source.UseTLS, stream.FrequencyKHz, stream.Mode))
 
 	_ = m.db.UpdateStreamState(ctx, stream.ID, "connecting")
+	m.notifyStateChange(stream.ID, "connecting")
 	ts := kiwi.ConnectTimestamp()
 
 	logFn := m.log.MakeLogFunc(stream.ID)
@@ -279,6 +301,7 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	client, wfClient, err := m.connectClient(ctx, stream)
 	if err != nil {
 		_ = m.db.UpdateStreamState(ctx, stream.ID, "stopped")
+		m.notifyStateChange(stream.ID, "stopped")
 		return err
 	}
 
@@ -317,6 +340,7 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	m.mu.Unlock()
 
 	_ = m.db.UpdateStreamState(ctx, stream.ID, "active")
+	m.notifyStateChange(stream.ID, "active")
 	m.log.Info(stream.ID, "state.change", "connecting → active")
 	m.log.Info(stream.ID, "pump.start", fmt.Sprintf("gen=%d", as.generation))
 	m.startPump(as, client, as.generation)
@@ -519,6 +543,7 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				shouldReconnect := hasSubscribers || keepAlive
 				m.log.Info(as.id, "pump.stop", fmt.Sprintf("gen=%d subs=%d auto_fb=%v will_reconnect=%v", generation, boolToInt(hasSubscribers), keepAlive, shouldReconnect))
 				_ = m.db.UpdateStreamState(context.Background(), as.id, "stopped")
+				m.notifyStateChange(as.id, "stopped")
 				m.log.Info(as.id, "state.change", "active → stopped")
 				if shouldReconnect {
 					m.ensureReconnect(as)
@@ -729,6 +754,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 
 			m.log.Info(as.id, "reconnect.ok", fmt.Sprintf("after %d attempts gen=%d", attempt, gen))
 			_ = m.db.UpdateStreamState(context.Background(), as.id, "active")
+			m.notifyStateChange(as.id, "active")
 			m.log.Info(as.id, "state.change", "stopped → active")
 			m.startPump(as, client, gen)
 			if wfClient != nil {

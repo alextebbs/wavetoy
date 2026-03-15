@@ -20,7 +20,7 @@ var (
 	ErrTenantAtCapacity  = errors.New("tenant stream limit reached")
 )
 
-const MaxStreamsPerTenant = 5
+const DefaultMaxStreamsPerTenant = 5
 
 type CreateStreamParams struct {
 	TenantID        string
@@ -48,6 +48,7 @@ type UpdateStreamParams struct {
 	Filters          models.FilterConfig
 	AutoFallback     bool
 	AutoFallbackKind string
+	ViewLocked       bool
 }
 
 func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.Stream, error) {
@@ -56,7 +57,15 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 	if err != nil {
 		return nil, fmt.Errorf("count tenant streams: %w", err)
 	}
-	if count >= MaxStreamsPerTenant {
+
+	maxStreams := DefaultMaxStreamsPerTenant
+	var tenantMax *int
+	_ = db.Pool.QueryRow(ctx, `SELECT max_streams FROM tenants WHERE id = $1`, p.TenantID).Scan(&tenantMax)
+	if tenantMax != nil {
+		maxStreams = *tenantMax
+	}
+
+	if count >= maxStreams {
 		return nil, ErrTenantAtCapacity
 	}
 
@@ -156,10 +165,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    filters = $10,
 			    auto_fallback = $11,
 			    auto_fallback_kind = $12,
+			    view_locked = $13,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $13 AND tenant_id = $14 AND version = $15
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, streamID, tenantID, baseVersion)
+			WHERE id = $14 AND tenant_id = $15 AND version = $16
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID, baseVersion)
 	} else {
 		tag, err = db.Pool.Exec(ctx, `
 			UPDATE streams
@@ -175,10 +185,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    filters = $10,
 			    auto_fallback = $11,
 			    auto_fallback_kind = $12,
+			    view_locked = $13,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $13 AND tenant_id = $14
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, streamID, tenantID)
+			WHERE id = $14 AND tenant_id = $15
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, p.AutoFallback, p.AutoFallbackKind, p.ViewLocked, streamID, tenantID)
 	}
 	if err != nil {
 		return nil, err
@@ -204,7 +215,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
 		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
-		       auto_fallback, auto_fallback_kind,
+		       auto_fallback, auto_fallback_kind, view_locked,
 		       created_at, updated_at
 		FROM streams
 		WHERE id = $1
@@ -212,7 +223,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
 		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
-		&stream.AutoFallback, &stream.AutoFallbackKind,
+		&stream.AutoFallback, &stream.AutoFallbackKind, &stream.ViewLocked,
 		&stream.CreatedAt, &stream.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -232,7 +243,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
 		       activity_sensitivity, state, version, filters, wf_view_start_khz, wf_view_end_khz,
-		       auto_fallback, auto_fallback_kind,
+		       auto_fallback, auto_fallback_kind, view_locked,
 		       created_at, updated_at
 		FROM streams
 		WHERE tenant_id = $1
@@ -251,7 +262,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
 			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
-			&stream.AutoFallback, &stream.AutoFallbackKind,
+			&stream.AutoFallback, &stream.AutoFallbackKind, &stream.ViewLocked,
 			&stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {
 			return nil, err

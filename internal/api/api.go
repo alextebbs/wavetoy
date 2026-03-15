@@ -30,6 +30,8 @@ type Server struct {
 	wsMu            sync.RWMutex
 	wsClients       map[string]map[*streamWSClient]struct{}
 	frontendDist    string
+	jwtSecret       string
+	jwtExpiry       time.Duration
 }
 
 type streamWSClient struct {
@@ -40,7 +42,7 @@ type streamWSClient struct {
 	joinedAt  time.Time
 }
 
-func New(database *db.DB, logger *streamlog.Logger) *Server {
+func New(database *db.DB, logger *streamlog.Logger, jwtSecret string, jwtExpiry time.Duration) *Server {
 	return &Server{
 		db:            database,
 		streamManager: streammgr.New(database, logger),
@@ -51,6 +53,8 @@ func New(database *db.DB, logger *streamlog.Logger) *Server {
 		registry:     newTopicRegistry(),
 		wsClients:    make(map[string]map[*streamWSClient]struct{}),
 		frontendDist: filepath.Join("frontend", "dist"),
+		jwtSecret:    jwtSecret,
+		jwtExpiry:    jwtExpiry,
 	}
 }
 
@@ -75,22 +79,29 @@ func (s *Server) Router() http.Handler {
 	})
 
 	r.Route("/api", func(api chi.Router) {
-		api.Get("/sources", s.listSources)
-		api.Get("/sources/map", s.listMapSources)
-		api.Get("/streams", s.listStreams)
-		api.Get("/streams/{id}", s.getStream)
-		api.Post("/streams", s.createStream)
-		api.Patch("/streams/{id}", s.patchStream)
-		api.Delete("/streams/{id}", s.deleteStream)
-		api.Get("/streams/{id}/ws", s.streamWS)
-		api.Get("/streams/{id}/logs", s.getStreamLogs)
-		api.Post("/streams/{id}/debug", s.setStreamDebug)
-		api.Get("/streams/{id}/fallbacks", s.getStreamFallbacks)
-		api.Get("/streams/{id}/fallbacks/ref-audio", s.getStreamRefAudio)
-		api.Get("/streams/{id}/fallbacks/{rank}/probe-audio", s.getFallbackProbeAudio)
-		api.Post("/streams/{id}/reprobe", s.reprobeStream)
-		api.Post("/streams/{id}/capture", s.captureStream)
-		api.Get("/ws", s.globalWS)
+		api.Post("/auth", s.authenticate)
+
+		api.Group(func(protected chi.Router) {
+			protected.Use(s.requireAuth)
+
+			protected.Get("/sources", s.listSources)
+			protected.Get("/sources/map", s.listMapSources)
+			protected.Post("/sources/{id}/probe", s.probeSource)
+			protected.Get("/streams", s.listStreams)
+			protected.Get("/streams/{id}", s.getStream)
+			protected.Post("/streams", s.createStream)
+			protected.Patch("/streams/{id}", s.patchStream)
+			protected.Delete("/streams/{id}", s.deleteStream)
+			protected.Get("/streams/{id}/ws", s.streamWS)
+			protected.Get("/streams/{id}/logs", s.getStreamLogs)
+			protected.Post("/streams/{id}/debug", s.setStreamDebug)
+			protected.Get("/streams/{id}/fallbacks", s.getStreamFallbacks)
+			protected.Get("/streams/{id}/fallbacks/ref-audio", s.getStreamRefAudio)
+			protected.Get("/streams/{id}/fallbacks/{rank}/probe-audio", s.getFallbackProbeAudio)
+			protected.Post("/streams/{id}/reprobe", s.reprobeStream)
+			protected.Post("/streams/{id}/capture", s.captureStream)
+			protected.Get("/ws", s.globalWS)
+		})
 	})
 
 	r.Get("/*", s.serveFrontend)

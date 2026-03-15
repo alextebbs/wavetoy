@@ -68,11 +68,12 @@ export function LogsPanel({ lines }: LogsPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [filter, setFilter] = useState<FilterLevel>("all");
+  const prevLenRef = useRef(0);
 
   const onScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    stickRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+    stickRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
   }, []);
 
   const filtered = filter === "all"
@@ -80,6 +81,15 @@ export function LogsPanel({ lines }: LogsPanelProps) {
     : lines.filter((l) => (LEVEL_SEVERITY[l.level] ?? 0) >= (LEVEL_SEVERITY[filter] ?? 0));
 
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stickRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (filtered.length === prevLenRef.current) return;
+    prevLenRef.current = filtered.length;
     if (!stickRef.current) return;
     const el = containerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -87,31 +97,12 @@ export function LogsPanel({ lines }: LogsPanelProps) {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between px-3 py-2">
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-          Logs
-        </h3>
-        <div className="flex rounded-md border border-border overflow-hidden">
-          {FILTER_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setFilter(opt.value)}
-              className={`px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
-                filter === opt.value
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
       <div
         ref={containerRef}
         onScroll={onScroll}
-        className="min-h-0 flex-1 overflow-auto px-3 pb-3 font-mono text-[10px] leading-relaxed"
+        className="flex min-h-0 flex-1 flex-col overflow-auto px-3 py-2 font-mono text-[10px] leading-relaxed"
       >
+        <div className="flex-1" />
         {filtered.map((entry) => (
           <div key={entry.id} className={LEVEL_COLORS[entry.level] ?? "text-muted-foreground"}>
             {formatEntry(entry)}

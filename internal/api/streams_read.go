@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/sammy/sdr-radio/internal/db"
 )
 
 func (s *Server) listStreams(w http.ResponseWriter, r *http.Request) {
@@ -15,7 +14,7 @@ func (s *Server) listStreams(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	streams, err := s.db.ListStreamsByTenant(r.Context(), db.DefaultTenantID, limit, offset)
+	streams, err := s.db.ListStreamsByTenant(r.Context(), TenantID(r.Context()), limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
@@ -30,7 +29,7 @@ func (s *Server) getStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
-	if stream == nil || stream.TenantID != db.DefaultTenantID {
+	if stream == nil || stream.TenantID != TenantID(r.Context()) {
 		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
 		return
 	}
