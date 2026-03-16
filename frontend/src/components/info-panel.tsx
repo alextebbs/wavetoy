@@ -8,7 +8,6 @@ export interface InfoPanelTab {
   icon: ReactNode;
   label: string;
   content: ReactNode;
-  active?: boolean;
 }
 
 interface InfoPanelHolderProps {
@@ -33,14 +32,13 @@ export function InfoPanelHolder({
         {tabs.map((tab) => (
           <Tooltip key={tab.id} content={tab.label}>
             <Button
-              variant="ghost"
+              variant={tab.id === activeId ? "outline" : "ghost"}
               size="icon"
               onClick={() => setActiveId(tab.id)}
               className={cn(
                 tab.id === activeId
                   ? "text-foreground"
                   : "text-muted-foreground/60",
-                tab.active && "ring-1 ring-primary/50",
               )}
             >
               {tab.icon}

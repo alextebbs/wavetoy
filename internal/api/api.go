@@ -18,6 +18,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/fallback"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 	"github.com/sammy/sdr-radio/internal/streammgr"
+	healthsync "github.com/sammy/sdr-radio/internal/sync"
 )
 
 type Server struct {
@@ -25,6 +26,7 @@ type Server struct {
 	streamManager   *streammgr.Manager
 	streamLog       *streamlog.Logger
 	fallbackManager *fallback.Manager
+	healthChecker   *healthsync.HealthChecker
 	wsUpgrader      websocket.Upgrader
 	registry        *topicRegistry
 	wsMu            sync.RWMutex
@@ -47,6 +49,7 @@ func New(database *db.DB, logger *streamlog.Logger, jwtSecret string, jwtExpiry 
 		db:            database,
 		streamManager: streammgr.New(database, logger),
 		streamLog:     logger,
+		healthChecker: healthsync.NewHealthChecker(database),
 		wsUpgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -87,6 +90,7 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/sources", s.listSources)
 			protected.Get("/sources/map", s.listMapSources)
 			protected.Get("/sources/{id}", s.getSource)
+			protected.Get("/sources/{id}/status", s.getSourceStatus)
 			protected.Post("/sources/{id}/probe", s.probeSource)
 			protected.Get("/streams", s.listStreams)
 			protected.Get("/streams/{id}", s.getStream)

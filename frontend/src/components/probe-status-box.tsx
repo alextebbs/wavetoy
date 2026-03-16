@@ -1,4 +1,5 @@
 import type { ProbeResult } from "@/lib/api";
+import type { ReactNode } from "react";
 import { LoaderCircleIcon } from "lucide-react";
 import { Button } from "./ui/button";
 
@@ -7,7 +8,7 @@ type ProbeStatus = "idle" | "probing" | "done";
 interface ProbeStatusBoxProps {
   status: ProbeStatus;
   result: ProbeResult | null;
-  actionLabel: string;
+  actionLabel: ReactNode;
   disabled?: boolean;
   onAction: () => void;
   onSkip?: () => void;
@@ -79,11 +80,11 @@ export function ProbeStatusBox({
             <Button
               variant={passed ? "default" : "destructive"}
               size="sm"
-              className="text-xs"
+              className="gap-1 text-xs"
               disabled={disabled}
               onClick={onAction}
             >
-              {passed ? actionLabel : `${actionLabel} anyway`}
+              {passed ? actionLabel : <>{actionLabel} anyway</>}
             </Button>
           </div>
         </>
@@ -93,7 +94,7 @@ export function ProbeStatusBox({
         <div className="flex justify-end">
           <Button
             size="sm"
-            className="text-xs"
+            className="gap-1 text-xs"
             disabled={disabled}
             onClick={onAction}
           >

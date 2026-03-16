@@ -56,6 +56,7 @@ export type InterpreterOutput = {
   wpm?: number;
   sidetone_hz?: number;
   clear?: boolean;
+  progress?: number;
 };
 
 export type Stream = {
@@ -79,7 +80,6 @@ export type Stream = {
   wf_view_start_khz: number;
   wf_view_end_khz: number;
   auto_fallback: boolean;
-  auto_fallback_kind: string;
   view_locked: boolean;
   created_at: string;
   updated_at: string;
@@ -112,7 +112,6 @@ export type FallbackSuggestion = {
 export type FallbacksResponse = {
   stream_id: string;
   auto_fallback: boolean;
-  auto_fallback_kind: string;
   suggestions: FallbackSuggestion[];
 };
 
@@ -309,12 +308,46 @@ export async function reprobeStream(streamId: string): Promise<void> {
   await apiPost(`/streams/${streamId}/reprobe`, {});
 }
 
-export function fallbackRefAudioUrl(streamId: string): string {
-  return `/api/streams/${streamId}/fallbacks/ref-audio`;
+export async function downloadFallbackRefAudio(streamId: string): Promise<void> {
+  const res = await fetch(`/api/streams/${streamId}/fallbacks/ref-audio`, {
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition");
+  let filename = `${streamId.slice(0, 8)}-ref.wav`;
+  if (disposition) {
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    if (match) filename = match[1];
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
-export function fallbackProbeAudioUrl(streamId: string, rank: number): string {
-  return `/api/streams/${streamId}/fallbacks/${rank}/probe-audio`;
+export async function downloadFallbackProbeAudio(streamId: string, rank: number): Promise<void> {
+  const res = await fetch(`/api/streams/${streamId}/fallbacks/${rank}/probe-audio`, {
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition");
+  let filename = `probe-rank${rank}.wav`;
+  if (disposition) {
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    if (match) filename = match[1];
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export type ProbeResult = {
@@ -372,6 +405,15 @@ export async function listRecentSources(
   return asArray<RecentSource>(
     await apiGet<unknown>(`/streams/${streamId}/recent-sources`),
   );
+}
+
+export async function getSourceStatus(sourceId: string): Promise<string> {
+  const res = await fetch(`/api/sources/${sourceId}/status`, {
+    headers: { ...authHeaders() },
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+  return res.text();
 }
 
 export async function setStreamDebug(

@@ -1,13 +1,11 @@
 import {
   type FallbackSuggestion,
-  type FallbacksResponse,
   type Stream,
-  fallbackProbeAudioUrl,
-  fallbackRefAudioUrl,
+  downloadFallbackProbeAudio,
+  downloadFallbackRefAudio,
   getFallbacks,
   reprobeStream,
 } from "@/lib/api";
-import { Switch } from "./ui/switch";
 import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
 import {
@@ -15,10 +13,11 @@ import {
   DownloadIcon,
   Loader2Icon,
   RefreshCwIcon,
-  UndoIcon,
+  RotateCwIcon,
+  ShieldCheckIcon,
   Volume2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 interface FallbackSectionProps {
   stream: Stream | null;
@@ -40,13 +39,7 @@ export function FallbackSection({
     probed: number;
   } | null>(null);
   const [reprobing, setReprobing] = useState(false);
-  const [prevSource, setPrevSource] = useState<{
-    id: string;
-    host: string;
-    port: number;
-  } | null>(null);
-  const enabled = stream?.auto_fallback ?? false;
-  const prevEnabledRef = useRef(enabled);
+  const autoFallback = stream?.auto_fallback ?? false;
 
   const loadFallbacks = useCallback(async () => {
     try {
@@ -62,23 +55,8 @@ export function FallbackSection({
   }, [streamId]);
 
   useEffect(() => {
-    if (enabled) {
-      void loadFallbacks();
-    } else {
-      setSuggestions([]);
-      setProbing(false);
-      setProbeProgress(null);
-      setPrevSource(null);
-    }
-  }, [enabled, loadFallbacks]);
-
-  useEffect(() => {
-    if (!prevEnabledRef.current && enabled) {
-      setProbing(true);
-      setSuggestions([]);
-    }
-    prevEnabledRef.current = enabled;
-  }, [enabled]);
+    void loadFallbacks();
+  }, [loadFallbacks]);
 
   useEffect(() => {
     const ws = wsRef.current;
@@ -93,17 +71,11 @@ export function FallbackSection({
           suggestions?: FallbackSuggestion[];
           candidates_total?: number;
           candidates_probed?: number;
-          from_source_id?: string;
-          to_source_id?: string;
-          from_source_host?: string;
-          from_source_port?: number;
-          reason?: string;
         };
         if (msg.stream_id !== streamId) return;
 
         if (msg.type === "fallback_updated") {
-          const list = msg.suggestions ?? [];
-          setSuggestions(list);
+          setSuggestions(msg.suggestions ?? []);
           setProbing(false);
           setProbeProgress(null);
         } else if (msg.type === "fallback_probing") {
@@ -116,13 +88,6 @@ export function FallbackSection({
           setSuggestions([]);
           setProbing(false);
           setProbeProgress(null);
-          if (msg.from_source_id && msg.from_source_host) {
-            setPrevSource({
-              id: msg.from_source_id,
-              host: msg.from_source_host,
-              port: msg.from_source_port ?? 0,
-            });
-          }
         }
       } catch {
         // ignore
@@ -133,7 +98,7 @@ export function FallbackSection({
     return () => ws.removeEventListener("message", handler);
   }, [wsRef, streamId]);
 
-  const handleReprobe = async () => {
+  const handleProbe = async () => {
     setReprobing(true);
     setProbing(true);
     setSuggestions([]);
@@ -153,99 +118,85 @@ export function FallbackSection({
     ws.send(JSON.stringify({ type: "switch_fallback", source_id: sourceId }));
   };
 
-  const handleRevert = () => {
-    if (!prevSource) return;
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    setPrevSource(null);
-    setSuggestions([]);
-    ws.send(JSON.stringify({ type: "switch_fallback", source_id: prevSource.id }));
-  };
-
   return (
     <section className="border-t border-border/60">
       <div className="px-3 py-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-            Fallback probing
+            Fallback sources
           </h3>
           <div className="flex items-center gap-2">
-            {enabled && (
-              <>
-                <Tooltip content="Download reference snapshot">
-                  <a
-                    href={fallbackRefAudioUrl(streamId)}
-                    download
-                    className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <Volume2Icon className="size-3" />
-                  </a>
-                </Tooltip>
-                <Tooltip content="Reprobe sources">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-6 shrink-0"
-                    disabled={reprobing}
-                    onClick={() => void handleReprobe()}
-                  >
-                    <RefreshCwIcon
-                      className={`size-3 ${reprobing ? "animate-spin" : ""}`}
-                    />
-                  </Button>
-                </Tooltip>
-              </>
+            {suggestions.length > 0 && (
+              <Tooltip content="Download reference audio">
+                <button
+                  type="button"
+                  onClick={() => void downloadFallbackRefAudio(streamId)}
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <Volume2Icon className="size-3" />
+                </button>
+              </Tooltip>
             )}
-            <Tooltip content={enabled ? "Disable auto-fallback" : "Enable auto-fallback"}>
-              <Switch
-                checked={enabled}
-                onCheckedChange={onToggleFallback}
-              />
+            <Tooltip content="Probe nearby sources">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 shrink-0"
+                disabled={reprobing}
+                onClick={() => void handleProbe()}
+              >
+                <RefreshCwIcon
+                  className={`size-3 ${reprobing ? "animate-spin" : ""}`}
+                />
+              </Button>
+            </Tooltip>
+            <Tooltip
+              content={
+                autoFallback
+                  ? "Keep alive & auto-fallback enabled"
+                  : "Enable keep alive & auto-fallback"
+              }
+            >
+              <Button
+                variant={autoFallback ? "outline" : "ghost"}
+                size="icon"
+                className="size-6 shrink-0"
+                onClick={() => onToggleFallback(!autoFallback)}
+              >
+                <ShieldCheckIcon className="size-3" />
+              </Button>
             </Tooltip>
           </div>
         </div>
 
-        {enabled && (
-          <div className="mt-3">
-            {prevSource && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="mb-2 h-7 w-full gap-1.5 text-[10px] font-normal text-muted-foreground"
-                onClick={handleRevert}
-              >
-                <UndoIcon className="size-3" />
-                Back to {prevSource.port ? `${prevSource.host}:${prevSource.port}` : prevSource.host}
-              </Button>
-            )}
-            {probing && suggestions.length === 0 ? (
-              <div className="flex items-center justify-center gap-1.5 py-4 text-[10px] text-muted-foreground">
-                <Loader2Icon className="size-3 animate-spin" />
-                <span>
-                  {probeProgress
-                    ? `Probing ${probeProgress.probed}/${probeProgress.total}`
-                    : "Probing"}
-                </span>
-              </div>
-            ) : suggestions.length === 0 ? (
-              <p className="py-2 text-xs text-muted-foreground">
-                No fallback sources found nearby.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {suggestions.map((s) => (
-                  <SuggestionCard
-                    key={s.source_id}
-                    suggestion={s}
-                    streamId={streamId}
-                    onSwitch={handleSwitchSource}
-                    isCurrentSource={s.source_id === stream?.source_id}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        <div className="mt-3">
+          {probing && suggestions.length === 0 ? (
+            <div className="flex items-center justify-center gap-1.5 py-4 text-[10px] text-muted-foreground">
+              <Loader2Icon className="size-3 animate-spin" />
+              <span>
+                {probeProgress
+                  ? `Probing ${probeProgress.probed}/${probeProgress.total}`
+                  : "Probing"}
+              </span>
+            </div>
+          ) : suggestions.length === 0 ? (
+            <p className="py-2 text-center text-[10px] uppercase tracking-widest text-muted-foreground">
+              No fallback sources
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {suggestions.map((s) => (
+                <SuggestionCard
+                  key={s.source_id}
+                  suggestion={s}
+                  streamId={streamId}
+                  onSwitch={handleSwitchSource}
+                  isCurrentSource={s.source_id === stream?.source_id}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -303,22 +254,22 @@ function SuggestionCard({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <Tooltip content="Download probe audio">
-            <a
-              href={fallbackProbeAudioUrl(streamId, s.rank)}
-              download
-              className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:text-foreground transition-colors"
+            <button
+              type="button"
+              onClick={() => void downloadFallbackProbeAudio(streamId, s.rank)}
+              className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
             >
               <DownloadIcon className="size-3" />
-            </a>
+            </button>
           </Tooltip>
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 px-2 text-[10px]"
+            className="h-6 gap-1 px-2 text-[10px]"
             disabled={isCurrentSource}
             onClick={() => onSwitch(s.source_id)}
           >
-            {isCurrentSource ? "Current" : "Switch"}
+            {isCurrentSource ? "Current" : <><RotateCwIcon className="size-3" /> Swap</>}
           </Button>
         </div>
       </div>

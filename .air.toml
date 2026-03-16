@@ -4,7 +4,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/server ./cmd/server"
+  cmd = "go build -tags whisper -o ./tmp/server ./cmd/server"
   entrypoint = ["./tmp/server"]
   include_ext = ["go", "tpl", "tmpl", "html"]
   include_dir = ["cmd", "internal", "migrations"]

@@ -65,7 +65,15 @@ type activeStream struct {
 	qualityMon    *fallback.QualityMonitor
 	listen        *listenSession
 
-	interp interpreter.Interpreter
+	idleSince        time.Time
+	idleDisconnected bool
+
+	reconnectBackoff  time.Duration
+	reconnectAttempts int
+	lastConnectedAt   time.Time
+
+	interp     interpreter.Interpreter
+	interpType string
 
 	framesFromKiwi     atomic.Int64
 	bytesFromKiwi      atomic.Int64
@@ -208,6 +216,9 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 		if as.startedAt.IsZero() {
 			as.startedAt = time.Now()
 		}
+		as.lastConnectedAt = time.Now()
+		as.reconnectBackoff = 0
+		as.reconnectAttempts = 0
 		as.listen = newListenSession(stream.SourceID)
 		gen := as.generation
 		as.mu.Unlock()
@@ -348,6 +359,10 @@ func (m *Manager) connectClient(ctx context.Context, stream models.Stream) (*kiw
 }
 
 const kiwiBandwidthKHz = 30000.0
+const idleDisconnectTimeout = 10 * time.Minute
+const maxReconnectBeforeFallback = 3
+const reconnectStabilityThreshold = 30 * time.Second
+const maxUnstableReconnects = 10
 
 func wfParamsFromView(startKHz, endKHz float64) (zoom int, centerKHz float64) {
 	if endKHz <= startKHz || (startKHz == 0 && endKHz == 0) {
@@ -381,21 +396,25 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	bufDuration := time.Duration(bufMinutes) * time.Minute
 	bufCapacity := 24 * 60 * bufMinutes * 2
 
+	now := time.Now()
 	as := &activeStream{
-		id:            stream.ID,
-		sourceID:      stream.SourceID,
-		client:        client,
-		wfClient:      wfClient,
-		generation:    1,
-		subscribers:   make(map[chan []byte]struct{}),
-		wfSubscribers: make(map[chan kiwi.WFFrame]struct{}),
-		startedAt:     time.Now(),
-		ringBuf:       ringbuf.New(bufDuration, bufCapacity),
-		filterChain:   filter.NewChain(stream.Filters, client.SampleRate()),
-		interp:        interpreter.New(stream.Interpreter, client.SampleRate()),
-		autoFallback:  stream.AutoFallback,
-		listen:        newListenSession(stream.SourceID),
+		id:              stream.ID,
+		sourceID:        stream.SourceID,
+		client:          client,
+		wfClient:        wfClient,
+		generation:      1,
+		subscribers:     make(map[chan []byte]struct{}),
+		wfSubscribers:   make(map[chan kiwi.WFFrame]struct{}),
+		startedAt:       now,
+		lastConnectedAt: now,
+		ringBuf:         ringbuf.New(bufDuration, bufCapacity),
+		filterChain:     filter.NewChain(stream.Filters, client.SampleRate()),
+		interp:          interpreter.New(normalizeInterpConfig(stream.Interpreter), client.SampleRate(), m.interpLogFunc(stream.ID)),
+		interpType:      stream.Interpreter.Type,
+		autoFallback:    stream.AutoFallback,
+		listen:          newListenSession(stream.SourceID),
 	}
+	m.wireAsyncInterpreter(as)
 
 	m.mu.Lock()
 	if _, exists := m.streams[stream.ID]; exists {
@@ -438,6 +457,7 @@ func (m *Manager) Subscribe(streamID string) (<-chan []byte, func(), error) {
 	ch := make(chan []byte, 256)
 	as.mu.Lock()
 	as.subscribers[ch] = struct{}{}
+	as.idleSince = time.Time{}
 	subCount := len(as.subscribers)
 	as.mu.Unlock()
 	m.log.Info(streamID, "subscriber.add", fmt.Sprintf("total=%d", subCount))
@@ -447,7 +467,11 @@ func (m *Manager) Subscribe(streamID string) (<-chan []byte, func(), error) {
 		if _, exists := as.subscribers[ch]; exists {
 			delete(as.subscribers, ch)
 			close(ch)
-			m.log.Info(streamID, "subscriber.remove", fmt.Sprintf("total=%d", len(as.subscribers)))
+			remaining := len(as.subscribers)
+			if remaining == 0 && len(as.wfSubscribers) == 0 {
+				as.idleSince = time.Now()
+			}
+			m.log.Info(streamID, "subscriber.remove", fmt.Sprintf("total=%d", remaining))
 		}
 		as.mu.Unlock()
 	}
@@ -492,6 +516,7 @@ func (m *Manager) SubscribeWaterfall(streamID string) (<-chan kiwi.WFFrame, func
 		as.wfSubscribers = make(map[chan kiwi.WFFrame]struct{})
 	}
 	as.wfSubscribers[ch] = struct{}{}
+	as.idleSince = time.Time{}
 	subCount := len(as.wfSubscribers)
 	as.mu.Unlock()
 	m.log.Info(streamID, "wf.subscriber.add", fmt.Sprintf("total=%d", subCount))
@@ -501,7 +526,11 @@ func (m *Manager) SubscribeWaterfall(streamID string) (<-chan kiwi.WFFrame, func
 		if _, exists := as.wfSubscribers[ch]; exists {
 			delete(as.wfSubscribers, ch)
 			close(ch)
-			m.log.Info(streamID, "wf.subscriber.remove", fmt.Sprintf("total=%d", len(as.wfSubscribers)))
+			remaining := len(as.wfSubscribers)
+			if remaining == 0 && len(as.subscribers) == 0 {
+				as.idleSince = time.Now()
+			}
+			m.log.Info(streamID, "wf.subscriber.remove", fmt.Sprintf("total=%d", remaining))
 		}
 		as.mu.Unlock()
 	}
@@ -598,27 +627,23 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 		defer func() {
 			as.mu.Lock()
 			stillCurrent := as.client == client && as.generation == generation
-			hasSubscribers := len(as.subscribers) > 0
-			keepAlive := as.autoFallback
-			qm := as.qualityMon
+			wasIdleDisconnect := as.idleDisconnected
 			if stillCurrent {
 				as.client = nil
+				as.idleDisconnected = false
 			}
 			as.mu.Unlock()
 
-			if qm != nil && stillCurrent {
-				qm.RecordDisconnect()
-			}
-
 			if stillCurrent {
-				shouldReconnect := hasSubscribers || keepAlive
-				m.log.Info(as.id, "pump.stop", fmt.Sprintf("gen=%d subs=%d auto_fb=%v will_reconnect=%v", generation, boolToInt(hasSubscribers), keepAlive, shouldReconnect))
+				if wasIdleDisconnect {
+					m.log.Info(as.id, "pump.stop", fmt.Sprintf("gen=%d reason=idle", generation))
+				} else {
+					m.log.Info(as.id, "pump.stop", fmt.Sprintf("gen=%d reason=disconnected", generation))
+					m.ensureReconnect(as)
+				}
 				_ = m.db.UpdateStreamState(context.Background(), as.id, "stopped")
 				m.notifyStateChange(as.id, "stopped")
 				m.log.Info(as.id, "state.change", "active → stopped")
-				if shouldReconnect {
-					m.ensureReconnect(as)
-				}
 			} else {
 				m.log.Debug(as.id, "pump.stop", fmt.Sprintf("gen=%d (superseded)", generation))
 			}
@@ -634,6 +659,22 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				return
 			case <-metricsTicker.C:
 				m.logAudioMetrics(as, client, generation)
+
+				as.mu.RLock()
+				shouldIdleDisconnect := !as.autoFallback &&
+					!as.idleSince.IsZero() &&
+					time.Since(as.idleSince) >= idleDisconnectTimeout &&
+					len(as.subscribers) == 0 && len(as.wfSubscribers) == 0
+				as.mu.RUnlock()
+
+				if shouldIdleDisconnect {
+					as.mu.Lock()
+					as.idleDisconnected = true
+					as.mu.Unlock()
+					m.log.Info(as.id, "idle.disconnect", fmt.Sprintf("no subscribers for %s", idleDisconnectTimeout))
+					_ = client.Close()
+					return
+				}
 			case <-qualityTicker.C:
 				as.mu.RLock()
 				qm := as.qualityMon
@@ -755,12 +796,6 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 	}()
 }
 
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
 
 func (m *Manager) logAudioMetrics(as *activeStream, client *kiwi.Client, generation uint64) {
 	as.mu.RLock()
@@ -837,6 +872,17 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 		return
 	}
 	as.reconnecting = true
+
+	wasStable := !as.lastConnectedAt.IsZero() && time.Since(as.lastConnectedAt) >= reconnectStabilityThreshold
+	if wasStable {
+		as.reconnectBackoff = time.Second
+		as.reconnectAttempts = 0
+	}
+	backoff := as.reconnectBackoff
+	if backoff < time.Second {
+		backoff = time.Second
+	}
+	attempt := as.reconnectAttempts
 	as.mu.Unlock()
 
 	m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.start", "wavetoy", "kiwi", "initiating reconnection")
@@ -847,9 +893,6 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			as.reconnecting = false
 			as.mu.Unlock()
 		}()
-
-		backoff := time.Second
-		attempt := 0
 		for {
 			select {
 			case <-m.runtimeCtx.Done():
@@ -859,23 +902,49 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			}
 
 			as.mu.RLock()
-			hasSubscribers := len(as.subscribers) > 0
 			alreadyRunning := as.client != nil
-			keepAlive := as.autoFallback
+			idle := !as.autoFallback && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
 			as.mu.RUnlock()
-			if alreadyRunning || (!hasSubscribers && !keepAlive) {
-				m.log.Info(as.id, "reconnect.abandon", fmt.Sprintf("subs=%v auto_fb=%v running=%v", hasSubscribers, keepAlive, alreadyRunning))
+			if alreadyRunning {
+				m.log.Info(as.id, "reconnect.abandon", fmt.Sprintf("running=%v", alreadyRunning))
+				return
+			}
+			if idle {
+				m.log.Info(as.id, "reconnect.abandon", "idle timeout expired")
+				return
+			}
+
+			if attempt >= maxUnstableReconnects {
+				m.log.Wire(as.id, streamlog.LevelError, "reconnect.abandon", "wavetoy", "kiwi",
+					fmt.Sprintf("giving up after %d unstable reconnects", attempt))
+				_ = m.db.UpdateStreamState(context.Background(), as.id, "error")
+				m.notifyStateChange(as.id, "error")
+
+				as.mu.RLock()
+				shouldFallback := as.autoFallback
+				as.mu.RUnlock()
+				if shouldFallback {
+					m.onDegradedMu.RLock()
+					onDeg := m.onDegraded
+					m.onDegradedMu.RUnlock()
+					if onDeg != nil {
+						onDeg(as.id, "unstable_reconnect")
+					}
+				}
 				return
 			}
 
 			attempt++
 			m.log.Info(as.id, "reconnect.start", fmt.Sprintf("attempt=%d backoff=%s", attempt, backoff))
 
+			if attempt > 1 {
+				time.Sleep(backoff)
+				backoff = minDuration(backoff*2, 30*time.Second)
+			}
+
 			stream, err := m.db.GetStreamByID(context.Background(), as.id)
 			if err != nil || stream == nil {
 				m.log.Warn(as.id, "reconnect.start", fmt.Sprintf("db lookup failed: %v", err))
-				time.Sleep(backoff)
-				backoff = minDuration(backoff*2, 15*time.Second)
 				continue
 			}
 
@@ -884,13 +953,37 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			cancel()
 			if err != nil {
 				m.log.Warn(as.id, "reconnect.start", fmt.Sprintf("attempt=%d failed: %v", attempt, err))
-				time.Sleep(backoff)
-				backoff = minDuration(backoff*2, 15*time.Second)
+
+				as.mu.RLock()
+				shouldFallback := as.autoFallback && attempt >= maxReconnectBeforeFallback
+				as.mu.RUnlock()
+
+				if shouldFallback {
+					m.log.Info(as.id, "reconnect.escalate", fmt.Sprintf("attempt=%d, triggering fallback", attempt))
+					m.onDegradedMu.RLock()
+					onDeg := m.onDegraded
+					m.onDegradedMu.RUnlock()
+					if onDeg != nil {
+						onDeg(as.id, "reconnect_failed")
+					}
+
+					as.mu.RLock()
+					switched := as.client != nil
+					as.mu.RUnlock()
+					if switched {
+						return
+					}
+					attempt = 0
+					backoff = time.Second
+					continue
+				}
+
 				continue
 			}
 
 			as.mu.Lock()
-			if as.client != nil || (len(as.subscribers) == 0 && !as.autoFallback) {
+			idleExpired := !as.autoFallback && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
+			if as.client != nil || idleExpired {
 				as.mu.Unlock()
 				m.log.Debug(as.id, "reconnect.race", "state changed during connect, discarding")
 				_ = client.Close()
@@ -907,6 +1000,9 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				as.startedAt = time.Now()
 			}
 			as.listen = newListenSession(stream.SourceID)
+			as.lastConnectedAt = time.Now()
+			as.reconnectBackoff = backoff
+			as.reconnectAttempts = attempt
 			gen := as.generation
 			as.mu.Unlock()
 
@@ -1007,17 +1103,56 @@ func (m *Manager) reconfigureInterpreter(as *activeStream, stream models.Stream)
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
-	if stream.Interpreter.Enabled {
-		if as.interp != nil && stream.Interpreter.Type != "" {
-			as.interp.Reconfigure(stream.Interpreter)
+	interpCfg := normalizeInterpConfig(stream.Interpreter)
+	if interpCfg.Enabled {
+		if as.interp != nil && interpCfg.Type == as.interpType {
+			as.interp.Reconfigure(interpCfg)
 		} else {
-			as.interp = interpreter.New(stream.Interpreter, sampleRate)
+			if as.interp != nil {
+				as.interp.Reset()
+			}
+			as.interp = interpreter.New(interpCfg, sampleRate, m.interpLogFunc(stream.ID))
+			as.interpType = stream.Interpreter.Type
+			m.wireAsyncInterpreter(as)
 		}
 	} else {
 		if as.interp != nil {
 			as.interp.Reset()
 			as.interp = nil
+			as.interpType = ""
 		}
+	}
+}
+
+func normalizeInterpConfig(cfg interpreter.Config) interpreter.Config {
+	cfg.ModelSize = "small"
+	cfg.SourceLang = ""
+	return cfg
+}
+
+func (m *Manager) interpLogFunc(streamID string) interpreter.LogFunc {
+	return func(level, action, msg string) {
+		var lvl streamlog.LogLevel
+		switch level {
+		case "error":
+			lvl = streamlog.LevelError
+		case "warn":
+			lvl = streamlog.LevelWarn
+		case "debug":
+			lvl = streamlog.LevelDebug
+		default:
+			lvl = streamlog.LevelInfo
+		}
+		m.log.Log(streamID, lvl, action, msg)
+	}
+}
+
+func (m *Manager) wireAsyncInterpreter(as *activeStream) {
+	if async, ok := as.interp.(interpreter.AsyncInterpreter); ok {
+		streamID := as.id
+		async.SetOutputCallback(func(o interpreter.Output) {
+			m.notifyInterpreterOutput(streamID, o)
+		})
 	}
 }
 

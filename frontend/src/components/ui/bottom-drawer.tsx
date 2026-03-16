@@ -18,7 +18,7 @@ type SourceOverlayProps = {
 export function SourceOverlay({
   open,
   onClose,
-  title = "Change Source",
+  title = "Swap Source",
   globe,
   sidebar,
   showSidebar = true,

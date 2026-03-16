@@ -43,7 +43,6 @@ type patchStreamRequest struct {
 	Filters          *models.FilterConfig  `json:"filters"`
 	Interpreter      *interpreter.Config   `json:"interpreter"`
 	AutoFallback     *bool                 `json:"auto_fallback"`
-	AutoFallbackKind *string              `json:"auto_fallback_kind"`
 	ViewLocked       *bool                `json:"view_locked"`
 }
 
@@ -230,7 +229,6 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		Filters:          existing.Filters,
 		Interpreter:      existing.Interpreter,
 		AutoFallback:     existing.AutoFallback,
-		AutoFallbackKind: existing.AutoFallbackKind,
 		ViewLocked:       existing.ViewLocked,
 	}
 
@@ -301,14 +299,6 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		updated.AutoFallback = *req.AutoFallback
 		changed = true
 	}
-	if req.AutoFallbackKind != nil {
-		kind := strings.ToLower(strings.TrimSpace(*req.AutoFallbackKind))
-		if kind != "auto" && kind != "manual" {
-			return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "auto_fallback_kind must be 'auto' or 'manual'", Code: "VALIDATION"}
-		}
-		updated.AutoFallbackKind = kind
-		changed = true
-	}
 	if req.ViewLocked != nil {
 		updated.ViewLocked = *req.ViewLocked
 		changed = true
@@ -343,7 +333,8 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 
 	if s.fallbackManager != nil {
 		s.streamManager.SetAutoFallback(stream.ID, stream.AutoFallback)
-		s.fallbackManager.OnStreamUpdated(*stream)
+		sourceChanged := existing.SourceID != stream.SourceID
+		s.fallbackManager.OnStreamUpdated(*stream, sourceChanged)
 	}
 
 	s.logPatchChanges(existing, stream, by)
@@ -694,10 +685,9 @@ func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stream_id":          streamID,
-		"auto_fallback":      stream.AutoFallback,
-		"auto_fallback_kind": stream.AutoFallbackKind,
-		"suggestions":        suggestions,
+		"stream_id":     streamID,
+		"auto_fallback": stream.AutoFallback,
+		"suggestions":   suggestions,
 	})
 }
 
@@ -715,11 +705,6 @@ func (s *Server) reprobeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if stream == nil {
 		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
-		return
-	}
-
-	if !stream.AutoFallback {
-		writeError(w, http.StatusBadRequest, "auto_fallback is not enabled on this stream", "VALIDATION")
 		return
 	}
 

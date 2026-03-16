@@ -143,7 +143,6 @@ type Stream struct {
 	WFViewStartKHz           float64            `json:"wf_view_start_khz"`
 	WFViewEndKHz             float64      `json:"wf_view_end_khz"`
 	AutoFallback             bool         `json:"auto_fallback"`
-	AutoFallbackKind         string       `json:"auto_fallback_kind"`
 	ViewLocked               bool         `json:"view_locked"`
 	CreatedAt                time.Time    `json:"created_at"`
 	UpdatedAt                time.Time    `json:"updated_at"`

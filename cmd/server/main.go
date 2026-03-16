@@ -20,6 +20,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/fallback"
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/streamlog"
+	wsperpool "github.com/sammy/sdr-radio/internal/whisper"
 	srcsync "github.com/sammy/sdr-radio/internal/sync"
 )
 
@@ -102,6 +103,17 @@ func main() {
 			"payload": output,
 		})
 	})
+
+	// Register whisper pool for voice interpreter
+	modelsDir := filepath.Join("data", "whisper-models")
+	if wsperpool.Available() {
+		pool := wsperpool.NewPool(modelsDir, "small")
+		defer pool.Close()
+		interpreter.RegisterWhisperPool(pool)
+		slog.Info("whisper pool registered", "models_dir", modelsDir)
+	} else {
+		slog.Info("whisper not available (build with -tags whisper to enable voice interpreter)")
+	}
 
 	go func() {
 		streams, err := database.ListStreamsByTenant(ctx, db.DefaultTenantID, 100, 0)

@@ -231,7 +231,7 @@ func decodeMorseWAV(t *testing.T, path string) (text string, sidetoneHz int) {
 		if o.SidetoneHz > 0 {
 			sidetoneHz = o.SidetoneHz
 		}
-	})
+	}, nil)
 
 	// Feed audio in 100ms chunks, same way the stream manager does
 	chunkSamples := decoderSampleRate / 10
@@ -327,7 +327,7 @@ func TestMorseAutoDetectSidetone(t *testing.T) {
 		if o.SidetoneHz > 0 {
 			detectedHz = o.SidetoneHz
 		}
-	})
+	}, nil)
 
 	chunkBytes := 1024
 	for i := 0; i < len(pcm); i += chunkBytes {

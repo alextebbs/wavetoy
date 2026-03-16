@@ -45,6 +45,22 @@ func (s *Server) getSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, source)
 }
 
+func (s *Server) getSourceStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing source id", "BAD_REQUEST")
+		return
+	}
+	raw, err := s.healthChecker.CheckSource(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "NOT_FOUND")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(raw))
+}
+
 func (s *Server) listMapSources(w http.ResponseWriter, r *http.Request) {
 	sources, counts, err := s.db.ListMapSources(r.Context())
 	if err != nil {

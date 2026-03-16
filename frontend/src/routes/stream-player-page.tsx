@@ -45,7 +45,7 @@ import {
 import { getToken } from "@/lib/auth";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { ClockIcon, LockIcon, LockOpenIcon, DownloadIcon, PanelRightIcon, RefreshCwIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, SlidersHorizontalIcon, ScrollTextIcon, BrainCircuitIcon } from "lucide-react";
+import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, DownloadIcon, PanelRightIcon, RotateCwIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
 import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
@@ -165,9 +165,11 @@ export function StreamPlayerPage() {
   const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
   const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
-  const [interpreterText, setInterpreterText] = useState("");
+  const [morseText, setMorseText] = useState("");
+  const [voiceChunks, setVoiceChunks] = useState<{ text: string; receivedAt: number }[]>([]);
   const [interpreterWpm, setInterpreterWpm] = useState(0);
   const [detectedSidetoneHz, setDetectedSidetoneHz] = useState(0);
+  const [voiceProgress, setVoiceProgress] = useState(0);
 
   const refreshFavoriteSources = useCallback(() => {
     void listFavoriteSources()
@@ -609,16 +611,30 @@ export function StreamPlayerPage() {
             }
           } else if (msg.type === "interpreter_output" && msg.payload) {
             const payload = msg.payload as InterpreterOutput;
-            if (payload.clear) {
-              setInterpreterText("");
-            } else if (payload.text) {
-              setInterpreterText((prev) => prev + payload.text);
-            }
-            if (payload.wpm) {
-              setInterpreterWpm(payload.wpm);
-            }
-            if (payload.sidetone_hz) {
-              setDetectedSidetoneHz(payload.sidetone_hz);
+            if (payload.interpreter === "voice") {
+              if (payload.clear) {
+                setVoiceChunks([]);
+              } else if (payload.text) {
+                setVoiceChunks((prev) => [
+                  ...prev,
+                  { text: payload.text!, receivedAt: Date.now() },
+                ]);
+              }
+              if (payload.progress != null) {
+                setVoiceProgress(payload.progress);
+              }
+            } else {
+              if (payload.clear) {
+                setMorseText("");
+              } else if (payload.text) {
+                setMorseText((prev) => prev + payload.text);
+              }
+              if (payload.wpm) {
+                setInterpreterWpm(payload.wpm);
+              }
+              if (payload.sidetone_hz) {
+                setDetectedSidetoneHz(payload.sidetone_hz);
+              }
             }
           }
         } catch {
@@ -765,7 +781,6 @@ export function StreamPlayerPage() {
       filters?: FilterConfig;
       interpreter?: InterpreterConfig;
       auto_fallback?: boolean;
-      auto_fallback_kind?: string;
       view_locked?: boolean;
     },
   ) => {
@@ -981,11 +996,11 @@ export function StreamPlayerPage() {
               isFavorite={currentSource ? favoriteIds.has(currentSource.id) : false}
               onToggleFavorite={toggleFavorite}
               action={
-                <Tooltip content="Change source">
+                <Tooltip content="Swap source">
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    aria-label="Change source"
+                    aria-label="Swap source"
                     onClick={() => {
                       setPendingSourceId(sourceId);
                       setHoveredSource(null);
@@ -997,7 +1012,7 @@ export function StreamPlayerPage() {
                       }
                     }}
                   >
-                    <RefreshCwIcon className="size-3.5" />
+                    <RotateCwIcon className="size-3.5" />
                   </Button>
                 </Tooltip>
               }
@@ -1016,7 +1031,7 @@ export function StreamPlayerPage() {
               <div className="flex items-center gap-1.5 border-b border-border/80 px-3 py-2">
                 <ClockIcon className="size-3 text-muted-foreground" />
                 <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                  Recent sources
+                  Source history
                 </span>
               </div>
               <div className="max-h-[300px] overflow-y-auto divide-y divide-border/50">
@@ -1052,8 +1067,8 @@ export function StreamPlayerPage() {
                           className="h-6 gap-1 px-2 text-[10px]"
                           onClick={() => sendPatch({ source_id: src.id })}
                         >
-                          <RefreshCwIcon className="size-3" />
-                          Change
+                          <RotateCwIcon className="size-3" />
+                          Swap
                         </Button>
                       </div>
                     </div>
@@ -1067,11 +1082,8 @@ export function StreamPlayerPage() {
     },
     {
       id: "filters",
-      icon: <SlidersHorizontalIcon className="size-4" />,
+      icon: <AudioWaveformIcon className="size-4" />,
       label: "Filters",
-      active: !!stream?.filters && Object.values(stream.filters).some(
-        (f) => f && typeof f === "object" && "enabled" in f && f.enabled,
-      ),
       content: (
         <FiltersSection
           filters={stream?.filters ?? {}}
@@ -1082,17 +1094,21 @@ export function StreamPlayerPage() {
     },
     {
       id: "interpreter",
-      icon: <BrainCircuitIcon className="size-4" />,
+      icon: <LanguagesIcon className="size-4" />,
       label: "Interpreter",
-      active: !!stream?.interpreter?.enabled,
       content: (
         <InterpreterPanel
           config={stream?.interpreter ?? {}}
           onConfigChange={(cfg) => sendPatch({ interpreter: cfg })}
-          text={interpreterText}
+          morseText={morseText}
+          voiceChunks={voiceChunks}
           wpm={interpreterWpm}
           detectedSidetoneHz={detectedSidetoneHz}
-          onClear={() => setInterpreterText("")}
+          voiceProgress={voiceProgress}
+          onClear={() => {
+            setMorseText("");
+            setVoiceChunks([]);
+          }}
         />
       ),
     },
@@ -1102,7 +1118,7 @@ export function StreamPlayerPage() {
       label: "Logs",
       content: <LogsPanel lines={logLines} streamId={streamId} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading, favoriteIds, toggleFavorite, recentSources, interpreterText, interpreterWpm, detectedSidetoneHz]);
+  ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading, favoriteIds, toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress]);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -1476,7 +1492,7 @@ export function StreamPlayerPage() {
                 <ProbeStatusBox
                   status={probeStatus}
                   result={probeResult}
-                  actionLabel="Change"
+                  actionLabel={<><RotateCwIcon className="size-3" /> Swap</>}
                   onAction={() => {
                     patchSource(pendingSourceId);
                     setSourceDrawerOpen(false);

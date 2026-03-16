@@ -111,11 +111,7 @@ func (m *Manager) Disable(ctx context.Context, streamID string) {
 	session.cancel()
 	<-session.done
 
-	if err := m.db.DeleteFallbackSuggestions(ctx, streamID); err != nil {
-		m.log.Warn(streamID, "fb.disable", fmt.Sprintf("delete suggestions failed: %v", err))
-	}
-
-	m.log.Info(streamID, "fb.disable", "fallback probing disabled")
+	m.log.Info(streamID, "fb.disable", "periodic fallback probing disabled (suggestions preserved)")
 }
 
 func (m *Manager) Reprobe(ctx context.Context, streamID string) {
@@ -123,18 +119,24 @@ func (m *Manager) Reprobe(ctx context.Context, streamID string) {
 	session, exists := m.sessions[streamID]
 	m.mu.RUnlock()
 
-	if !exists {
-		return
-	}
-
 	if err := m.db.DeleteFallbackSuggestions(ctx, streamID); err != nil {
 		m.log.Warn(streamID, "fb.reprobe", fmt.Sprintf("delete suggestions failed: %v", err))
 	}
 
 	m.broadcastSuggestions(streamID, nil)
 
-	session.cancel()
-	<-session.done
+	if exists {
+		session.cancel()
+		<-session.done
+	}
+
+	stream, err := m.db.GetStreamByID(ctx, streamID)
+	if err != nil || stream == nil {
+		m.log.Warn(streamID, "fb.reprobe", fmt.Sprintf("cannot load stream: %v", err))
+		return
+	}
+
+	periodic := stream.AutoFallback
 
 	m.mu.Lock()
 	sessionCtx, cancel := context.WithCancel(context.Background())
@@ -147,8 +149,13 @@ func (m *Manager) Reprobe(ctx context.Context, streamID string) {
 	m.sessions[streamID] = newSession
 	m.mu.Unlock()
 
-	m.log.Info(streamID, "fb.reprobe", "starting new probe cycle")
-	go newSession.run(sessionCtx)
+	if periodic {
+		m.log.Info(streamID, "fb.reprobe", "starting periodic probe cycle")
+		go newSession.run(sessionCtx)
+	} else {
+		m.log.Info(streamID, "fb.reprobe", "running one-shot probe cycle")
+		go newSession.runOnce(sessionCtx)
+	}
 }
 
 func (m *Manager) GetSuggestions(ctx context.Context, streamID string) ([]*FallbackSuggestion, error) {
@@ -198,7 +205,7 @@ func (m *Manager) GetSuggestions(ctx context.Context, streamID string) ([]*Fallb
 	return suggestions, nil
 }
 
-func (m *Manager) OnStreamUpdated(stream models.Stream) {
+func (m *Manager) OnStreamUpdated(stream models.Stream, sourceChanged bool) {
 	m.mu.RLock()
 	_, exists := m.sessions[stream.ID]
 	m.mu.RUnlock()
@@ -215,7 +222,9 @@ func (m *Manager) OnStreamUpdated(stream models.Stream) {
 		return
 	}
 
-	m.Reprobe(context.Background(), stream.ID)
+	if sourceChanged {
+		m.Reprobe(context.Background(), stream.ID)
+	}
 }
 
 func (m *Manager) IsEnabled(streamID string) bool {
@@ -342,6 +351,11 @@ func (s *fallbackSession) run(ctx context.Context) {
 			s.runCycle(ctx)
 		}
 	}
+}
+
+func (s *fallbackSession) runOnce(ctx context.Context) {
+	defer close(s.done)
+	s.runCycle(ctx)
 }
 
 func (s *fallbackSession) runCycle(ctx context.Context) {

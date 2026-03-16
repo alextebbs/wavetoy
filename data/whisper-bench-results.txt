@@ -1,0 +1,125 @@
+=== AUTO-DETECT (language="") ===
+
+Chunk 1 | detected=en | 1265ms | 16 segments
+to improve the creativity of the technology of the ocean. Third, be strong, be strong, be strong, the ocean industry. Fourth, strengthen the main ocean and the overall plan. Fifth, strengthen the environment of the ocean. Sixth, deeply participate in the world's ocean development. This is a joke. The Central Committee of the Communist Party of China was held yesterday at the 14th East China's Olympic Committee and the Chinese Olympic Committee. At the 14th East China's Olympic Committee of the Chinese People's Republic of China, The athletes in the country have more than 15 million.
+
+Chunk 2 | detected=en | 4343ms | 9 segments
+13 silver and 16 bronze medals, and 44 medals. The first place in the gold medalist district has achieved both the achievement and the spiritual civilization, and has won honor for the nation and the people. The Central Committee of the Party of China has expressed their warmest congratulations and gratitude to you. At the East Cranberries Festival this year, you will be the main members of the party and the people. (speaking in foreign language)
+
+Chunk 3 | detected=en | 3190ms | 5 segments
+"The Great Wall of China" is a film about the great and powerful and powerful Chinese spirit. You are all from different countries, you are all very friendly and friendly. You are all talking about Chinese history and Chinese spirit. You are all talking about the love and passion of Chinese children and Chinese spirit. I hope you will continue to be the leading actor of the new generation of Chinese characters.
+
+Chunk 4 | detected=en | 1213ms | 4 segments
+And in the past, the national government has created more sports and sports equipment. It has been promoting the development of the industrial and industrial industry in our country. In order to make China's modernization more powerful, it has been promoting the development of the new public sector. [Explaining the new public sector]
+
+Chunk 5 | detected=en | 2309ms | 7 segments
+The foundation of the project is to support the study and change the body's recommendation, and promote the learning and education to the point where it is necessary to be in the right direction. This report is from the site. Tianjin has the opportunity to develop learning and education, and has five aspects of the five-way project, which is a collective effort. The design team of the leadership team has surrounded the learning and education committee to determine 37 topics. They have started the research and development process, and have established the question list as the hands-on, and have applied the list to the survey. and the responsibility of the project. Take the whole issue.
+
+Chunk 6 | detected=en | 2400ms | 3 segments
+The Tianjin TV organization, the organization's chief director, Dong Hua Liang, has been working on the development of the economic and social development of the high-quality development of the government. The director of the organization, Dong Hua Liang, has been working on the development of the economic and social development of the government. Xinjiang is working on the central policy of the development of the central government.
+
+Chunk 7 | detected=en | 2626ms | 6 segments
+In addition, the development of the system is not safe enough to develop it clearly. The implementation of the system requires no maintenance and the implementation of the system is important. The main purpose is to ensure that the team and the team are in the right place. The implementation of the system is to promote the implementation of the system. The leadership team has been working on the implementation of the system since the beginning of the education. The work is to promote the implementation of the system as soon as possible.
+
+Chunk 8 | detected=en | 3312ms | 9 segments
+The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office.
+
+Chunk 9 | detected=en | 3585ms | 2 segments
+[Cantonese] China's World Trade and Trade Union will work on the preparation of the oil industry. The oil industry is now fully integrated into the oil industry.
+
+Chunk 10 | detected=en | 2158ms | 4 segments
+The first national conference of the South China Sea after the closure of the sea. This conference will be held on the platform of the first national conference. Remember to follow the news. The sixth conference will be open to the public. The youth movement is not the main topic. It will be held on April 13th to 18th at the South China Sea International Center. The conference will be held on the platform of the first national conference. It will be held on the platform of the first national conference.
+
+Chunk 11 | detected=en | 981ms | 8 segments
+The exhibition will be held in the special state-owned state-owned products area. The new technology and state-owned products will be held in Wenchang and Zhonghua. The exhibition will also be held in the state-owned state-owned products area. The most core theme of our exhibition is AI and electronic devices. It can be used by machine and can be worn by earphones. These will be shown in our exhibition. The exhibition will be held on the online public platform. [Police radio]
+
+Chunk 12 | detected=en | 1930ms | 3 segments
+The supply of electricity, electricity, and electricity is now available to customers. Through online matching and online chat, we have a more efficient and accurate supply and electricity system. The company and the purchase of electricity provide a temporary service for the future. The next step is to promote the new generation of customers. The development of the industry is now on display. We hope that through the sales meeting, we can show our ability to the global users and establish a connection with everyone so that our products can be also available. China's electricity and consumption power supply in 2026.
+
+Chunk 13 | detected=en | 1374ms | 6 segments
+The new international exhibition area is called "The World's 30% increase in the global budget". AI model, all smart operating systems, family management system, and the previous results are divided into two points. The domestic and domestic enterprises are obviously in the process of developing the future. The Chinese developers, Zhou Yao, are here. In 2015, the AI penetration rate of artificial intelligence has exceeded 50%. Among them, the AI penetration rate of the AI is over 70%. Some enterprises are in charge of the production of AI.
+
+Chunk 14 | detected=en | 1961ms | 4 segments
+[Spanish] [Spanish] [Spanish] [Spanish]
+
+Chunk 15 | detected=en | 2721ms | 5 segments
+We are working on a solution to the family's needs. The Ministry of Industry and Technology, the Minister of Industry and Industry, He Yaqiong, pointed out that our country has a comprehensive industrial chain set-up. In the future, we will build a new industry with the help of the new industry. In the year 2030, the market's model of artificial intelligence will exceed $1.4 trillion. We will build a new home with new knowledge.
+
+Chunk 16 | detected=en | 4962ms | 3 segments
+The world is a new place, a new place, a new sea. This is a higher level of dynamic balance. The Great Wall of China is a special place in China, the "One-year-old" region. In the ancient times, the Great Wall of China was a place where the government-led professional cooperation of the people of the world, Zhang Yuhui, was preparing for the Spring Festival in the middle of April.
+
+Chunk 17 | detected=en | 3854ms | 4 segments
+The village head of the village is called "Bai Yongmei", a famous Chinese actor, who has been in the film industry for over a year. The person who speaks is Zhang Yuhui, a man of 49 years of age, and a man of 400 tons of rice and 9 tons of seeds. These total purchase and total distribution of rice and seeds is a responsibility of the association. [Sign]
+
+Chunk 18 | detected=en | 4615ms | 6 segments
+The government is saying that the factory is directly in operation. But we are not going to let the factory go. We are going to get out of here. We are going to get out of here. As the heavy-duty power plant that everyone is working on, the cooperation of Zhang Yu Hui and Chen Tou is at the end of the sixth year of the sale of the year. The heavy-duty plan for the opening of the company has already been completed. I'm so angry. I can't bear to lose it. The first half of the year is afraid of falling. The corn belongs to the high-quality food. The water-duty plan is a fair and fair job. I'm so sorry. I'm sorry.
+
+Chunk 19 | detected=en | 3543ms | 12 segments
+The most important part of the process is the hand-pulling of the cloth. The hand-pulling of the cloth is the most important part of the process. The hand-pulling of the cloth is the most important part of the process. The hand-pulling is the most important part of the process. We don't need to use more than 30kg of cloth. Zhang Yuhun said, "The type of cloth that is hard to see and can't be seen, which is the type of cloth that is hard to see and can't be seen, is the type of cloth that is hard to see and can't be seen, which is the type of cloth that is hard to see and can't be seen, which is the type of cloth that is hard to see and can't be seen, which is the type of cloth that is hard to see and can't be seen, It's all over here.
+
+Chunk 20 | detected=en | 1193ms | 14 segments
+It's not just the water and the water. We can all work together. We can control the water. We can work together. We can work together up to 5,000, 5,000, 6,000. The first one is the fire. We have to work together. The fire is set on fire. The fire is set on fire. Zhang Yu Hui's foot is not on fire. This year, Zhang Yu Hui did not have the opportunity to create a new fire. His goal is to make it as easy as possible. I think the quality is low. I don't want to be in the car.
+
+
+=== EXPLICIT CHINESE (language="zh") ===
+
+Chunk 1 | detected=zh | 1644ms | 1 segments
+1. Increase the ability of the development of the sea and the technology. 2. Increase the potential of the sea and the industry. 3. Increase the potential of the sea and the industry. 4. Increase the potential of the sea and the environment. 5. Increase the potential of the environment. 6. Increase the potential of the world's sea and the world's land.
+
+Chunk 2 | detected=zh | 4084ms | 9 segments
+The 13 gold medals, 16 silver medals, and 44 medals were awarded. The first place in the gold medalist district, has achieved both the achievement and the spiritual civilization, and has won honor for the nation and the people. The Central Committee of the Party of China has expressed their warmest congratulations and gratitude to you. At the East Cranberries Festival this year, you will be the main members of the party and the people. (Chinese)
+
+Chunk 3 | detected=zh | 3281ms | 5 segments
+"The Great Wall of China" is a symbol of the great power of the Chinese people. It is a symbol of the great spirit of the Chinese people. You are all the members of the World's Most Greatest Athletes' Peace and Friendship. You have all the great stories of China and the great stories of the Chinese people. You have all the great stories of China and the great stories of the Chinese people. I hope you will continue to use the new era Chinese characteristics of Xi Jinping as a direct link to the mainstream society.
+
+Chunk 4 | detected=zh | 2748ms | 4 segments
+And in the past, the national government has created more sports and sports equipment. It has been promoting the development of the global human resources industry, and the development of the high-quality sector. For China's modernization, it has been promoting the development of the new contribution of the national restoration and restoration of the country. (Explaining the new contribution of the national restoration and restoration of the country)
+
+Chunk 5 | detected=zh | 2130ms | 5 segments
+The foundation of the foundation will continue to improve the study and improve the body. The study and education will be promoted and the training will be completed. The report is brought to you by the Chief Executive. Tianjin has the ability to develop the study and education. It has five aspects and fifteen aspects of the system. The head of the world leadership team of the city committee has surrounded the study and education to determine 37 topics. The foundation will continue to improve the study and education. The foundation will continue to improve the study and education.
+
+Chunk 6 | detected=zh | 2450ms | 3 segments
+The Tianjin TV organization, the organization's chief director, Dong Hua Liang, has been working on the development of economic and social development, and the development of the high-quality development, and the implementation of the action. The director of the organization, Dong Hua Liang, has been working on the development of the high-quality development, and the implementation of the action. Xinjiang will work with Xinjiang on the basis of the overall implementation of the central policy.
+
+Chunk 7 | detected=zh | 4053ms | 6 segments
+In addition, the development of the system is not safe enough, and the development is clear. The implementation of the system requires no maintenance and the implementation of the system is a key factor. The main purpose is to ensure that the system is in the right place, and the system is in the right place. The implementation of the system is to ensure that the system is in the right place, and the system is in the right place. The leadership team has decided to work together to complete the task of the system. The work is to complete the task of the system, and to complete the task of the system as soon as possible.
+
+Chunk 8 | detected=zh | 3633ms | 9 segments
+The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office. The deputy director of the party committee of Xinjiang, Weiwu Erzi district, is now in the office.
+
+Chunk 9 | detected=zh | 3254ms | 8 segments
+The South China Sea Council has held a online training for the party members. The bill is fully investigated. Education will ensure that the entire province is supported by the party members. With the current situation, the situation is clear and clear. The Guangdong Provincial Department is the top of the group. The real development of education is combined with the central major department of the Chinese government. The Guangdong Provincial Department is the top of the group. China's World Trade Pimpon Conference is full of work.
+
+Chunk 10 | detected=zh | 2541ms | 4 segments
+As the first member of the Hainan-Songkuan-Ho organization, the first member of the Hainan-Songkuan-Ho organization will be presented to the stage by the first member of the Hainan-Songkuan-Ho organization. Please remember to watch the news at night. The sixth member of the Hainan-Songkuan-Ho organization will be released as a theme for the "Long-Long-Tongue" and "Long-Tongue" activities for the future. The event will be held on April 13-18 at the Hainan International Community Center. The event will be held at Hainan-Songkuan-Ho and Qionghai, which is the largest international community and a national health community.
+
+Chunk 11 | detected=zh | 2888ms | 14 segments
+The exhibition will be held in the special state-owned state-owned products area, which will be the new technology and state-owned products, which will be sold in cultural and Chinese languages. The exhibition will also be held in the special state-owned and commercial areas, which will be the new technology and state-owned products, which will be the new technology and state-owned products, which will be sold in the special state-owned and commercial areas, which will be the new technology and state-owned products, which will be the new technology and state-owned products, which will be the new technology and state-owned products, which will be the new technology and state-owned products, which will be the new technology and state-owned products, [The End]
+
+Chunk 12 | detected=zh | 3401ms | 4 segments
+The current purchase of goods and goods is based on the link between the online purchase and the offline purchase, which is more efficient and accurate. The company and the purchase provide a temporary service to the payment, payment, and payment. The first step is to promote the new generation of customers, and to express the impact of the time. We hope that through the sales conference, we can show our ability to the whole world and establish a connection with everyone to make our products more profitable. China's power and consumption power supply in 2026.
+
+Chunk 13 | detected=zh | 1572ms | 6 segments
+The new international exhibition area is called "The World's 30% increase in the global budget". AI is a multi-functional system that is able to operate and operate. The management system of the family is divided into two parts. The domestic and domestic enterprises are obviously in the process of developing the domestic and domestic enterprises. The Chinese developers are all here. In 2015, the AI penetration rate of artificial intelligence has exceeded 50%. Among them, the AI penetration rate of the industry has exceeded 70%.
+
+Chunk 14 | detected=zh | 4101ms | 8 segments
+Zhang Yunlong, the reporter, explains how AI changes the experience of the kitchen. "In the future, AI will automatically adjust the capacity of the kitchen. It will automatically choose the material and the control of the room. At the conference, the multi-faceted industry has released a free AI professional chip, a flat-control chip and a core device. The promotion of the industrial chain is self-contained. The manufacturer, Shi Chao, explains. We are still not sure about the vision, but we are still trying to make it look like we are in the game.
+
+Chunk 15 | detected=zh | 2722ms | 5 segments
+We have a workshop to deal with the family's environmental issues. The Ministry of Industry and Technology, the Minister of Industry and Industry, He Yaqiong, pointed out that our country has the best market for industrial chain. In the future, we will build a new industry with new demand and new light. In the year 2030, our country's market will be over $40,000 million. We will build a new family with new power.
+
+Chunk 16 | detected=zh | 3036ms | 11 segments
+"The world is a new place, and the world is a new place" "The world is a new place, and the world is a new place" This is a dynamic balance between the two high-level water levels. "The world is a new place, and the world is a new place" The world is a new place, and the world is a new place. "The world is a new place, and the world is a new place" China is a special place, and the world is a special place, and the world is a special place. "The world is a special place, and the world is a special place" In the ancient Chinese language, it is the name of "Mai Man Qi", "Yi Lun Yong Zheng" A professional and professional person in the government, Zhang Yuhui, is in the ancient Chinese language, [The End]
+
+Chunk 17 | detected=zh | 2174ms | 6 segments
+The village head of the village is called "Bai Yongmei", a famous Chinese actor, who has been a great actor for over a year. The person who speaks is Zhang Yuhui, a man of 49 years. He has 400 tons of pork belly and 9 tons of fat. He has 3,000 tons of chicken. These total income and total distribution of the village head is responsible for him and the village head. The next is the "Sweet and Sour" channel.
+
+Chunk 18 | detected=zh | 3253ms | 6 segments
+The government has to pay the price for the farm. We have to pay the price for the farm. If we can't pay the price, we will be in a hurry. As the heavy grain energy of the people's fire work, the cooperation of Zhang Yu Hui and Chen Tou is at the end of the sixth year of the year. The heavy grain energy plan for the opening of the village has long been in place. After the oil was released, the village will not be able to wash the rice. The rice is afraid of falling. The rice belongs to the high-protein work. The water-dry rice is a good quality and oil-dry. I'm so tired of listening to the sound of the phone.
+
+Chunk 19 | detected=zh | 4581ms | 19 segments
+The most tight loop of the rope is the one he is holding. The one holding the rope is the most tight loop of the rope is the one he is holding. The big one is the big one. The big one is the big one. The big one is the big one. The big one is the big one. The big one is the big one. The big one is the big one. The big one is the big one. The big one is the big one. Zhang Yuhun said, "Look at the hard and hard-toed corn grains. They are rich in the control of the quality of the food. They are rich in the control of the food. They are rich in the control of the food. They are rich in the control of the food. They are rich in the control of the food. They are rich in the control of the food. It's not a big deal. It's all in the bag.
+
+Chunk 20 | detected=zh | 1216ms | 14 segments
+It's not just the water and the water. We can all work together. We can control the water. We can work together. We can work together up to 5,000 to 6,000. The first one is the fire. We have to work together. The fire is set on fire. The fire is set on fire. Zhang Yu Hui's foot is not on fire. This year, Zhang Yu Hui did not have the opportunity to create a new fire. His goal is to make it as easy as possible. I think the quality is low. I don't want to be a part of the new equipment.
+

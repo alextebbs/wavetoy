@@ -26,3 +26,9 @@ frontend/dist/
 # Local scratch folders
 tmp_*/
 kiwi-probe
+
+# Whisper models (large binary files, download via `make whisper-model`)
+data/whisper-models/*.bin
+
+# Whisper static libraries (platform-specific, not portable)
+internal/whisper/lib/

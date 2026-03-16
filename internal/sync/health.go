@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -109,6 +110,70 @@ func (h *HealthChecker) RunForSources(ctx context.Context, sourceIDs []string) e
 	}
 	wg.Wait()
 	return nil
+}
+
+// CheckSource runs a health check on a single source by ID, updates the DB,
+// and returns the raw /status response text.
+func (h *HealthChecker) CheckSource(ctx context.Context, sourceID string) (string, error) {
+	allSources, err := h.db.ListSourceIDsForHealthCheck(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list sources: %w", err)
+	}
+	var target *db.SourceForHealthCheck
+	for _, s := range allSources {
+		if s.ID == sourceID {
+			target = &s
+			break
+		}
+	}
+	if target == nil {
+		return "", fmt.Errorf("source not found")
+	}
+
+	rawText, st := h.fetchStatusWithRaw(ctx, target.Host, target.Port, target.UseTLS)
+	if err := h.db.SetSourceStatus(ctx, target.ID, st); err != nil {
+		log.Printf("health: set %s: %v", target.ID, err)
+	}
+	return rawText, nil
+}
+
+func (h *HealthChecker) fetchStatusWithRaw(ctx context.Context, host string, port int, useTLS bool) (string, db.SourceStatus) {
+	schemes := []string{"http", "https"}
+	if useTLS {
+		schemes = []string{"https", "http"}
+	}
+	for _, scheme := range schemes {
+		raw, st, ok := h.fetchStatusForSchemeWithRaw(ctx, host, port, scheme)
+		if ok {
+			return raw, st
+		}
+	}
+	return "", db.SourceStatus{Available: false}
+}
+
+func (h *HealthChecker) fetchStatusForSchemeWithRaw(ctx context.Context, host string, port int, scheme string) (string, db.SourceStatus, bool) {
+	url := fmt.Sprintf("%s://%s:%d/status", scheme, host, port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", db.SourceStatus{}, false
+	}
+	req.Header.Set("User-Agent", "sdr-radio/1.0")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", db.SourceStatus{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", db.SourceStatus{}, false
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+	raw := string(body)
+	st := parseStatus(raw)
+	tls := scheme == "https"
+	st.UseTLS = &tls
+	return raw, st, true
 }
 
 func (h *HealthChecker) fetchStatus(ctx context.Context, host string, port int, useTLS bool) db.SourceStatus {
