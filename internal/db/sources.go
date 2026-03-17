@@ -21,7 +21,7 @@ func (db *DB) ListSources(ctx context.Context, limit, offset int) ([]models.Sour
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
 		       max_listeners, available, users, snr_dbm, antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
-		       last_health_check_at, last_synced_at, created_at, updated_at
+		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources
 		ORDER BY name
 		LIMIT $1 OFFSET $2
@@ -39,7 +39,7 @@ func (db *DB) ListSources(ctx context.Context, limit, offset int) ([]models.Sour
 			&s.Latitude, &s.Longitude, &s.Name, &s.MaxListeners,
 			&s.Available, &s.Users, &s.SNRDBM, &s.Antenna, &s.Location, &s.Grid,
 			&s.Status, &s.AntConnected, &s.Offline,
-			&s.LastHealthCheckAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
+			&s.LastHealthCheckAt, &s.LastReachableAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -54,7 +54,7 @@ func (db *DB) ListMapSources(ctx context.Context) ([]models.Source, MapSourceCou
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
 		       max_listeners, available, users, snr_dbm, antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
-		       last_health_check_at, last_synced_at, created_at, updated_at
+		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources
 		WHERE latitude IS NOT NULL
 		  AND longitude IS NOT NULL
@@ -75,7 +75,7 @@ func (db *DB) ListMapSources(ctx context.Context) ([]models.Source, MapSourceCou
 			&s.Latitude, &s.Longitude, &s.Name, &s.MaxListeners,
 			&s.Available, &s.Users, &s.SNRDBM, &s.Antenna, &s.Location, &s.Grid,
 			&s.Status, &s.AntConnected, &s.Offline,
-			&s.LastHealthCheckAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
+			&s.LastHealthCheckAt, &s.LastReachableAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
 		)
 		if err != nil {
 			return nil, MapSourceCounts{}, err
@@ -110,14 +110,14 @@ func (db *DB) GetSourceByID(ctx context.Context, id string) (*models.Source, err
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
 		       max_listeners, available, users, snr_dbm, antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
-		       last_health_check_at, last_synced_at, created_at, updated_at
+		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources WHERE id = $1
 	`, id).Scan(
 		&s.ID, &s.Type, &s.Host, &s.Port, &s.UseTLS,
 		&s.Latitude, &s.Longitude, &s.Name, &s.MaxListeners,
 		&s.Available, &s.Users, &s.SNRDBM, &s.Antenna, &s.Location, &s.Grid,
 		&s.Status, &s.AntConnected, &s.Offline,
-		&s.LastHealthCheckAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
+		&s.LastHealthCheckAt, &s.LastReachableAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil

@@ -92,10 +92,20 @@ func (db *DB) SetSourceStatus(ctx context.Context, id string, st SourceStatus) e
 			longitude = COALESCE($12, sources.longitude),
 			name = COALESCE(NULLIF($13, ''), sources.name),
 			use_tls = COALESCE($14, sources.use_tls),
-			last_health_check_at = now(), updated_at = now()
+			last_health_check_at = now(), last_reachable_at = now(), updated_at = now()
 		WHERE id = $15
 	`, st.Available, st.Users, st.MaxListeners, st.SNRDBM,
 		st.Antenna, st.Location, st.Grid, st.Status, st.AntConnected, st.Offline,
 		st.Latitude, st.Longitude, st.Name, st.UseTLS, id)
+	return err
+}
+
+func (db *DB) SetSourceUnreachable(ctx context.Context, id string) error {
+	_, err := db.Pool.Exec(ctx, `
+		UPDATE sources SET
+			available = false,
+			last_health_check_at = now(), updated_at = now()
+		WHERE id = $1
+	`, id)
 	return err
 }

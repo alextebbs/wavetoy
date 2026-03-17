@@ -1,3 +1,5 @@
+import { AudioCropModal } from "@/components/audio-crop-modal";
+import { ErrorPage } from "@/components/error-page";
 import { FallbackSection } from "@/components/fallback-section";
 import { FiltersSection } from "@/components/filters-section";
 import { FrequencyInput } from "@/components/frequency-input";
@@ -46,11 +48,12 @@ import {
 import { getToken } from "@/lib/auth";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, DownloadIcon, PanelRightIcon, RotateCwIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
+import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RotateCwIcon, ScissorsIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
 import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
+import { streamLog } from "@/lib/stream-logger";
 
 const AUDIO_TYPE = 0x02;
 const WATERFALL_TYPE = 0x01;
@@ -137,9 +140,11 @@ export function StreamPlayerPage() {
   const { streamId } = useParams({ from: "/streams/$streamId" });
   const navigate = useNavigate();
   const [stream, setStream] = useState<Stream | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [status, setStatus] = useState("idle");
   const [deleting, setDeleting] = useState(false);
-  const [capturing, setCapturing] = useState(false);
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [captureFilename, setCaptureFilename] = useState("capture.wav");
   const [logLines, setLogLines] = useState<LogEntry[]>([]);
   const [sourceId, setSourceId] = useState("");
   const [frequency, setFrequency] = useState(10000);
@@ -236,12 +241,47 @@ export function StreamPlayerPage() {
 
   const setOverride = useThemeStore((s) => s.setOverride);
   const streamState = stream?.state;
+  const [noAudio, setNoAudio] = useState(false);
+  const [noWaterfall, setNoWaterfall] = useState(false);
+
+  const statusChip = useMemo((): { label: string; color: "red" | "blue" | "grey"; tooltip: string } | null => {
+    switch (status) {
+      case "connecting":
+        return { label: "C/CON", color: "blue", tooltip: "Opening WebSocket connection to the server." };
+      case "reconnecting":
+        return { label: "C/RCN", color: "blue", tooltip: "Connection to the server was lost. Attempting to reconnect with backoff." };
+      case "error":
+        return { label: "C/ERR", color: "red", tooltip: "WebSocket connection failed. Will retry automatically." };
+      case "closed":
+        return { label: "C/CLS", color: "red", tooltip: "WebSocket connection was closed. No data is flowing." };
+      case "idle":
+        return { label: "C/IDL", color: "grey", tooltip: "Waiting to connect." };
+    }
+    if (status === "connected") {
+      switch (streamState) {
+        case "connecting":
+          return { label: "S/CON", color: "red", tooltip: "Server is dialing the SDR source. If this persists, the source may be unreachable." };
+        case "reconnecting":
+          return { label: "S/RCN", color: "red", tooltip: "The SDR source disconnected. The server is retrying with exponential backoff." };
+        case "error":
+          return { label: "S/ERR", color: "red", tooltip: "Failed to connect to the SDR source, or gave up after multiple retries. Try switching sources." };
+        case "idle":
+          return { label: "S/IDL", color: "grey", tooltip: "The server disconnected from the SDR source because no clients were listening." };
+      }
+      if (noAudio) {
+        return { label: "S/SND", color: "red", tooltip: "The SDR source stopped sending audio data. The connection is still open but audio frames are not arriving." };
+      }
+      if (noWaterfall) {
+        return { label: "S/WF", color: "red", tooltip: "The SDR source stopped sending waterfall data. The connection is still open but waterfall frames are not arriving." };
+      }
+    }
+    return null;
+  }, [status, streamState, noAudio, noWaterfall]);
+
   useEffect(() => {
-    const wsDown = status === "closed" || status === "error";
-    const sourceDown = streamState === "stopped" || streamState === "connecting";
-    setOverride(wsDown || sourceDown ? ALERT_THEME : null);
+    setOverride(statusChip?.color === "red" ? ALERT_THEME : null);
     return () => setOverride(null);
-  }, [status, streamState, setOverride]);
+  }, [statusChip?.color, setOverride]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const versionRef = useRef<number>(0);
@@ -256,7 +296,7 @@ export function StreamPlayerPage() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(false);
   const streamRateRef = useRef(12000);
   const audioMetricsRef = useRef<AudioMetrics>({
     startedAt: performance.now(),
@@ -312,7 +352,7 @@ export function StreamPlayerPage() {
       const ctx = audioCtxRef.current;
       if (ctx && ctx.state === "suspended") {
         ctx.resume().then(() => {
-          console.log("[AUDIO-DIAG] resumed via user gesture, state:", ctx.state);
+          streamLog.debug("audio.resumed", `via user gesture, state=${ctx.state}`);
           setMuted(false);
         }).catch(() => {});
       }
@@ -333,9 +373,9 @@ export function StreamPlayerPage() {
 
   const ensureAudio = useCallback(async () => {
     if (!audioCtxRef.current) {
-      console.log("[AUDIO-DIAG] creating AudioContext");
+      streamLog.debug("audio.create", "creating AudioContext");
       const ctx = new AudioContext({ latencyHint: "interactive" });
-      console.log("[AUDIO-DIAG] initial state:", ctx.state);
+      streamLog.debug("audio.create", `initial state=${ctx.state}`);
       const workletCode =
         "class SdrAudioProcessor extends AudioWorkletProcessor {\n" +
         "  constructor() { super(); this.bufferSize = 48000 * 3; this.buf = new Float32Array(this.bufferSize); this.w = 0; this.r = 0; this.started = false; this.threshold = 8192; this.lowWatermark = 768; this.fadeIn = 0; this.port.onmessage = (ev)=>{ const a=ev.data; for(let i=0;i<a.length;i++){ this.buf[this.w]=a[i]; this.w=(this.w+1)%this.bufferSize; if(this.w===this.r){ this.r=(this.r+1)%this.bufferSize; } } }; }\n" +
@@ -353,20 +393,20 @@ export function StreamPlayerPage() {
       audioCtxRef.current = ctx;
       workletRef.current = node;
       gainNodeRef.current = gain;
-      console.log("[AUDIO-DIAG] pipeline created, state:", ctx.state);
+      streamLog.debug("audio.pipeline", `created, state=${ctx.state}`);
       ctx.onstatechange = () => {
-        console.log("[AUDIO-DIAG] state changed to:", ctx.state);
+        streamLog.debug("audio.state", ctx.state);
       };
     }
     if (audioCtxRef.current.state !== "running") {
-      console.log("[AUDIO-DIAG] calling resume(), current state:", audioCtxRef.current.state);
+      streamLog.debug("audio.resume", `calling resume(), state=${audioCtxRef.current.state}`);
       audioCtxRef.current.resume().then(() => {
-        console.log("[AUDIO-DIAG] resume() resolved, state:", audioCtxRef.current?.state);
+        streamLog.debug("audio.resume", `resolved, state=${audioCtxRef.current?.state}`);
       }).catch((err) => {
-        console.warn("[AUDIO-DIAG] resume() rejected:", err);
+        streamLog.warn("audio.resume", `rejected: ${err}`);
       });
     } else {
-      console.log("[AUDIO-DIAG] already running");
+      streamLog.debug("audio.resume", "already running");
     }
   }, []);
 
@@ -516,11 +556,13 @@ export function StreamPlayerPage() {
       setStatus("connected");
       intentionalCloseRef.current = false;
       lastWsDataAtRef.current = performance.now();
+      setNoAudio(false);
+      setNoWaterfall(false);
       const wasReconnect = reconnectAttemptRef.current > 0;
       const attempts = reconnectAttemptRef.current;
       reconnectBackoffRef.current = 1000;
       reconnectAttemptRef.current = 0;
-      appendLogEntry({ t: Date.now(), level: "info", action: wasReconnect ? "ws.reconnect" : "ws.connect", from: "client", to: "wavetoy", msg: wasReconnect ? `after ${attempts} attempt${attempts !== 1 ? "s" : ""}` : undefined, origin: "client" });
+      streamLog.info(wasReconnect ? "ws.reconnect" : "ws.connect", wasReconnect ? `after ${attempts} attempt${attempts !== 1 ? "s" : ""}` : undefined, "client", "wavetoy");
       const currentVersion = versionRef.current;
       const helloMsg: Record<string, unknown> = {
         type: "hello",
@@ -548,8 +590,7 @@ export function StreamPlayerPage() {
         const silenceMs = performance.now() - lastWsDataAtRef.current;
         if (silenceMs > 10_000) {
           const silenceSec = Math.round(silenceMs / 1000);
-          console.warn(`[WS-DIAG] SILENCE detected: no data for ${silenceSec}s, ws.readyState=${ws.readyState}, ws.bufferedAmount=${ws.bufferedAmount}`);
-          appendLogEntry({ t: Date.now(), level: "warn", action: "ws.silence", from: "client", to: "wavetoy", msg: `no data for ${silenceSec}s readyState=${ws.readyState} buffered=${ws.bufferedAmount}`, origin: "client" });
+          streamLog.warn("ws.silence", `no data for ${silenceSec}s readyState=${ws.readyState} buffered=${ws.bufferedAmount}`, "client", "wavetoy");
         }
       }, 5_000);
     };
@@ -558,8 +599,9 @@ export function StreamPlayerPage() {
         clearInterval(silenceWatchdogRef.current);
         silenceWatchdogRef.current = null;
       }
-      const level = intentionalCloseRef.current ? "info" : "warn";
-      appendLogEntry({ t: Date.now(), level, action: "ws.close", from: "client", to: "wavetoy", msg: `code=${ev.code} clean=${ev.wasClean}${ev.reason ? ` reason=${ev.reason}` : ""}`, origin: "client" });
+      const closeMsg = `code=${ev.code} clean=${ev.wasClean}${ev.reason ? ` reason=${ev.reason}` : ""}`;
+      if (intentionalCloseRef.current) streamLog.info("ws.close", closeMsg, "client", "wavetoy");
+      else streamLog.warn("ws.close", closeMsg, "client", "wavetoy");
       if (intentionalCloseRef.current) {
         setStatus("closed");
         return;
@@ -568,7 +610,8 @@ export function StreamPlayerPage() {
       scheduleReconnect();
     };
     ws.onerror = () => {
-      appendLogEntry({ t: Date.now(), level: "error", action: "ws.error", from: "client", to: "wavetoy", msg: "connection error", origin: "client" });
+      if (intentionalCloseRef.current) return;
+      streamLog.error("ws.error", "connection error", "client", "wavetoy");
       setStatus("error");
     };
     ws.onmessage = (ev) => {
@@ -648,7 +691,7 @@ export function StreamPlayerPage() {
               setLo(s.bandwidth_low_hz);
               setHi(s.bandwidth_high_hz);
             } else if (msg.code === "VALIDATION" && typeof msg.error === "string" && msg.error.includes("not subscribed")) {
-              appendLogEntry({ t: Date.now(), level: "warn", action: "ws.resub", from: "client", to: "wavetoy", msg: "lost topic subscription, re-subscribing", origin: "client" });
+              streamLog.warn("ws.resub", "lost topic subscription, re-subscribing", "client", "wavetoy");
               ws.send(JSON.stringify({ type: "subscribe", topics: [`stream:${streamId}`, "streams"] }));
             }
           } else if (msg.type === "stream_log") {
@@ -672,6 +715,10 @@ export function StreamPlayerPage() {
             appendLogEntries(entries);
           } else if (msg.type === "stream_state_changed" && typeof msg.state === "string") {
             setStream((prev) => prev ? { ...prev, state: msg.state as string } : prev);
+          } else if (msg.type === "stream_data_stale") {
+            const stale = msg.stale === true;
+            if (msg.channel === "audio") setNoAudio(stale);
+            else if (msg.channel === "waterfall") setNoWaterfall(stale);
           } else if (msg.type === "wf_view_changed") {
             if (msg.start_khz != null && msg.end_khz != null) {
               setViewRemote(msg.start_khz, msg.end_khz);
@@ -781,12 +828,12 @@ export function StreamPlayerPage() {
     const attempt = ++reconnectAttemptRef.current;
     const delay = reconnectBackoffRef.current;
     reconnectBackoffRef.current = Math.min(delay * 2, 30000);
-    appendLogEntry({ t: Date.now(), level: "info", action: "ws.backoff", from: "client", to: "wavetoy", msg: `attempt=${attempt} delay=${delay >= 1000 ? `${delay / 1000}s` : `${delay}ms`}`, origin: "client" });
+    streamLog.info("ws.backoff", `attempt=${attempt} delay=${delay >= 1000 ? `${delay / 1000}s` : `${delay}ms`}`, "client", "wavetoy");
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       void connect();
     }, delay);
-  }, [connect, appendLogEntry]);
+  }, [connect]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -853,7 +900,7 @@ export function StreamPlayerPage() {
   ) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      appendLogEntry({ t: Date.now(), level: "warn", action: "ws.patch", from: "client", to: "wavetoy", msg: "skipped, ws not open", origin: "client" });
+      streamLog.warn("ws.patch", "skipped, ws not open", "client", "wavetoy");
       return;
     }
     ws.send(
@@ -911,36 +958,28 @@ export function StreamPlayerPage() {
     }
   };
 
-  const onCapture = async () => {
-    setCapturing(true);
-    try {
-      const authToken = getToken();
-      const res = await fetch(`/api/streams/${streamId}/capture`, {
-        method: "POST",
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error ?? `HTTP ${res.status}`);
-      }
-      const blob = await res.blob();
-      const disposition = res.headers.get("Content-Disposition");
-      let filename = "capture.wav";
-      if (disposition) {
-        const match = disposition.match(/filename="?([^"]+)"?/);
-        if (match) filename = match[1];
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      // capture failed
-    } finally {
-      setCapturing(false);
+  const captureWav = useCallback(async (): Promise<ArrayBuffer> => {
+    const authToken = getToken();
+    const res = await fetch(`/api/streams/${streamId}/capture`, {
+      method: "POST",
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error ?? `HTTP ${res.status}`);
     }
+    const disposition = res.headers.get("Content-Disposition");
+    let filename = "capture.wav";
+    if (disposition) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match) filename = match[1];
+    }
+    setCaptureFilename(filename);
+    return res.arrayBuffer();
+  }, [streamId]);
+
+  const onCapture = () => {
+    setCropModalOpen(true);
   };
 
   const refreshMapSources = useCallback(async () => {
@@ -1032,7 +1071,7 @@ export function StreamPlayerPage() {
         setLo(s.bandwidth_low_hz);
         setHi(s.bandwidth_high_hz);
       })
-      .catch(() => { /* stream load failed */ });
+      .catch(() => { setNotFound(true); });
 
     void refreshMapSources();
     void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
@@ -1195,6 +1234,8 @@ export function StreamPlayerPage() {
     },
   ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading, favoriteIds, toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress]);
 
+  if (notFound) return <ErrorPage code="404" />;
+
   return (
     <div className="flex h-screen overflow-hidden">
       {/* ── Left: top bar + waterfall area ── */}
@@ -1203,22 +1244,18 @@ export function StreamPlayerPage() {
         <header className="grid h-[54px] shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b bg-background px-4" dir="rtl">
           {/* Right: status + multiplayer + toggle info */}
           <div className="flex items-center gap-3 justify-self-start pl-4" dir="ltr">
-            {status !== "connected" && status !== "idle" && (
-              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-                status === "connecting" || status === "reconnecting"
-                  ? "bg-primary/15 text-primary"
-                  : "bg-destructive/15 text-destructive"
-              }`}>
-                {status === "connecting" && "connecting"}
-                {status === "reconnecting" && "reconnecting"}
-                {status === "closed" && "disconnected"}
-                {status === "error" && "error"}
-              </span>
-            )}
-            {status === "connected" && (streamState === "stopped" || streamState === "connecting") && (
-              <span className="shrink-0 rounded bg-destructive/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-destructive">
-                {streamState === "connecting" ? "source connecting" : "source disconnected"}
-              </span>
+            {statusChip && (
+              <Tooltip content={statusChip.tooltip} className="normal-case tracking-normal">
+                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                  statusChip.color === "red"
+                    ? "bg-destructive/15 text-destructive"
+                    : statusChip.color === "blue"
+                      ? "bg-primary/15 text-primary"
+                      : "bg-muted text-muted-foreground"
+                }`}>
+                  {statusChip.label}
+                </span>
+              </Tooltip>
             )}
             <div className="flex items-center gap-1.5">
               {peers.map((p, i) => (
@@ -1412,14 +1449,14 @@ export function StreamPlayerPage() {
             tabs={sidebarTabs}
             defaultTab="source"
             actions={
-              <Tooltip content="Download ring buffer">
+              <Tooltip content="Ring buffer">
                 <Button
                   variant="ghost"
                   size="icon"
-                  disabled={capturing || status !== "connected"}
-                  onClick={() => void onCapture()}
+                  disabled={status !== "connected"}
+                  onClick={onCapture}
                 >
-                  <DownloadIcon className="size-4" />
+                  <ScissorsIcon className="size-4" />
                 </Button>
               </Tooltip>
             }
@@ -1586,6 +1623,15 @@ export function StreamPlayerPage() {
             )}
           </>
         }
+      />
+
+      <AudioCropModal
+        open={cropModalOpen}
+        onClose={() => setCropModalOpen(false)}
+        fetchWav={captureWav}
+        title="Ring Buffer"
+        defaultFilename={captureFilename}
+        streamGainRef={gainNodeRef}
       />
     </div>
   );

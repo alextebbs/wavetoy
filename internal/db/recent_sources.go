@@ -17,7 +17,7 @@ func (db *DB) ListRecentSources(ctx context.Context, streamID string) ([]RecentS
 		SELECT s.id, s.type, s.host, s.port, s.use_tls, s.latitude, s.longitude, s.name,
 		       s.max_listeners, s.available, s.users, s.snr_dbm, s.antenna, s.location, s.grid,
 		       s.status, COALESCE(s.ant_connected, false), COALESCE(s.offline, false),
-		       s.last_health_check_at, s.last_synced_at, s.created_at, s.updated_at,
+		       s.last_health_check_at, s.last_reachable_at, s.last_synced_at, s.created_at, s.updated_at,
 		       r.started_at
 		FROM recent_sources r
 		JOIN sources s ON s.id = r.source_id
@@ -38,7 +38,7 @@ func (db *DB) ListRecentSources(ctx context.Context, streamID string) ([]RecentS
 			&rs.Source.Latitude, &rs.Source.Longitude, &rs.Source.Name, &rs.Source.MaxListeners,
 			&rs.Source.Available, &rs.Source.Users, &rs.Source.SNRDBM, &rs.Source.Antenna, &rs.Source.Location, &rs.Source.Grid,
 			&rs.Source.Status, &rs.Source.AntConnected, &rs.Source.Offline,
-			&rs.Source.LastHealthCheckAt, &rs.Source.LastSyncedAt, &rs.Source.CreatedAt, &rs.Source.UpdatedAt,
+			&rs.Source.LastHealthCheckAt, &rs.Source.LastReachableAt, &rs.Source.LastSyncedAt, &rs.Source.CreatedAt, &rs.Source.UpdatedAt,
 			&rs.StartedAt,
 		); err != nil {
 			return nil, err

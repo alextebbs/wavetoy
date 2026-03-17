@@ -42,7 +42,7 @@ func Load() *Config {
 			syncInterval = parsed
 		}
 	}
-	healthInterval := 30 * time.Minute
+	healthInterval := time.Hour
 	if d := os.Getenv("HEALTH_INTERVAL"); d != "" {
 		if parsed, err := time.ParseDuration(d); err == nil {
 			healthInterval = parsed

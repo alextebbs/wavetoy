@@ -90,7 +90,7 @@ func Connect(ctx context.Context, cfg Config, timestamp int64, logFn LogFunc) (*
 		logFn(streamlog.LevelDebug, "dial", "wavetoy", "kiwi", fmt.Sprintf("endpoint=%s", endpoint.String()))
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
 		if logFn != nil {

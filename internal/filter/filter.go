@@ -78,20 +78,32 @@ func (c *Chain) Reconfigure(filters []Filter) {
 
 // BuildFilters constructs the ordered filter slice from a FilterConfig.
 // The execution order is fixed for signal quality:
-//  1. High-Pass       (remove DC/hum)
-//  2. Notch           (kill tonal interference before downstream filters see it)
-//  3. Noise Reducer   (spectral subtraction — best before gating/shaping)
-//  4. Noise Gate      (gate on cleaned signal)
-//  5. Low-Pass        (shape frequency response)
-//  6. Soft Clipper    (tame peaks last)
+//  1. Noise Blanker   (suppress impulse noise first — clicks, pops, static)
+//  2. High-Pass       (remove DC/hum)
+//  3. Notch           (kill known tonal interference)
+//  4. Autonotch       (adaptively find and remove unknown tonal interference)
+//  5. Noise Reducer   (MMSE-STSA spectral noise reduction)
+//  6. Noise Gate      (gate on cleaned signal)
+//  7. Low-Pass        (shape frequency response)
+//  8. Soft Clipper    (tame peaks last)
 func BuildFilters(cfg models.FilterConfig, sampleRate int) []Filter {
+	if cfg.Bypassed {
+		return nil
+	}
+
 	var filters []Filter
 
+	if cfg.NoiseBlanker != nil && cfg.NoiseBlanker.Enabled {
+		filters = append(filters, NewNoiseBlanker(cfg.NoiseBlanker.Threshold, sampleRate))
+	}
 	if cfg.HighPass != nil && cfg.HighPass.Enabled {
 		filters = append(filters, NewHighPass(cfg.HighPass.CutoffHz, float64(sampleRate)))
 	}
 	if cfg.Notch != nil && cfg.Notch.Enabled {
 		filters = append(filters, NewNotch(cfg.Notch.CenterHz, cfg.Notch.Q, float64(sampleRate)))
+	}
+	if cfg.Autonotch != nil && cfg.Autonotch.Enabled {
+		filters = append(filters, NewAutonotch(cfg.Autonotch.Strength))
 	}
 	if cfg.NoiseReducer != nil && cfg.NoiseReducer.Enabled {
 		filters = append(filters, NewNoiseReducer(cfg.NoiseReducer.Strength, cfg.NoiseReducer.FloorDB))

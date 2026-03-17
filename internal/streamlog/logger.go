@@ -2,6 +2,7 @@ package streamlog
 
 import (
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -94,6 +95,10 @@ func (l *Logger) Wire(streamID string, level LogLevel, action, from, to, msg str
 }
 
 func (l *Logger) emit(streamID string, level LogLevel, action, from, to, msg string) {
+	if isNoise(msg) {
+		return
+	}
+
 	sl := l.getOrCreate(streamID)
 
 	entry := Entry{
@@ -238,6 +243,22 @@ func (sl *streamLog) closeAll() {
 		delete(sl.subscribers, ch)
 		close(ch)
 	}
+}
+
+// noisePrefixes lists message prefixes that carry no useful information
+// and should be silently dropped from both the ring buffer and slog output.
+var noisePrefixes = []string{
+	"antsw",
+	"last_community_download=",
+}
+
+func isNoise(msg string) bool {
+	for _, p := range noisePrefixes {
+		if strings.HasPrefix(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func emitSlog(e Entry) {

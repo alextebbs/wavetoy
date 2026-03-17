@@ -11,7 +11,7 @@ func (db *DB) ListFavoriteSources(ctx context.Context, tenantID string) ([]model
 		SELECT s.id, s.type, s.host, s.port, s.use_tls, s.latitude, s.longitude, s.name,
 		       s.max_listeners, s.available, s.users, s.snr_dbm, s.antenna, s.location, s.grid,
 		       s.status, COALESCE(s.ant_connected, false), COALESCE(s.offline, false),
-		       s.last_health_check_at, s.last_synced_at, s.created_at, s.updated_at
+		       s.last_health_check_at, s.last_reachable_at, s.last_synced_at, s.created_at, s.updated_at
 		FROM favorite_sources f
 		JOIN sources s ON s.id = f.source_id
 		WHERE f.tenant_id = $1
@@ -30,7 +30,7 @@ func (db *DB) ListFavoriteSources(ctx context.Context, tenantID string) ([]model
 			&s.Latitude, &s.Longitude, &s.Name, &s.MaxListeners,
 			&s.Available, &s.Users, &s.SNRDBM, &s.Antenna, &s.Location, &s.Grid,
 			&s.Status, &s.AntConnected, &s.Offline,
-			&s.LastHealthCheckAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
+			&s.LastHealthCheckAt, &s.LastReachableAt, &s.LastSyncedAt, &s.CreatedAt, &s.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

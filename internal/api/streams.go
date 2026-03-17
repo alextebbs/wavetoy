@@ -401,10 +401,20 @@ func describeFilterChanges(before, after models.FilterConfig) string {
 		before enabledCfg
 		after  enabledCfg
 	}
+	if before.Bypassed != after.Bypassed {
+		if after.Bypassed {
+			parts = append(parts, "bypass on")
+		} else {
+			parts = append(parts, "bypass off")
+		}
+	}
+
 	pairs := []filterPair{
+		{"noise_blanker", wrapFilter(before.NoiseBlanker), wrapFilter(after.NoiseBlanker)},
 		{"low_pass", wrapFilter(before.LowPass), wrapFilter(after.LowPass)},
 		{"high_pass", wrapFilter(before.HighPass), wrapFilter(after.HighPass)},
 		{"notch", wrapFilter(before.Notch), wrapFilter(after.Notch)},
+		{"autonotch", wrapFilter(before.Autonotch), wrapFilter(after.Autonotch)},
 		{"noise_gate", wrapFilter(before.NoiseGate), wrapFilter(after.NoiseGate)},
 		{"soft_clipper", wrapFilter(before.SoftClipper), wrapFilter(after.SoftClipper)},
 		{"noise_reducer", wrapFilter(before.NoiseReducer), wrapFilter(after.NoiseReducer)},
@@ -469,6 +479,14 @@ func filterParamSummary(name string, c enabledCfg) string {
 	case "noise_reducer":
 		if v, ok := c.raw.(models.NoiseReducerConfig); ok {
 			return fmt.Sprintf(" strength=%.1f floor=%.0fdB", v.Strength, v.FloorDB)
+		}
+	case "noise_blanker":
+		if v, ok := c.raw.(models.NoiseBlankerConfig); ok {
+			return fmt.Sprintf(" threshold=%.0f", v.Threshold)
+		}
+	case "autonotch":
+		if v, ok := c.raw.(models.AutonotchConfig); ok {
+			return fmt.Sprintf(" strength=%.1f", v.Strength)
 		}
 	}
 	return ""
@@ -545,6 +563,18 @@ func filterParamDiff(name string, before, after enabledCfg) string {
 		}
 		if len(diffs) > 0 {
 			return " " + strings.Join(diffs, " ")
+		}
+	case "noise_blanker":
+		b, _ := before.raw.(models.NoiseBlankerConfig)
+		a, _ := after.raw.(models.NoiseBlankerConfig)
+		if b.Threshold != a.Threshold {
+			return fmt.Sprintf(" threshold %.0f→%.0f", b.Threshold, a.Threshold)
+		}
+	case "autonotch":
+		b, _ := before.raw.(models.AutonotchConfig)
+		a, _ := after.raw.(models.AutonotchConfig)
+		if b.Strength != a.Strength {
+			return fmt.Sprintf(" strength %.1f→%.1f", b.Strength, a.Strength)
 		}
 	}
 	return ""

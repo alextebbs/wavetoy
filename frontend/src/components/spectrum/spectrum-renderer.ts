@@ -48,6 +48,7 @@ export class SpectrumRenderer {
   private gradient: CanvasGradient | null = null;
   private dirty = false;
   private rafId: number | null = null;
+  private themeUnsub: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: SpectrumRendererOptions = {}) {
     this.canvas = canvas;
@@ -60,6 +61,11 @@ export class SpectrumRenderer {
     this.lerpSpeed = options.lerpSpeed ?? DEFAULT_LERP_SPEED;
 
     this.rebuildGradient();
+
+    this.themeUnsub = useThemeStore.subscribe(() => {
+      this.rebuildGradient();
+      this.dirty = true;
+    });
   }
 
   setLevels(min: number, max: number): void {
@@ -189,6 +195,7 @@ export class SpectrumRenderer {
 
   destroy(): void {
     this.stopRenderLoop();
+    this.themeUnsub?.();
     this.targetBins = null;
     this.displayBins = null;
     this.peakBins = null;

@@ -156,7 +156,7 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	} else {
-		log.Printf("[WS] waterfall not available for stream %s: %v", streamID, wfErr)
+		s.streamLog.Warn(streamID, "pump.wf.unavailable", fmt.Sprintf("err=%v", wfErr))
 	}
 
 	// Start structured log pump
@@ -226,11 +226,11 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 			speed = *msg.WFSpeed
 		}
 		if err := s.streamManager.ReconfigureWaterfall(streamID, zoom, centerKHz, speed); err != nil {
-			log.Printf("[WS] wf_config failed stream=%s: %v", streamID, err)
+			s.streamLog.Warn(streamID, "wf.config.fail", fmt.Sprintf("err=%v", err))
 		}
 		if msg.ViewStartKHz != nil && msg.ViewEndKHz != nil {
 			if err := s.db.UpdateStreamView(r.Context(), streamID, *msg.ViewStartKHz, *msg.ViewEndKHz); err != nil {
-				log.Printf("[WS] failed to persist wf view stream=%s: %v", streamID, err)
+				s.streamLog.Warn(streamID, "wf.view.persist_fail", fmt.Sprintf("err=%v", err))
 			}
 			evt := map[string]any{
 				"type":      "wf_view_changed",

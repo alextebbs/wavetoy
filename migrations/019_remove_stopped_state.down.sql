@@ -1,0 +1,1 @@
+-- No-op: cannot distinguish which 'error' rows were previously 'stopped'

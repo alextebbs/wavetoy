@@ -10,9 +10,12 @@ import (
 )
 
 type FilterConfig struct {
+	Bypassed      bool                 `json:"bypassed,omitempty"`
+	NoiseBlanker  *NoiseBlankerConfig  `json:"noise_blanker,omitempty"`
 	LowPass       *LowPassConfig       `json:"low_pass,omitempty"`
 	HighPass      *HighPassConfig      `json:"high_pass,omitempty"`
 	Notch         *NotchConfig         `json:"notch,omitempty"`
+	Autonotch     *AutonotchConfig     `json:"autonotch,omitempty"`
 	NoiseGate     *NoiseGateConfig     `json:"noise_gate,omitempty"`
 	SoftClipper   *SoftClipperConfig   `json:"soft_clipper,omitempty"`
 	NoiseReducer  *NoiseReducerConfig  `json:"noise_reducer,omitempty"`
@@ -66,6 +69,20 @@ type NoiseReducerConfig struct {
 
 func (c NoiseReducerConfig) IsEnabled() bool { return c.Enabled }
 
+type NoiseBlankerConfig struct {
+	Enabled   bool    `json:"enabled"`
+	Threshold float64 `json:"threshold"` // 0–100, sensitivity
+}
+
+func (c NoiseBlankerConfig) IsEnabled() bool { return c.Enabled }
+
+type AutonotchConfig struct {
+	Enabled  bool    `json:"enabled"`
+	Strength float64 `json:"strength"` // 0.0–1.0
+}
+
+func (c AutonotchConfig) IsEnabled() bool { return c.Enabled }
+
 func (fc *FilterConfig) Scan(src interface{}) error {
 	if src == nil {
 		return nil
@@ -117,6 +134,7 @@ type Source struct {
 	AntConnected      bool       `json:"ant_connected"`
 	Offline           bool       `json:"offline"`
 	LastHealthCheckAt *time.Time `json:"last_health_check_at,omitempty"`
+	LastReachableAt   *time.Time `json:"last_reachable_at,omitempty"`
 	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`

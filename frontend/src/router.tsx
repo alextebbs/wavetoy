@@ -1,4 +1,5 @@
 import { clearToken } from "@/lib/auth";
+import { ErrorPage } from "@/components/error-page";
 import { StreamPlayerPage } from "@/routes/stream-player-page";
 import { StreamsPage } from "@/routes/streams-page";
 import {
@@ -18,8 +19,18 @@ function RootLayout() {
   );
 }
 
+function GlobalErrorBoundary() {
+  return <ErrorPage code="500" />;
+}
+
+function NotFoundPage() {
+  return <ErrorPage code="404" />;
+}
+
 const rootRoute = createRootRoute({
   component: RootLayout,
+  errorComponent: GlobalErrorBoundary,
+  notFoundComponent: NotFoundPage,
 });
 
 const streamsRoute = createRoute({

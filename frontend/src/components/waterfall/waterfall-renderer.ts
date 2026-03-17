@@ -1,8 +1,7 @@
-import { buildLUT, getColorMap, type ColorMapName } from "@/lib/display-colors";
+import { buildLUT, WATERFALL_COLOR_MAPS } from "@/lib/display-colors";
 import { useThemeStore } from "@/lib/theme";
 
 export interface RendererOptions {
-  colorMap?: ColorMapName;
   minLevel?: number;
   maxLevel?: number;
   historySize?: number;
@@ -77,7 +76,7 @@ export class WaterfallRenderer {
     this.smoothMin = this.minLevel;
     this.smoothMax = this.maxLevel;
 
-    this.lut = buildLUT(getColorMap(options.colorMap ?? "phosphor"));
+    this.lut = buildLUT(WATERFALL_COLOR_MAPS.muted);
   }
 
   private initOffscreen(): void {
@@ -87,18 +86,9 @@ export class WaterfallRenderer {
     const offCtx = this.offscreen.getContext("2d", { alpha: false });
     if (!offCtx) throw new Error("Failed to get offscreen 2D context");
     this.offCtx = offCtx;
-    offCtx.fillStyle = useThemeStore.getState().theme.display.waterfallBg;
+    offCtx.fillStyle = "#000000";
     offCtx.fillRect(0, 0, this.numBins, this.historySize);
     this.rowImageData = offCtx.createImageData(this.numBins, 1);
-  }
-
-  setColorMap(name: ColorMapName): void {
-    this.lut = buildLUT(getColorMap(name));
-    this.reRenderOffscreen();
-    for (const layer of this.backgroundLayers) {
-      this.reRenderLayer(layer);
-    }
-    this.needsRepaint = true;
   }
 
   setLevels(min: number, max: number): void {
@@ -309,12 +299,12 @@ export class WaterfallRenderer {
 
     const viewSpan = this.viewEndKHz - this.viewStartKHz;
     if (viewSpan <= 0) {
-      this.visibleCtx.fillStyle = useThemeStore.getState().theme.display.waterfallBg;
+      this.visibleCtx.fillStyle = "#000000";
       this.visibleCtx.fillRect(0, 0, width, height);
       return;
     }
 
-    this.visibleCtx.fillStyle = useThemeStore.getState().theme.display.waterfallBg;
+    this.visibleCtx.fillStyle = "#000000";
     this.visibleCtx.fillRect(0, 0, width, height);
 
     // Draw background layers first (oldest → newest), then foreground

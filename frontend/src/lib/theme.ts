@@ -74,9 +74,9 @@ export interface SDRTheme {
 
 // ─── Built-in themes ─────────────────────────────────────────────────────────
 
-const phosphor: SDRTheme = {
-  name: "phosphor",
-  label: "Phosphor",
+const defaultTheme: SDRTheme = {
+  name: "default",
+  label: "Default",
   ui: {
     background: "0 0% 0%",
     foreground: "166 25% 85%",
@@ -99,7 +99,7 @@ const phosphor: SDRTheme = {
     ring: "168 52% 48%",
   },
   display: {
-    defaultColorMap: "phosphor",
+    defaultColorMap: "default",
     waterfallBg: "#020408",
     spectrumBg: "#060a12",
     spectrumFillOpacity: 0.8,
@@ -142,73 +142,6 @@ const phosphor: SDRTheme = {
   statusWarning: "#2dd4bf",
 };
 
-const classic: SDRTheme = {
-  name: "classic",
-  label: "Classic",
-  ui: {
-    background: "0 0% 0%",
-    foreground: "210 40% 98%",
-    card: "222 84% 5%",
-    cardForeground: "210 40% 98%",
-    popover: "222 84% 5%",
-    popoverForeground: "210 40% 98%",
-    primary: "210 40% 98%",
-    primaryForeground: "222 47% 11%",
-    secondary: "217 33% 18%",
-    secondaryForeground: "210 40% 98%",
-    muted: "217 33% 18%",
-    mutedForeground: "215 20% 65%",
-    accent: "217 33% 18%",
-    accentForeground: "210 40% 98%",
-    destructive: "0 63% 31%",
-    destructiveForeground: "210 40% 98%",
-    border: "217 33% 18%",
-    input: "217 33% 18%",
-    ring: "213 27% 84%",
-  },
-  display: {
-    defaultColorMap: "turbo",
-    waterfallBg: "#000000",
-    spectrumBg: "#09090b",
-    spectrumFillOpacity: 0.75,
-    spectrumGradientStops: [
-      [0, "#ef4444"],
-      [0.25, "#f59e0b"],
-      [0.45, "#22c55e"],
-      [0.7, "#06b6d4"],
-      [1, "#1e3a5f"],
-    ],
-    spectrumGridLine: "rgba(255,255,255,0.08)",
-    spectrumGridLabel: "rgba(255,255,255,0.35)",
-    spectrumPeakTrace: "#facc15",
-    spectrumPassbandFill: "rgba(255,255,255,0.1)",
-    freqScaleBg: "#09090b",
-    freqScaleTickMajor: "#a1a1aa",
-    freqScaleTickMinor: "#52525b",
-    freqScaleLabel: "#a1a1aa",
-    freqScaleUnitLabel: "#52525b",
-  },
-  map: {
-    background: "#09090b",
-    countryLines: "#555555",
-    countryLineOpacity: 0.6,
-    markerColor: "#fbbf24",
-    markerGlow: "rgba(251,191,36,0.6)",
-    selectedRing: "#fde68a",
-    crosshair: "rgba(253,230,138,0.9)",
-    snrFallback: "#facc15",
-    snrHueRange: [0, 120],
-    snrSaturation: 95,
-    snrLightness: 58,
-  },
-  tuning: {
-    passbandFill: "rgba(255,255,255,0.07)",
-    passbandBorder: "rgba(255,255,255,0.20)",
-    centerLine: "rgba(251,146,60,0.70)",
-  },
-  statusWarning: "#f59e0b",
-};
-
 const alert: SDRTheme = {
   name: "alert",
   label: "Alert",
@@ -234,7 +167,7 @@ const alert: SDRTheme = {
     ring: "0 65% 55%",
   },
   display: {
-    defaultColorMap: "phosphor",
+    defaultColorMap: "alert",
     waterfallBg: "#0a0204",
     spectrumBg: "#100408",
     spectrumFillOpacity: 0.8,
@@ -301,7 +234,7 @@ const muted: SDRTheme = {
     ring: "0 0% 45%",
   },
   display: {
-    defaultColorMap: "grayscale",
+    defaultColorMap: "muted",
     waterfallBg: "#080808",
     spectrumBg: "#0a0a0a",
     spectrumFillOpacity: 0.6,
@@ -342,7 +275,7 @@ const muted: SDRTheme = {
   statusWarning: "#888888",
 };
 
-export const THEMES: Record<string, SDRTheme> = { phosphor, classic };
+export const THEMES: Record<string, SDRTheme> = { default: defaultTheme };
 export const MUTED_THEME = muted;
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -377,7 +310,7 @@ function applyCSSVariables(ui: UIColors) {
   root.style.setProperty("--ring", ui.ring);
 }
 
-const DEFAULT_THEME = "phosphor";
+const DEFAULT_THEME = "default";
 
 export const ALERT_THEME = alert;
 

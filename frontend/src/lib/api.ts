@@ -34,10 +34,23 @@ export type NoiseReducerConfig = {
   floor_db: number;
 };
 
+export type NoiseBlankerConfig = {
+  enabled: boolean;
+  threshold: number;
+};
+
+export type AutonotchConfig = {
+  enabled: boolean;
+  strength: number;
+};
+
 export type FilterConfig = {
+  bypassed?: boolean;
+  noise_blanker?: NoiseBlankerConfig;
   low_pass?: LowPassConfig;
   high_pass?: HighPassConfig;
   notch?: NotchConfig;
+  autonotch?: AutonotchConfig;
   noise_gate?: NoiseGateConfig;
   soft_clipper?: SoftClipperConfig;
   noise_reducer?: NoiseReducerConfig;

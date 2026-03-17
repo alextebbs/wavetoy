@@ -97,6 +97,13 @@ func main() {
 			"state": state,
 		})
 	})
+	srv.StreamManager().SetOnDataStale(func(streamID, channel string, stale bool) {
+		srv.BroadcastToStream(streamID, map[string]any{
+			"type":    "stream_data_stale",
+			"channel": channel,
+			"stale":   stale,
+		})
+	})
 	srv.StreamManager().SetOnInterpreterOutput(func(streamID string, output interpreter.Output) {
 		srv.BroadcastToStream(streamID, map[string]any{
 			"type":    "interpreter_output",

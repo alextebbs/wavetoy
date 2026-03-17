@@ -2,29 +2,35 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
 } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
+import { colorMapToFilterTables, getColorMap } from "@/lib/display-colors";
 import { useThemeStore } from "@/lib/theme";
 import { WaterfallRenderer } from "./waterfall-renderer";
-import type { ColorMapName, WaterfallHandle } from "./types";
+import type { WaterfallHandle } from "./types";
 
 interface WaterfallDisplayProps {
   className?: string;
-  colorMap?: ColorMapName;
 }
+
+const FILTER_ID = "wf-colormap";
 
 export const WaterfallDisplay = forwardRef<
   WaterfallHandle,
   WaterfallDisplayProps
->(function WaterfallDisplay({ className, colorMap }, ref) {
-  const defaultColorMap = useThemeStore((s) => s.theme.display.defaultColorMap);
-  const effectiveColorMap = colorMap ?? defaultColorMap;
+>(function WaterfallDisplay({ className }, ref) {
+  const colorMapName = useThemeStore((s) => s.theme.display.defaultColorMap);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WaterfallRenderer | null>(null);
 
-  // Sync view from store → renderer
+  const filterTables = useMemo(
+    () => colorMapToFilterTables(getColorMap(colorMapName)),
+    [colorMapName],
+  );
+
   useEffect(
     () =>
       useBandViewStore.subscribe((state) => {
@@ -41,9 +47,6 @@ export const WaterfallDisplay = forwardRef<
       },
       pushFrame(bins: Uint8Array, xBin: number, zoom: number) {
         rendererRef.current?.pushFrame(bins, xBin, zoom);
-      },
-      setColorMap(name: ColorMapName) {
-        rendererRef.current?.setColorMap(name);
       },
       setLevels(min: number, max: number) {
         rendererRef.current?.setLevels(min, max);
@@ -63,7 +66,7 @@ export const WaterfallDisplay = forwardRef<
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const renderer = new WaterfallRenderer(canvas, { colorMap: effectiveColorMap });
+    const renderer = new WaterfallRenderer(canvas);
     rendererRef.current = renderer;
 
     const s = useBandViewStore.getState();
@@ -93,16 +96,26 @@ export const WaterfallDisplay = forwardRef<
       renderer.destroy();
       rendererRef.current = null;
     };
-  }, [effectiveColorMap]);
+  }, []);
 
   return (
     <div
       ref={containerRef}
       className={`relative flex flex-col bg-black overflow-hidden ${className ?? ""}`}
     >
+      <svg width="0" height="0" style={{ position: "absolute" }}>
+        <filter id={FILTER_ID} colorInterpolationFilters="sRGB">
+          <feComponentTransfer>
+            <feFuncR type="table" tableValues={filterTables.r} />
+            <feFuncG type="table" tableValues={filterTables.g} />
+            <feFuncB type="table" tableValues={filterTables.b} />
+          </feComponentTransfer>
+        </filter>
+      </svg>
       <canvas
         ref={canvasRef}
         className="block min-h-0 flex-1 pointer-events-none"
+        style={{ filter: `url(#${FILTER_ID})` }}
       />
     </div>
   );

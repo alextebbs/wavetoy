@@ -72,12 +72,18 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 				streamID := strings.TrimPrefix(topic, "stream:")
 				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.resume", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
+				s.startLogPumpForClient(streamID, client)
+
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil {
 					continue
 				}
 				if err := s.streamManager.EnsureRunning(r.Context(), *stream); err != nil {
-					log.Printf("[WS] failed to ensure stream running for topic %s: %v", topic, err)
+					s.streamLog.Warn(streamID, "stream.ensure_running.fail", fmt.Sprintf("err=%v", err))
+				}
+
+				if fresh, err := s.db.GetStreamByID(r.Context(), streamID); err == nil && fresh != nil {
+					stream = fresh
 				}
 
 				s.registry.broadcastExcluding(topic, client, map[string]any{
@@ -120,7 +126,7 @@ func (s *Server) globalWS(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 
-				s.startAudioPumpForClient(streamID, client)
+			s.startAudioPumpForClient(streamID, client)
 			}
 		}
 	}
@@ -173,6 +179,8 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 				streamID := strings.TrimPrefix(topic, "stream:")
 				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.connect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
+				s.startLogPumpForClient(streamID, client)
+
 				stream, err := s.db.GetStreamByID(r.Context(), streamID)
 				if err != nil || stream == nil || stream.TenantID != TenantID(r.Context()) {
 					_ = client.writeJSON(map[string]any{
@@ -184,7 +192,11 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 				}
 
 				if err := s.streamManager.EnsureRunning(r.Context(), *stream); err != nil {
-					log.Printf("[WS] failed to ensure stream running for topic %s: %v", topic, err)
+					s.streamLog.Warn(streamID, "stream.ensure_running.fail", fmt.Sprintf("err=%v", err))
+				}
+
+				if fresh, err := s.db.GetStreamByID(r.Context(), streamID); err == nil && fresh != nil {
+					stream = fresh
 				}
 
 				s.registry.broadcastExcluding(topic, client, map[string]any{
@@ -213,9 +225,9 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 					"max_freq_khz":  s.streamManager.MaxFreqKHz(streamID),
 				})
 
-				s.startAudioPumpForClient(streamID, client)
-			}
+			s.startAudioPumpForClient(streamID, client)
 		}
+	}
 
 	case "unsubscribe":
 		for _, topic := range msg.Topics {
@@ -359,18 +371,16 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 
 	audioCh, unsubscribe, err := s.streamManager.Subscribe(streamID)
 	if err != nil {
-		log.Printf("[WS-DIAG] audio subscribe FAILED session=%s stream=%s: %v", sid, streamID, err)
 		s.streamLog.Wire(streamID, streamlog.LevelWarn, "pump.audio.fail", "wavetoy", "client",
 			fmt.Sprintf("session=%s err=%v", sid, err))
-		// BUG: waterfall and log pumps won't start either (chained)
 		return
 	}
-	log.Printf("[WS-DIAG] audio pump STARTED session=%s stream=%s", sid, streamID)
+	s.streamLog.Debug(streamID, "pump.audio.start", fmt.Sprintf("session=%s", sid))
 	client.lastWriteAt.Store(time.Now().UnixMilli())
 
 	go func() {
 		defer unsubscribe()
-		defer log.Printf("[WS-DIAG] audio pump EXITED session=%s stream=%s", sid, streamID)
+		defer s.streamLog.Debug(streamID, "pump.audio.stop", fmt.Sprintf("session=%s", sid))
 
 		watchdog := time.NewTicker(10 * time.Second)
 		defer watchdog.Stop()
@@ -379,14 +389,13 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 			select {
 			case frame, ok := <-audioCh:
 				if !ok {
-					log.Printf("[WS-DIAG] audio channel closed session=%s stream=%s", sid, streamID)
+					s.streamLog.Debug(streamID, "pump.audio.chan_closed", fmt.Sprintf("session=%s", sid))
 					return
 				}
 				packet := make([]byte, 1+len(frame))
 				packet[0] = wsPacketTypeAudioPCM16
 				copy(packet[1:], frame)
 				if err := client.writeBinary(packet); err != nil {
-					log.Printf("[WS] audio pump write error session=%s: %v", sid, err)
 					s.streamLog.Wire(streamID, streamlog.LevelError, "pump.audio.write_err", "wavetoy", "client",
 						fmt.Sprintf("session=%s err=%v", sid, err))
 					return
@@ -396,8 +405,6 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 				if lastMs > 0 {
 					staleSec := float64(time.Now().UnixMilli()-lastMs) / 1000.0
 					if staleSec > 5 {
-						log.Printf("[WS-DIAG] STALE writes session=%s stream=%s last_write=%.1fs_ago",
-							sid, streamID, staleSec)
 						s.streamLog.Wire(streamID, streamlog.LevelWarn, "pump.stale", "wavetoy", "client",
 							fmt.Sprintf("session=%s last_write=%.1fs_ago", sid, staleSec))
 					}
@@ -414,30 +421,28 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 
 	wfCh, unsubscribe, err := s.streamManager.SubscribeWaterfall(streamID)
 	if err != nil {
-		log.Printf("[WS-DIAG] waterfall subscribe FAILED session=%s stream=%s: %v", sid, streamID, err)
-		// BUG: log pump won't start either (chained)
+		s.streamLog.Wire(streamID, streamlog.LevelWarn, "pump.wf.fail", "wavetoy", "client",
+			fmt.Sprintf("session=%s err=%v", sid, err))
 		return
 	}
-	log.Printf("[WS-DIAG] waterfall pump STARTED session=%s stream=%s", sid, streamID)
+	s.streamLog.Debug(streamID, "pump.wf.start", fmt.Sprintf("session=%s", sid))
 
 	go func() {
 		defer unsubscribe()
-		defer log.Printf("[WS-DIAG] waterfall pump EXITED session=%s stream=%s", sid, streamID)
+		defer s.streamLog.Debug(streamID, "pump.wf.stop", fmt.Sprintf("session=%s", sid))
 		for frame := range wfCh {
 			packet := buildWFPacket(frame)
 			if err := client.writeBinary(packet); err != nil {
-				log.Printf("[WS] waterfall pump write error session=%s: %v", sid, err)
 				s.streamLog.Wire(streamID, streamlog.LevelError, "pump.wf.write_err", "wavetoy", "client",
 					fmt.Sprintf("session=%s err=%v", sid, err))
 				return
 			}
 		}
 	}()
-
-	s.startLogPumpForClient(streamID, client)
 }
 
 func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) {
+	sid := client.sessionID[:min(8, len(client.sessionID))]
 	// Send log history first
 	history := s.streamLog.Snapshot(streamID, s.streamLog.GetLevel(streamID), 2000)
 	if len(history) > 0 {
@@ -458,13 +463,11 @@ func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) 
 		return
 	}
 
-	sid := client.sessionID[:min(8, len(client.sessionID))]
 	go func() {
 		defer unsubscribe()
 		for entry := range logCh {
 			payload := entryToWSPayload(entry)
 			if err := client.writeJSON(payload); err != nil {
-				log.Printf("[WS] log pump write error session=%s: %v", sid, err)
 				s.streamLog.Wire(streamID, streamlog.LevelError, "pump.log.write_err", "wavetoy", "client",
 					fmt.Sprintf("session=%s err=%v", sid, err))
 				return

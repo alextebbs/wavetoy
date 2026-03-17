@@ -189,7 +189,7 @@ All connected clients receive:
 | `DATABASE_URL` | `postgres://localhost:5432/sdrradio?sslmode=disable` |
 | `HTTP_ADDR` | `:8080` |
 | `KIWI_SOURCE_LIST_URL` | `https://rx.kiwisdr.com/` |
-| `HEALTH_INTERVAL` | `30m` |
+| `HEALTH_INTERVAL` | `1h` |
 | `MIGRATIONS_PATH` | `migrations` |
 | `FRONTEND_DEV_URL` | unset (set in dev to proxy to Vite, e.g. `http://localhost:5173`) |
 

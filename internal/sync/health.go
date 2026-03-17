@@ -61,9 +61,15 @@ func (h *HealthChecker) Run(ctx context.Context) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			st := h.fetchStatus(ctx, src.Host, src.Port, src.UseTLS)
-			if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
-				log.Printf("health: set %s: %v", src.ID, err)
+			st, ok := h.fetchStatus(ctx, src.Host, src.Port, src.UseTLS)
+			if ok {
+				if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
+					log.Printf("health: set %s: %v", src.ID, err)
+				}
+			} else {
+				if err := h.db.SetSourceUnreachable(ctx, src.ID); err != nil {
+					log.Printf("health: set unreachable %s: %v", src.ID, err)
+				}
 			}
 		}(s)
 	}
@@ -102,9 +108,15 @@ func (h *HealthChecker) RunForSources(ctx context.Context, sourceIDs []string) e
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			st := h.fetchStatus(ctx, src.Host, src.Port, src.UseTLS)
-			if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
-				log.Printf("health: set %s: %v", src.ID, err)
+			st, ok := h.fetchStatus(ctx, src.Host, src.Port, src.UseTLS)
+			if ok {
+				if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
+					log.Printf("health: set %s: %v", src.ID, err)
+				}
+			} else {
+				if err := h.db.SetSourceUnreachable(ctx, src.ID); err != nil {
+					log.Printf("health: set unreachable %s: %v", src.ID, err)
+				}
 			}
 		}(s)
 	}
@@ -176,9 +188,7 @@ func (h *HealthChecker) fetchStatusForSchemeWithRaw(ctx context.Context, host st
 	return raw, st, true
 }
 
-func (h *HealthChecker) fetchStatus(ctx context.Context, host string, port int, useTLS bool) db.SourceStatus {
-	// Probe both schemes and persist whichever succeeds.
-	// Prefer the previously known scheme first for lower latency.
+func (h *HealthChecker) fetchStatus(ctx context.Context, host string, port int, useTLS bool) (db.SourceStatus, bool) {
 	schemes := []string{"http", "https"}
 	if useTLS {
 		schemes = []string{"https", "http"}
@@ -187,11 +197,11 @@ func (h *HealthChecker) fetchStatus(ctx context.Context, host string, port int, 
 	for _, scheme := range schemes {
 		st, ok := h.fetchStatusForScheme(ctx, host, port, scheme)
 		if ok {
-			return st
+			return st, true
 		}
 	}
 
-	return db.SourceStatus{Available: false}
+	return db.SourceStatus{}, false
 }
 
 func (h *HealthChecker) fetchStatusForScheme(ctx context.Context, host string, port int, scheme string) (db.SourceStatus, bool) {

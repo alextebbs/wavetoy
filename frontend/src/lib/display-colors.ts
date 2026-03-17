@@ -1,8 +1,8 @@
-// ─── Color map definitions (universal, not theme-specific) ───────────────────
+// ─── Color map definitions (one per theme) ───────────────────────────────────
 
 export type ColorMapFn = (t: number) => [number, number, number];
 
-export type ColorMapName = "turbo" | "viridis" | "grayscale" | "kiwi" | "phosphor";
+export type ColorMapName = "default" | "muted" | "alert";
 
 type ColorStop = [position: number, r: number, g: number, b: number];
 
@@ -27,7 +27,7 @@ function piecewiseLinear(stops: ColorStop[]): ColorMapFn {
 }
 
 export const WATERFALL_COLOR_MAPS: Record<ColorMapName, ColorMapFn> = {
-  phosphor: piecewiseLinear([
+  default: piecewiseLinear([
     [0.0,   2,   4,  10],
     [0.1,   4,  22,  38],
     [0.2,   6,  50,  60],
@@ -39,58 +39,48 @@ export const WATERFALL_COLOR_MAPS: Record<ColorMapName, ColorMapFn> = {
     [1.0, 255, 255, 225],
   ]),
 
-  turbo: piecewiseLinear([
-    [0.0, 48, 18, 59],
-    [0.07, 69, 55, 129],
-    [0.13, 67, 95, 195],
-    [0.2, 45, 135, 232],
-    [0.27, 24, 170, 222],
-    [0.33, 18, 198, 185],
-    [0.4, 35, 220, 140],
-    [0.47, 82, 235, 95],
-    [0.53, 140, 241, 62],
-    [0.6, 195, 237, 46],
-    [0.67, 232, 222, 42],
-    [0.73, 252, 196, 37],
-    [0.8, 253, 161, 27],
-    [0.87, 240, 118, 16],
-    [0.93, 213, 73, 7],
-    [1.0, 122, 4, 3],
-  ]),
-
-  viridis: piecewiseLinear([
-    [0.0, 68, 1, 84],
-    [0.1, 72, 36, 117],
-    [0.2, 64, 67, 135],
-    [0.3, 52, 94, 141],
-    [0.4, 41, 120, 142],
-    [0.5, 32, 144, 140],
-    [0.6, 34, 167, 132],
-    [0.7, 68, 190, 112],
-    [0.8, 121, 209, 81],
-    [0.9, 189, 222, 38],
-    [1.0, 253, 231, 37],
-  ]),
-
-  grayscale: (t) => {
+  muted: (t) => {
     const v = Math.round(Math.max(0, Math.min(1, t)) * 255);
     return [v, v, v];
   },
 
-  kiwi: piecewiseLinear([
-    [0.0, 0, 0, 0],
-    [0.15, 0, 0, 180],
-    [0.3, 0, 140, 255],
-    [0.45, 0, 255, 140],
-    [0.6, 180, 255, 0],
-    [0.75, 255, 180, 0],
-    [0.88, 255, 60, 0],
-    [1.0, 255, 255, 255],
+  alert: piecewiseLinear([
+    [0.0,    4,   0,   0],
+    [0.12,  30,   2,   2],
+    [0.25,  80,   8,   4],
+    [0.4,  150,  20,   8],
+    [0.55, 200,  45,  10],
+    [0.7,  235,  90,  15],
+    [0.82, 250, 150,  30],
+    [0.92, 255, 210,  80],
+    [1.0,  255, 250, 200],
   ]),
 };
 
 export function getColorMap(name: ColorMapName): ColorMapFn {
-  return WATERFALL_COLOR_MAPS[name] ?? WATERFALL_COLOR_MAPS.turbo;
+  return WATERFALL_COLOR_MAPS[name] ?? WATERFALL_COLOR_MAPS.default;
+}
+
+/**
+ * Sample a colormap into SVG feComponentTransfer tableValues strings.
+ * Each channel gets N+1 values mapping grayscale input [0,1] → colored output [0,1].
+ */
+export function colorMapToFilterTables(
+  fn: ColorMapFn,
+  samples = 64,
+): { r: string; g: string; b: string } {
+  const rVals: string[] = [];
+  const gVals: string[] = [];
+  const bVals: string[] = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const [r, g, b] = fn(i / samples);
+    rVals.push((r / 255).toFixed(4));
+    gVals.push((g / 255).toFixed(4));
+    bVals.push((b / 255).toFixed(4));
+  }
+
+  return { r: rVals.join(" "), g: gVals.join(" "), b: bVals.join(" ") };
 }
 
 export function buildLUT(colorMap: ColorMapFn): Uint8Array {
