@@ -171,11 +171,11 @@ Nothing if navigating away.
 The browser's TCP connection becomes dead (laptop sleep, network switch, mobile
 background) but neither side sends a close frame.
 
-**What happens now:** The server has **no ping/pong mechanism** and **no read/write
-deadlines**. The server-side pump continues trying to write to the dead connection.
-`WriteMessage` blocks waiting for TCP buffer space that will never be acknowledged.
-The write holds the mutex, so all three pumps (audio, waterfall, log) freeze for
-this client.
+**What happens now:** The server has **no ping/pong mechanism**. The server-side pump
+tries to write to the dead connection. The 5s write deadline (W3 fix) means the
+write will time out rather than block forever. The pump exits and the connection is
+cleaned up. However, detection still takes up to 5s per write attempt, and without
+ping/pong the server won't detect a dead connection until the next write.
 
 **What the user sees:** Everything freezes — audio stops, waterfall stops, logs stop.
 Refreshing the page creates a new WebSocket but the old connection's pump goroutines
@@ -189,20 +189,19 @@ and ping/pong to detect and clean up dead connections.
 
 ### W3: Slow client — write blocks on TCP backpressure
 
+*Fixed in commit 9b11863.*
+
 The browser is on a slow connection or is throttled (background tab, CPU-saturated).
 The server's `WriteMessage` blocks because the kernel's TCP send buffer is full.
 
-**What happens now:** The write blocks indefinitely — no `SetWriteDeadline`. The mutex
-is held during the write, so **all three pumps block** for this client. The stale
-watchdog can't even tick because the audio pump's select loop is stuck on the write.
-`SLOW writeBinary` is logged if the write eventually completes after >500ms, but if
-it never completes, nothing is logged.
+**What happens now:** `SetWriteDeadline(5s)` is set before every `writeJSON` and
+`writeBinary` call. If the write doesn't complete within 5 seconds, it returns a
+timeout error. The pump logs the error to the stream log (`pump.audio.write_err`,
+`pump.wf.write_err`, or `pump.log.write_err`) and exits. The connection is
+effectively closed, and the browser reconnects automatically.
 
-**What the user sees:** Complete freeze — identical to W2.
-
-**What we should show:** The server should set a write deadline (e.g. 5s). If a write
-times out, close the connection. The browser will reconnect automatically. A "connection
-slow" warning could be shown if writes consistently take >500ms.
+**What the user sees:** If the connection is too slow, the server drops it after 5s.
+The browser reconnects. A brief interruption rather than a permanent freeze.
 
 ---
 
@@ -228,10 +227,9 @@ server-sent ping frames to keep the connection alive through the proxy.
 
 A client reconnects with the same `session_id` before the old connection is cleaned up.
 
-**What happens now:** `evictStaleSession` closes the old connection. But if the old
-connection's pump goroutine is blocked on a write (W3), the close may not take
-effect immediately — the goroutine is stuck in `WriteMessage`, not in a select that
-could receive a done signal.
+**What happens now:** `evictStaleSession` closes the old connection. The 5s write
+deadline (W3 fix) means a blocked pump goroutine will exit within 5s rather than
+hanging forever.
 
 **What the user sees:** Potential duplicate data or delayed cleanup. Usually harmless
 but can cause resource leaks if the old pump goroutines don't exit promptly.
@@ -416,25 +414,21 @@ observability.
 
 ### WF4: Write mutex contention freezes all channels
 
+*Fixed in commit 9b11863.*
+
 The audio, waterfall, and log pumps all call `client.writeBinary()` or
 `client.writeJSON()` which acquire the same `sync.Mutex`. If any write blocks
 (due to TCP backpressure, dead connection, etc.), it holds the mutex and all
 other pumps block waiting for it.
 
-**What happens now:** All data to that client freezes. The stale watchdog may not
-even fire because the audio pump's select loop is blocked on the write call, not
-on the watchdog ticker.
+**What happens now:** The 5s write deadline (W3 fix) bounds how long any single
+write can hold the mutex. If a write times out, the pump logs the error to the
+stream log and exits. The connection is effectively killed, preventing one stuck
+channel from freezing the others indefinitely. The maximum mutex contention is
+now 5 seconds rather than unbounded.
 
-**This is the single most dangerous failure mode** because a problem in any one
-channel (even a slow log write) can freeze all three channels.
-
-**What the user sees:** Complete freeze — audio stops, waterfall stops, logs stop.
-Indistinguishable from a network disconnect, but the WebSocket may still appear
-"open" on the browser side.
-
-**What we should show:** The browser-side silence watchdog should detect this and
-trigger a reconnect. The server should use write deadlines to prevent any single
-write from blocking the mutex for more than a few seconds.
+**What the user sees:** If the connection goes bad, the server drops it within 5s.
+The browser reconnects. The write error is visible in the stream log panel.
 
 ---
 
@@ -461,7 +455,7 @@ show a specific error ("waterfall unavailable") rather than silently omitting it
 
 | ID | Issue | Fix |
 |----|-------|-----|
-| W3/WF4 | Shared mutex + no write deadline | Add `SetWriteDeadline(5s)` before every write. On timeout, close the connection. |
+| W3/WF4 | Shared mutex + no write deadline | **Fixed (9b11863).** 5s `SetWriteDeadline` on every write. Timeout kills the connection. Write errors logged to stream log. |
 | W2 | Dead connection, no detection | Add server-side ping/pong (30s interval, 10s deadline). |
 | B4 | Silence watchdog is log-only | After 30s of silence, close WebSocket and reconnect. |
 | K2/WF2 | Kiwi silent, no read deadline | Add `SetReadDeadline(15s)` on the kiwi connection, reset on each frame. |

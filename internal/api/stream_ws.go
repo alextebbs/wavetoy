@@ -439,14 +439,18 @@ func (s *Server) closeWSClients(streamID string) {
 	}
 }
 
+const wsWriteTimeout = 5 * time.Second
+
 func (c *streamWSClient) writeJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	start := time.Now()
 	err := c.conn.WriteJSON(v)
 	elapsed := time.Since(start)
 	if err == nil {
 		c.lastWriteAt.Store(time.Now().UnixMilli())
+		_ = c.conn.SetWriteDeadline(time.Time{})
 	}
 	if elapsed > 500*time.Millisecond {
 		log.Printf("[WS] SLOW writeJSON session=%s elapsed=%s err=%v", c.sessionID[:min(8, len(c.sessionID))], elapsed, err)
@@ -457,11 +461,13 @@ func (c *streamWSClient) writeJSON(v any) error {
 func (c *streamWSClient) writeBinary(b []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	start := time.Now()
 	err := c.conn.WriteMessage(websocket.BinaryMessage, b)
 	elapsed := time.Since(start)
 	if err == nil {
 		c.lastWriteAt.Store(time.Now().UnixMilli())
+		_ = c.conn.SetWriteDeadline(time.Time{})
 	}
 	if elapsed > 500*time.Millisecond {
 		log.Printf("[WS] SLOW writeBinary session=%s elapsed=%s len=%d err=%v", c.sessionID[:min(8, len(c.sessionID))], elapsed, len(b), err)

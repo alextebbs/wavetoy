@@ -387,6 +387,8 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 				copy(packet[1:], frame)
 				if err := client.writeBinary(packet); err != nil {
 					log.Printf("[WS] audio pump write error session=%s: %v", sid, err)
+					s.streamLog.Wire(streamID, streamlog.LevelError, "pump.audio.write_err", "wavetoy", "client",
+						fmt.Sprintf("session=%s err=%v", sid, err))
 					return
 				}
 			case <-watchdog.C:
@@ -425,6 +427,8 @@ func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSCl
 			packet := buildWFPacket(frame)
 			if err := client.writeBinary(packet); err != nil {
 				log.Printf("[WS] waterfall pump write error session=%s: %v", sid, err)
+				s.streamLog.Wire(streamID, streamlog.LevelError, "pump.wf.write_err", "wavetoy", "client",
+					fmt.Sprintf("session=%s err=%v", sid, err))
 				return
 			}
 		}
@@ -454,11 +458,15 @@ func (s *Server) startLogPumpForClient(streamID string, client *streamWSClient) 
 		return
 	}
 
+	sid := client.sessionID[:min(8, len(client.sessionID))]
 	go func() {
 		defer unsubscribe()
 		for entry := range logCh {
 			payload := entryToWSPayload(entry)
 			if err := client.writeJSON(payload); err != nil {
+				log.Printf("[WS] log pump write error session=%s: %v", sid, err)
+				s.streamLog.Wire(streamID, streamlog.LevelError, "pump.log.write_err", "wavetoy", "client",
+					fmt.Sprintf("session=%s err=%v", sid, err))
 				return
 			}
 		}
