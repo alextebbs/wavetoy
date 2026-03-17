@@ -60,10 +60,9 @@ type activeStream struct {
 	wfSubscribers map[chan kiwi.WFFrame]struct{}
 	startedAt     time.Time
 	ringBuf       *ringbuf.RingBuffer
-	filterChain   *filter.Chain
-	autoFallback  bool
-	qualityMon    *fallback.QualityMonitor
-	listen        *listenSession
+	filterChain  *filter.Chain
+	autoFallback bool
+	listen       *listenSession
 
 	idleSince        time.Time
 	idleDisconnected bool
@@ -172,22 +171,6 @@ func (m *Manager) SetAutoFallback(streamID string, enabled bool) {
 
 	as.mu.Lock()
 	as.autoFallback = enabled
-	if enabled && as.qualityMon == nil {
-		m.onDegradedMu.RLock()
-		onDeg := m.onDegraded
-		m.onDegradedMu.RUnlock()
-		qm := fallback.NewQualityMonitor(func(reason string) {
-			if onDeg != nil {
-				onDeg(streamID, reason)
-			}
-		})
-		qm.SetOnTransition(func(from, to fallback.DegradationState, reason string) {
-			m.log.Info(streamID, "quality.change", fmt.Sprintf("%s → %s reason=%s", from, to, reason))
-		})
-		as.qualityMon = qm
-	} else if !enabled {
-		as.qualityMon = nil
-	}
 	as.mu.Unlock()
 }
 
@@ -621,9 +604,6 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 		metricsTicker := time.NewTicker(10 * time.Second)
 		defer metricsTicker.Stop()
 
-		qualityTicker := time.NewTicker(1 * time.Second)
-		defer qualityTicker.Stop()
-
 		defer func() {
 			as.mu.Lock()
 			stillCurrent := as.client == client && as.generation == generation
@@ -674,13 +654,6 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 					m.log.Info(as.id, "idle.disconnect", fmt.Sprintf("no subscribers for %s", idleDisconnectTimeout))
 					_ = client.Close()
 					return
-				}
-			case <-qualityTicker.C:
-				as.mu.RLock()
-				qm := as.qualityMon
-				as.mu.RUnlock()
-				if qm != nil {
-					qm.CheckTimeout()
 				}
 		case frame, ok := <-client.Samples():
 			if !ok {
@@ -736,12 +709,6 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				m.tryCommitListen(as)
 			}
 
-			as.mu.RLock()
-			frameQM := as.qualityMon
-			as.mu.RUnlock()
-			if frameQM != nil {
-				frameQM.RecordFrame()
-			}
 			}
 		}
 	}()

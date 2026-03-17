@@ -9,30 +9,6 @@ import (
 	"github.com/sammy/sdr-radio/internal/models"
 )
 
-type DegradationState int
-
-const (
-	StateHealthy DegradationState = iota
-	StateDegraded
-	StateFailing
-	StateSwitching
-)
-
-func (s DegradationState) String() string {
-	switch s {
-	case StateHealthy:
-		return "healthy"
-	case StateDegraded:
-		return "degraded"
-	case StateFailing:
-		return "failing"
-	case StateSwitching:
-		return "switching"
-	default:
-		return "unknown"
-	}
-}
-
 type FallbackSuggestion struct {
 	StreamID     string       `json:"stream_id"`
 	SourceID     string       `json:"source_id"`
@@ -110,8 +86,3 @@ type ProbeResult struct {
 	Error      error
 }
 
-type QualityStatus struct {
-	State         string  `json:"state"`
-	FrameRate     float64 `json:"frame_rate"`
-	UptimeSeconds int64   `json:"uptime_seconds"`
-}

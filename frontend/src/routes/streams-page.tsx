@@ -20,6 +20,7 @@ import {
   getSource,
   listFavorites,
   listFavoriteSources,
+  listSourceNotes,
   listStreams,
   probeSource,
   removeFavorite,
@@ -56,10 +57,21 @@ export function StreamsPage() {
   const mapPickerRef = useRef<SourceMapPickerHandle>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
+  const [notesBySourceId, setNotesBySourceId] = useState<Map<string, string>>(new Map());
 
   const refreshFavoriteSources = useCallback(() => {
     void listFavoriteSources()
       .then((sources) => setFavoriteSources(sources))
+      .catch(() => {});
+  }, []);
+
+  const refreshNotes = useCallback(() => {
+    void listSourceNotes()
+      .then((notes) => {
+        const m = new Map<string, string>();
+        for (const n of notes) m.set(n.source_id, n.content);
+        setNotesBySourceId(m);
+      })
       .catch(() => {});
   }, []);
 
@@ -193,6 +205,7 @@ export function StreamsPage() {
     void refreshMapSources();
     void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
     refreshFavoriteSources();
+    refreshNotes();
     connectWS();
     return () => {
       if (reconnectTimerRef.current) {
@@ -334,6 +347,7 @@ export function StreamsPage() {
             favoriteIds={favoriteIds}
             counts={mapCounts}
             selectedSourceId={selectedSource?.id}
+            notesBySourceId={notesBySourceId}
             onSelectSource={(source) => {
               setSelectedSource(source);
               setProbeStatus("probing");
@@ -421,6 +435,7 @@ export function StreamsPage() {
                   sourceId={selectedSource?.id ?? ""}
                   isFavorite={favoriteIds.has(displayedSource.id)}
                   onToggleFavorite={toggleFavorite}
+                  onNotesChanged={refreshNotes}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

@@ -59,20 +59,8 @@ Pump exits (KiwiSDR disconnects)
          |      |
          |      +-- No suggestions? --> Reset counter, keep retrying
          |
-         +-- Success --> New pump starts, quality monitor resumes
+         +-- Success --> New pump starts
 ```
-
-### Quality Monitor (parallel path)
-
-While the pump is running, the `QualityMonitor` tracks transport health:
-
-- Frame gaps > 2 seconds
-- Frame rate < 15 fps over a 10-second window
-- 3+ consecutive errors (currently `RecordError` is defined but not called)
-
-If degradation is detected and sustained for 5 seconds, `onDegraded` fires, which calls `HandleDegraded` and switches to the top fallback. This path is independent of the reconnect loop -- it handles live degradation while connected, not full disconnects.
-
-On pump exit, `RecordDisconnect` is **not** called. Connection lifecycle is handled entirely by `ensureReconnect`. When a new pump starts after reconnect, `RecordFrame` resets the quality monitor to healthy.
 
 ---
 
@@ -257,7 +245,6 @@ internal/fallback/
   discovery.go    -- Haversine candidate discovery
   prober.go       -- Deep probe (connect, collect, analyze, disconnect)
   scorer.go       -- Comparative scoring (weights, normalization)
-  quality.go      -- QualityMonitor (frame gaps, frame rate, state machine)
   types.go        -- FallbackSuggestion, ProbeMetrics, AudioSnapshot, etc.
   haversine.go    -- Haversine distance and bearing calculations
 ```

@@ -442,13 +442,31 @@ func (s *Server) closeWSClients(streamID string) {
 func (c *streamWSClient) writeJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conn.WriteJSON(v)
+	start := time.Now()
+	err := c.conn.WriteJSON(v)
+	elapsed := time.Since(start)
+	if err == nil {
+		c.lastWriteAt.Store(time.Now().UnixMilli())
+	}
+	if elapsed > 500*time.Millisecond {
+		log.Printf("[WS] SLOW writeJSON session=%s elapsed=%s err=%v", c.sessionID[:min(8, len(c.sessionID))], elapsed, err)
+	}
+	return err
 }
 
 func (c *streamWSClient) writeBinary(b []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conn.WriteMessage(websocket.BinaryMessage, b)
+	start := time.Now()
+	err := c.conn.WriteMessage(websocket.BinaryMessage, b)
+	elapsed := time.Since(start)
+	if err == nil {
+		c.lastWriteAt.Store(time.Now().UnixMilli())
+	}
+	if elapsed > 500*time.Millisecond {
+		log.Printf("[WS] SLOW writeBinary session=%s elapsed=%s len=%d err=%v", c.sessionID[:min(8, len(c.sessionID))], elapsed, len(b), err)
+	}
+	return err
 }
 
 func (c *streamWSClient) close() error {

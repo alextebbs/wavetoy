@@ -1,6 +1,6 @@
-import { getSourceStatus, type Source } from "@/lib/api";
-import { InfoIcon, Loader2Icon, StarIcon, XIcon } from "lucide-react";
-import { type ReactNode, useCallback, useState } from "react";
+import { getSourceStatus, getSourceNote, putSourceNote, type Source } from "@/lib/api";
+import { InfoIcon, Loader2Icon, StickyNoteIcon, StarIcon, XIcon } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
 import { SourceDetailsPanel } from "./source-details-panel";
@@ -12,6 +12,7 @@ interface SourceSectionProps {
   action?: ReactNode;
   isFavorite?: boolean;
   onToggleFavorite?: (sourceId: string) => void;
+  onNotesChanged?: () => void;
 }
 
 export function SourceSection({
@@ -20,10 +21,48 @@ export function SourceSection({
   action,
   isFavorite,
   onToggleFavorite,
+  onNotesChanged,
 }: SourceSectionProps) {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
+
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [noteContent, setNoteContent] = useState("");
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteLoading, setNoteLoading] = useState(false);
+  const [noteSaving, setNoteSaving] = useState(false);
+
+  useEffect(() => {
+    if (!notesOpen || !source) return;
+    setNoteLoading(true);
+    getSourceNote(source.id)
+      .then((note) => {
+        const content = note?.content ?? "";
+        setNoteContent(content);
+        setNoteDraft(content);
+      })
+      .catch(() => {
+        setNoteContent("");
+        setNoteDraft("");
+      })
+      .finally(() => setNoteLoading(false));
+  }, [notesOpen, source]);
+
+  const saveNote = useCallback(async () => {
+    if (!source) return;
+    setNoteSaving(true);
+    try {
+      await putSourceNote(source.id, noteDraft);
+      setNoteContent(noteDraft);
+      setNotesOpen(false);
+      onNotesChanged?.();
+    } catch {
+      // keep modal open on failure
+    } finally {
+      setNoteSaving(false);
+    }
+  }, [source, noteDraft, onNotesChanged]);
 
   const fetchStatus = useCallback(async () => {
     if (!source) return;
@@ -59,6 +98,18 @@ export function SourceSection({
                   ) : (
                     <InfoIcon className="size-3.5" />
                   )}
+                </Button>
+              </Tooltip>
+            )}
+            {source && (
+              <Tooltip content="Notes">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setNotesOpen(true)}
+                  aria-label="Source notes"
+                >
+                  <StickyNoteIcon className="size-3.5" />
                 </Button>
               </Tooltip>
             )}
@@ -150,6 +201,68 @@ export function SourceSection({
                 <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-foreground">
                   {statusText}
                 </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {notesOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setNotesOpen(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setNotesOpen(false);
+          }}
+        >
+          <div className="mx-4 max-h-[80vh] w-full max-w-lg overflow-hidden rounded-lg border bg-background shadow-lg">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                Source Notes
+              </h3>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setNotesOpen(false)}
+              >
+                <XIcon className="size-3.5" />
+              </Button>
+            </div>
+            <div className="p-4">
+              {noteLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={noteDraft}
+                    onChange={(e) => setNoteDraft(e.target.value)}
+                    placeholder="Add a note about this source..."
+                    rows={6}
+                    className="w-full resize-none rounded-md border border-border bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setNotesOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => void saveNote()}
+                      disabled={noteSaving || noteDraft === noteContent}
+                    >
+                      {noteSaving ? (
+                        <Loader2Icon className="mr-1.5 size-3 animate-spin" />
+                      ) : null}
+                      Save
+                    </Button>
+                  </div>
+                </>
               )}
             </div>
           </div>

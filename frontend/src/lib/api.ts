@@ -308,46 +308,22 @@ export async function reprobeStream(streamId: string): Promise<void> {
   await apiPost(`/streams/${streamId}/reprobe`, {});
 }
 
-export async function downloadFallbackRefAudio(streamId: string): Promise<void> {
+export async function fetchFallbackRefAudio(streamId: string): Promise<ArrayBuffer> {
   const res = await fetch(`/api/streams/${streamId}/fallbacks/ref-audio`, {
     headers: { ...authHeaders() },
   });
   handleUnauthorized(res);
   if (!res.ok) throw new Error(await res.text());
-  const blob = await res.blob();
-  const disposition = res.headers.get("Content-Disposition");
-  let filename = `${streamId.slice(0, 8)}-ref.wav`;
-  if (disposition) {
-    const match = disposition.match(/filename="?([^"]+)"?/);
-    if (match) filename = match[1];
-  }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  return res.arrayBuffer();
 }
 
-export async function downloadFallbackProbeAudio(streamId: string, rank: number): Promise<void> {
+export async function fetchFallbackProbeAudio(streamId: string, rank: number): Promise<ArrayBuffer> {
   const res = await fetch(`/api/streams/${streamId}/fallbacks/${rank}/probe-audio`, {
     headers: { ...authHeaders() },
   });
   handleUnauthorized(res);
   if (!res.ok) throw new Error(await res.text());
-  const blob = await res.blob();
-  const disposition = res.headers.get("Content-Disposition");
-  let filename = `probe-rank${rank}.wav`;
-  if (disposition) {
-    const match = disposition.match(/filename="?([^"]+)"?/);
-    if (match) filename = match[1];
-  }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  return res.arrayBuffer();
 }
 
 export type ProbeResult = {
@@ -405,6 +381,40 @@ export async function listRecentSources(
   return asArray<RecentSource>(
     await apiGet<unknown>(`/streams/${streamId}/recent-sources`),
   );
+}
+
+export type SourceNote = {
+  tenant_id: string;
+  source_id: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function listSourceNotes(): Promise<SourceNote[]> {
+  return asArray<SourceNote>(await apiGet<unknown>("/source-notes"));
+}
+
+export async function getSourceNote(sourceId: string): Promise<SourceNote | null> {
+  const res = await apiGet<SourceNote | { content: string }>(`/sources/${sourceId}/notes`);
+  if (!("source_id" in res)) return null;
+  return res as SourceNote;
+}
+
+export async function putSourceNote(sourceId: string, content: string): Promise<SourceNote | null> {
+  const res = await fetch(`/api/sources/${sourceId}/notes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ content }),
+  });
+  handleUnauthorized(res);
+  if (!res.ok) throw new Error(await res.text());
+  if (res.status === 204) return null;
+  return (await res.json()) as SourceNote;
+}
+
+export async function deleteSourceNote(sourceId: string): Promise<void> {
+  await apiDelete(`/sources/${sourceId}/notes`);
 }
 
 export async function getSourceStatus(sourceId: string): Promise<string> {

@@ -1,21 +1,20 @@
 import {
   type FallbackSuggestion,
   type Stream,
-  downloadFallbackProbeAudio,
-  downloadFallbackRefAudio,
+  fetchFallbackProbeAudio,
+  fetchFallbackRefAudio,
   getFallbacks,
   reprobeStream,
 } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
+import { SnapshotPlayButton } from "./snapshot-play-button";
 import {
   ArrowUpIcon,
-  DownloadIcon,
   Loader2Icon,
   RefreshCwIcon,
   RotateCwIcon,
   ShieldCheckIcon,
-  Volume2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -24,6 +23,8 @@ interface FallbackSectionProps {
   streamId: string;
   onToggleFallback: (enabled: boolean) => void;
   wsRef: React.RefObject<WebSocket | null>;
+  audioCtxRef: React.RefObject<AudioContext | null>;
+  gainNodeRef: React.RefObject<GainNode | null>;
 }
 
 export function FallbackSection({
@@ -31,6 +32,8 @@ export function FallbackSection({
   streamId,
   onToggleFallback,
   wsRef,
+  audioCtxRef,
+  gainNodeRef,
 }: FallbackSectionProps) {
   const [suggestions, setSuggestions] = useState<FallbackSuggestion[]>([]);
   const [probing, setProbing] = useState(false);
@@ -127,14 +130,14 @@ export function FallbackSection({
           </h3>
           <div className="flex items-center gap-2">
             {suggestions.length > 0 && (
-              <Tooltip content="Download reference audio">
-                <button
-                  type="button"
-                  onClick={() => void downloadFallbackRefAudio(streamId)}
-                  className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <Volume2Icon className="size-3" />
-                </button>
+              <Tooltip content="Play reference audio">
+                <SnapshotPlayButton
+                  fetchAudio={() => fetchFallbackRefAudio(streamId)}
+                  audioCtxRef={audioCtxRef}
+                  gainNodeRef={gainNodeRef}
+                  size={24}
+                  tooltip="Play reference audio"
+                />
               </Tooltip>
             )}
             <Tooltip content="Probe nearby sources">
@@ -192,6 +195,8 @@ export function FallbackSection({
                   streamId={streamId}
                   onSwitch={handleSwitchSource}
                   isCurrentSource={s.source_id === stream?.source_id}
+                  audioCtxRef={audioCtxRef}
+                  gainNodeRef={gainNodeRef}
                 />
               ))}
             </div>
@@ -213,11 +218,15 @@ function SuggestionCard({
   streamId,
   onSwitch,
   isCurrentSource,
+  audioCtxRef,
+  gainNodeRef,
 }: {
   suggestion: FallbackSuggestion;
   streamId: string;
   onSwitch: (sourceId: string) => void;
   isCurrentSource: boolean;
+  audioCtxRef: React.RefObject<AudioContext | null>;
+  gainNodeRef: React.RefObject<GainNode | null>;
 }) {
   const scorePercent = Math.round(s.score * 100);
   const distLabel =
@@ -253,14 +262,14 @@ function SuggestionCard({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Tooltip content="Download probe audio">
-            <button
-              type="button"
-              onClick={() => void downloadFallbackProbeAudio(streamId, s.rank)}
-              className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <DownloadIcon className="size-3" />
-            </button>
+          <Tooltip content="Play probe audio">
+            <SnapshotPlayButton
+              fetchAudio={() => fetchFallbackProbeAudio(streamId, s.rank)}
+              audioCtxRef={audioCtxRef}
+              gainNodeRef={gainNodeRef}
+              size={24}
+              tooltip="Play probe audio"
+            />
           </Tooltip>
           <Button
             variant="ghost"

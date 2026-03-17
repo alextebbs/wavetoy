@@ -38,6 +38,7 @@ import {
   listFavorites,
   listFavoriteSources,
   listRecentSources,
+  listSourceNotes,
   PEER_COLORS,
   probeSource,
   removeFavorite,
@@ -163,6 +164,7 @@ export function StreamPlayerPage() {
   const mapPickerRef = useRef<SourceMapPickerHandle>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
+  const [notesBySourceId, setNotesBySourceId] = useState<Map<string, string>>(new Map());
   const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [morseText, setMorseText] = useState("");
@@ -174,6 +176,16 @@ export function StreamPlayerPage() {
   const refreshFavoriteSources = useCallback(() => {
     void listFavoriteSources()
       .then((sources) => setFavoriteSources(sources))
+      .catch(() => {});
+  }, []);
+
+  const refreshNotes = useCallback(() => {
+    void listSourceNotes()
+      .then((notes) => {
+        const m = new Map<string, string>();
+        for (const n of notes) m.set(n.source_id, n.content);
+        setNotesBySourceId(m);
+      })
       .catch(() => {});
   }, []);
 
@@ -239,10 +251,12 @@ export function StreamPlayerPage() {
   const reconnectBackoffRef = useRef(1000);
   const reconnectAttemptRef = useRef(0);
   const intentionalCloseRef = useRef(false);
+  const lastWsDataAtRef = useRef(0);
+  const silenceWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(true);
   const streamRateRef = useRef(12000);
   const audioMetricsRef = useRef<AudioMetrics>({
     startedAt: performance.now(),
@@ -293,10 +307,35 @@ export function StreamPlayerPage() {
     return () => { document.title = "wavetoy"; };
   }, [stream?.name]);
 
+  useEffect(() => {
+    const resumeOnGesture = () => {
+      const ctx = audioCtxRef.current;
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume().then(() => {
+          console.log("[AUDIO-DIAG] resumed via user gesture, state:", ctx.state);
+          setMuted(false);
+        }).catch(() => {});
+      }
+      if (ctx?.state === "running") {
+        setMuted(false);
+        document.removeEventListener("click", resumeOnGesture, true);
+        document.removeEventListener("keydown", resumeOnGesture, true);
+      }
+    };
+    document.addEventListener("click", resumeOnGesture, true);
+    document.addEventListener("keydown", resumeOnGesture, true);
+    return () => {
+      document.removeEventListener("click", resumeOnGesture, true);
+      document.removeEventListener("keydown", resumeOnGesture, true);
+    };
+  }, []);
+
 
   const ensureAudio = useCallback(async () => {
     if (!audioCtxRef.current) {
+      console.log("[AUDIO-DIAG] creating AudioContext");
       const ctx = new AudioContext({ latencyHint: "interactive" });
+      console.log("[AUDIO-DIAG] initial state:", ctx.state);
       const workletCode =
         "class SdrAudioProcessor extends AudioWorkletProcessor {\n" +
         "  constructor() { super(); this.bufferSize = 48000 * 3; this.buf = new Float32Array(this.bufferSize); this.w = 0; this.r = 0; this.started = false; this.threshold = 8192; this.lowWatermark = 768; this.fadeIn = 0; this.port.onmessage = (ev)=>{ const a=ev.data; for(let i=0;i<a.length;i++){ this.buf[this.w]=a[i]; this.w=(this.w+1)%this.bufferSize; if(this.w===this.r){ this.r=(this.r+1)%this.bufferSize; } } }; }\n" +
@@ -314,9 +353,20 @@ export function StreamPlayerPage() {
       audioCtxRef.current = ctx;
       workletRef.current = node;
       gainNodeRef.current = gain;
+      console.log("[AUDIO-DIAG] pipeline created, state:", ctx.state);
+      ctx.onstatechange = () => {
+        console.log("[AUDIO-DIAG] state changed to:", ctx.state);
+      };
     }
     if (audioCtxRef.current.state !== "running") {
-      await audioCtxRef.current.resume();
+      console.log("[AUDIO-DIAG] calling resume(), current state:", audioCtxRef.current.state);
+      audioCtxRef.current.resume().then(() => {
+        console.log("[AUDIO-DIAG] resume() resolved, state:", audioCtxRef.current?.state);
+      }).catch((err) => {
+        console.warn("[AUDIO-DIAG] resume() rejected:", err);
+      });
+    } else {
+      console.log("[AUDIO-DIAG] already running");
     }
   }, []);
 
@@ -430,7 +480,7 @@ export function StreamPlayerPage() {
   );
 
   const connect = useCallback(async () => {
-    await ensureAudio();
+    ensureAudio().catch(() => {});
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -465,6 +515,7 @@ export function StreamPlayerPage() {
     ws.onopen = () => {
       setStatus("connected");
       intentionalCloseRef.current = false;
+      lastWsDataAtRef.current = performance.now();
       const wasReconnect = reconnectAttemptRef.current > 0;
       const attempts = reconnectAttemptRef.current;
       reconnectBackoffRef.current = 1000;
@@ -490,8 +541,23 @@ export function StreamPlayerPage() {
           }),
         );
       }
+
+      if (silenceWatchdogRef.current) clearInterval(silenceWatchdogRef.current);
+      silenceWatchdogRef.current = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const silenceMs = performance.now() - lastWsDataAtRef.current;
+        if (silenceMs > 10_000) {
+          const silenceSec = Math.round(silenceMs / 1000);
+          console.warn(`[WS-DIAG] SILENCE detected: no data for ${silenceSec}s, ws.readyState=${ws.readyState}, ws.bufferedAmount=${ws.bufferedAmount}`);
+          appendLogEntry({ t: Date.now(), level: "warn", action: "ws.silence", from: "client", to: "wavetoy", msg: `no data for ${silenceSec}s readyState=${ws.readyState} buffered=${ws.bufferedAmount}`, origin: "client" });
+        }
+      }, 5_000);
     };
     ws.onclose = (ev) => {
+      if (silenceWatchdogRef.current) {
+        clearInterval(silenceWatchdogRef.current);
+        silenceWatchdogRef.current = null;
+      }
       const level = intentionalCloseRef.current ? "info" : "warn";
       appendLogEntry({ t: Date.now(), level, action: "ws.close", from: "client", to: "wavetoy", msg: `code=${ev.code} clean=${ev.wasClean}${ev.reason ? ` reason=${ev.reason}` : ""}`, origin: "client" });
       if (intentionalCloseRef.current) {
@@ -506,6 +572,7 @@ export function StreamPlayerPage() {
       setStatus("error");
     };
     ws.onmessage = (ev) => {
+      lastWsDataAtRef.current = performance.now();
       if (typeof ev.data === "string") {
         try {
           const msg = JSON.parse(ev.data) as Record<string, any>;
@@ -970,12 +1037,17 @@ export function StreamPlayerPage() {
     void refreshMapSources();
     void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
     refreshFavoriteSources();
+    refreshNotes();
     refreshRecentSources();
     void connect();
     return () => {
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
+      }
+      if (silenceWatchdogRef.current) {
+        clearInterval(silenceWatchdogRef.current);
+        silenceWatchdogRef.current = null;
       }
       intentionalCloseRef.current = true;
       wsRef.current?.close();
@@ -995,6 +1067,7 @@ export function StreamPlayerPage() {
               sourceId={sourceId}
               isFavorite={currentSource ? favoriteIds.has(currentSource.id) : false}
               onToggleFavorite={toggleFavorite}
+              onNotesChanged={refreshNotes}
               action={
                 <Tooltip content="Swap source">
                   <Button
@@ -1021,6 +1094,8 @@ export function StreamPlayerPage() {
               stream={stream}
               streamId={streamId}
               wsRef={wsRef}
+              audioCtxRef={audioCtxRef}
+              gainNodeRef={gainNodeRef}
               onToggleFallback={(enabled) => {
                 sendPatch({ auto_fallback: enabled });
               }}
@@ -1437,6 +1512,7 @@ export function StreamPlayerPage() {
             favoriteIds={favoriteIds}
             counts={mapCounts}
             selectedSourceId={pendingSourceId}
+            notesBySourceId={notesBySourceId}
             onSelectSource={(source) => {
               onMapSelectSource(source);
             }}
@@ -1480,6 +1556,7 @@ export function StreamPlayerPage() {
                   sourceId={pendingSourceId}
                   isFavorite={favoriteIds.has(displayedSource.id)}
                   onToggleFavorite={toggleFavorite}
+                  onNotesChanged={refreshNotes}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

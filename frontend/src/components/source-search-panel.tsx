@@ -1,6 +1,6 @@
 import type { MapSourceCounts, Source } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { SearchIcon, StarIcon } from "lucide-react";
+import { SearchIcon, StickyNoteIcon, StarIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Button } from "./ui/button";
 
@@ -10,6 +10,7 @@ type SourceSearchPanelProps = {
   favoriteIds: Set<string>;
   counts?: MapSourceCounts;
   selectedSourceId?: string;
+  notesBySourceId?: Map<string, string>;
   onSelectSource: (source: Source) => void;
   onFlyTo?: (source: Source) => void;
 };
@@ -22,6 +23,7 @@ export function SourceSearchPanel({
   favoriteIds,
   counts,
   selectedSourceId,
+  notesBySourceId,
   onSelectSource,
   onFlyTo,
 }: SourceSearchPanelProps) {
@@ -86,6 +88,7 @@ export function SourceSearchPanel({
             {capped.map((source) => {
               const isSelected = source.id === selectedSourceId;
               const isFav = favoriteIds.has(source.id);
+              const note = notesBySourceId?.get(source.id);
               return (
                 <button
                   key={source.id}
@@ -111,6 +114,12 @@ export function SourceSearchPanel({
                     {source.location && (
                       <p className="mt-0.5 block truncate text-[11px] text-muted-foreground/60">
                         {source.location}
+                      </p>
+                    )}
+                    {note && (
+                      <p className="mt-1 flex items-center gap-1 truncate text-[11px] text-primary/70">
+                        <StickyNoteIcon className="size-2.5 shrink-0" />
+                        <span className="truncate">{note}</span>
                       </p>
                     )}
                   </div>

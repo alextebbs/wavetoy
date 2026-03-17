@@ -122,6 +122,14 @@ type Source struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
+type SourceNote struct {
+	TenantID  string    `json:"tenant_id"`
+	SourceID  string    `json:"source_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type Stream struct {
 	ID                       string    `json:"id"`
 	TenantID                 string    `json:"tenant_id"`

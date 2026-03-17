@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,11 +38,12 @@ type Server struct {
 }
 
 type streamWSClient struct {
-	conn      *websocket.Conn
-	mu        sync.Mutex
-	sessionID string
-	color     string
-	joinedAt  time.Time
+	conn        *websocket.Conn
+	mu          sync.Mutex
+	sessionID   string
+	color       string
+	joinedAt    time.Time
+	lastWriteAt atomic.Int64
 }
 
 func New(database *db.DB, logger *streamlog.Logger, jwtSecret string, jwtExpiry time.Duration) *Server {
@@ -111,6 +113,10 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/favorites/sources", s.listFavoriteSources)
 			protected.Put("/favorites/{sourceId}", s.addFavorite)
 			protected.Delete("/favorites/{sourceId}", s.removeFavorite)
+			protected.Get("/source-notes", s.listSourceNotes)
+			protected.Get("/sources/{id}/notes", s.getSourceNote)
+			protected.Put("/sources/{id}/notes", s.putSourceNote)
+			protected.Delete("/sources/{id}/notes", s.deleteSourceNote)
 			protected.Get("/ws", s.globalWS)
 		})
 	})

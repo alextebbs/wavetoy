@@ -447,7 +447,6 @@ When debug mode is enabled, the frontend log panel automatically shows debug ent
 **Changes:**
 
 - `internal/fallback/manager.go` — Accept `*streamlog.StreamLogger`. Replace `log.Printf("[FALLBACK]"` calls.
-- `internal/fallback/quality.go` — Log state transitions (`quality.degraded`, `quality.ok`, `quality.failing`).
 - `internal/fallback/prober.go` — Log probe lifecycle (`fb.probe`, `fb.probe.fail`). Detailed metrics at debug level.
 - `internal/kiwi/client.go` — Accept an optional log callback. Protocol messages (`kiwi.cmd`, `kiwi.msg`, `kiwi.snd.first`) logged at debug level. The kiwi package doesn't know about stream IDs — the callback is wired by streammgr.
 - `internal/kiwi/wf_client.go` — Same pattern.
@@ -504,7 +503,6 @@ Phase 4 is independent polish.
 | `internal/streamlog/logger.go` | **New.** `StreamLogger`, `StreamLog`, ring buffer (2000), level filtering, fan-out. |
 | `internal/streammgr/manager.go` | Accept `StreamLogger`, replace `log.Printf` calls, remove `logSubscribers`/`broadcastLog`/`SubscribeLogs`. |
 | `internal/fallback/manager.go` | Accept `StreamLogger`, replace `log.Printf` calls. |
-| `internal/fallback/quality.go` | Log state transitions to `StreamLogger`. |
 | `internal/fallback/prober.go` | Log probe events to `StreamLogger`. |
 | `internal/kiwi/client.go` | Optional log callback for debug-level protocol logging. |
 | `internal/kiwi/wf_client.go` | Same. |

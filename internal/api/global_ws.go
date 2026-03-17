@@ -355,20 +355,51 @@ func (s *Server) findStreamTopicForClient(client *streamWSClient) string {
 }
 
 func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient) {
+	sid := client.sessionID[:min(8, len(client.sessionID))]
+
 	audioCh, unsubscribe, err := s.streamManager.Subscribe(streamID)
 	if err != nil {
+		log.Printf("[WS-DIAG] audio subscribe FAILED session=%s stream=%s: %v", sid, streamID, err)
+		s.streamLog.Wire(streamID, streamlog.LevelWarn, "pump.audio.fail", "wavetoy", "client",
+			fmt.Sprintf("session=%s err=%v", sid, err))
+		// BUG: waterfall and log pumps won't start either (chained)
 		return
 	}
+	log.Printf("[WS-DIAG] audio pump STARTED session=%s stream=%s", sid, streamID)
+	client.lastWriteAt.Store(time.Now().UnixMilli())
 
 	go func() {
 		defer unsubscribe()
-		for frame := range audioCh {
-			packet := make([]byte, 1+len(frame))
-			packet[0] = wsPacketTypeAudioPCM16
-			copy(packet[1:], frame)
-			if err := client.writeBinary(packet); err != nil {
-				log.Printf("[WS] audio pump write error session=%s: %v", client.sessionID[:min(8, len(client.sessionID))], err)
-				return
+		defer log.Printf("[WS-DIAG] audio pump EXITED session=%s stream=%s", sid, streamID)
+
+		watchdog := time.NewTicker(10 * time.Second)
+		defer watchdog.Stop()
+
+		for {
+			select {
+			case frame, ok := <-audioCh:
+				if !ok {
+					log.Printf("[WS-DIAG] audio channel closed session=%s stream=%s", sid, streamID)
+					return
+				}
+				packet := make([]byte, 1+len(frame))
+				packet[0] = wsPacketTypeAudioPCM16
+				copy(packet[1:], frame)
+				if err := client.writeBinary(packet); err != nil {
+					log.Printf("[WS] audio pump write error session=%s: %v", sid, err)
+					return
+				}
+			case <-watchdog.C:
+				lastMs := client.lastWriteAt.Load()
+				if lastMs > 0 {
+					staleSec := float64(time.Now().UnixMilli()-lastMs) / 1000.0
+					if staleSec > 5 {
+						log.Printf("[WS-DIAG] STALE writes session=%s stream=%s last_write=%.1fs_ago",
+							sid, streamID, staleSec)
+						s.streamLog.Wire(streamID, streamlog.LevelWarn, "pump.stale", "wavetoy", "client",
+							fmt.Sprintf("session=%s last_write=%.1fs_ago", sid, staleSec))
+					}
+				}
 			}
 		}
 	}()
@@ -377,17 +408,23 @@ func (s *Server) startAudioPumpForClient(streamID string, client *streamWSClient
 }
 
 func (s *Server) startWaterfallPumpForClient(streamID string, client *streamWSClient) {
+	sid := client.sessionID[:min(8, len(client.sessionID))]
+
 	wfCh, unsubscribe, err := s.streamManager.SubscribeWaterfall(streamID)
 	if err != nil {
+		log.Printf("[WS-DIAG] waterfall subscribe FAILED session=%s stream=%s: %v", sid, streamID, err)
+		// BUG: log pump won't start either (chained)
 		return
 	}
+	log.Printf("[WS-DIAG] waterfall pump STARTED session=%s stream=%s", sid, streamID)
 
 	go func() {
 		defer unsubscribe()
+		defer log.Printf("[WS-DIAG] waterfall pump EXITED session=%s stream=%s", sid, streamID)
 		for frame := range wfCh {
 			packet := buildWFPacket(frame)
 			if err := client.writeBinary(packet); err != nil {
-				log.Printf("[WS] waterfall pump write error session=%s: %v", client.sessionID[:min(8, len(client.sessionID))], err)
+				log.Printf("[WS] waterfall pump write error session=%s: %v", sid, err)
 				return
 			}
 		}
