@@ -111,7 +111,7 @@ export const SourceMapPicker = memo(forwardRef<SourceMapPickerHandle, SourceMapP
   className,
   showCounts = true,
 }, ref) {
-  const mapColors = useThemeStore((s) => s.theme.map);
+  const mapColors = useThemeStore((s) => s.baseTheme.map);
   const [hoveredID, setHoveredID] = useState<string | null>(null);
   const mapRef = useRef<MapRef>(null);
 

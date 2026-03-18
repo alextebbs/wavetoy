@@ -15,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/sammy/sdr-radio/internal/api"
 	"github.com/sammy/sdr-radio/internal/auth"
+	"github.com/sammy/sdr-radio/internal/chunkring"
 	"github.com/sammy/sdr-radio/internal/config"
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
@@ -108,6 +109,15 @@ func main() {
 		srv.BroadcastToStream(streamID, map[string]any{
 			"type":    "interpreter_output",
 			"payload": output,
+		})
+	})
+	srv.StreamManager().SetOnChunkComplete(func(streamID string, meta chunkring.ChunkMeta) {
+		srv.BroadcastToStream(streamID, map[string]any{
+			"type":       "chunk_complete",
+			"index":      meta.Index,
+			"started_at": meta.StartedAt,
+			"ended_at":   meta.EndedAt,
+			"source_id":  meta.SourceID,
 		})
 	})
 

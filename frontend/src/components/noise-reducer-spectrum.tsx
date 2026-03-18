@@ -15,7 +15,6 @@ const DB_RANGE = 60;
 const SAMPLE_RATE = 12000;
 const MAX_DISPLAY_HZ = 3000;
 const HZ_PER_BIN = SAMPLE_RATE / FFT_SIZE;
-const TICK_HZ = [500, 1000, 1500, 2000, 2500, 3000];
 
 type Props = {
   samplesRef: RefObject<Float32Array>;
@@ -84,8 +83,6 @@ export function NoiseReducerSpectrum({
   strengthRef.current = strength;
   floorRef.current = floorDb;
 
-  const LABEL_AREA = 14;
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -100,16 +97,15 @@ export function NoiseReducerSpectrum({
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       const w = rect.width;
-      const totalH = rect.height;
-      const h = totalH - LABEL_AREA;
+      const h = rect.height;
       const bw = Math.round(w * dpr);
-      const bh = Math.round(totalH * dpr);
+      const bh = Math.round(h * dpr);
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
         canvas.height = bh;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, totalH);
+      ctx.clearRect(0, 0, w, h);
 
       const samples = samplesRef.current;
       if (samples && samples.length > 0) {
@@ -198,17 +194,6 @@ export function NoiseReducerSpectrum({
       ctx.textBaseline = "bottom";
       ctx.fillText(`${Math.round(st * 100)}%`, w - 3, floorY - 2);
 
-      // Frequency tick labels
-      ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      for (const hz of TICK_HZ) {
-        const tx = (hz / MAX_DISPLAY_HZ) * w;
-        ctx.fillRect(tx, h, 1, 3);
-        const label = hz >= 1000 ? `${hz / 1000}k` : `${hz}`;
-        ctx.fillText(label, tx, h + 3);
-      }
-
       rafRef.current = requestAnimationFrame(draw);
     };
 
@@ -220,7 +205,7 @@ export function NoiseReducerSpectrum({
     <canvas
       ref={canvasRef}
       className={cn("w-full", className)}
-      style={{ height: height + LABEL_AREA }}
+      style={{ height }}
     />
   );
 }

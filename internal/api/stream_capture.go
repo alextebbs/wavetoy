@@ -5,9 +5,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/sammy/sdr-radio/internal/capture"
+	"github.com/sammy/sdr-radio/internal/chunkring"
 	"github.com/sammy/sdr-radio/internal/streammgr"
 )
 
@@ -28,7 +29,7 @@ func (s *Server) captureStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap, err := s.streamManager.CaptureAudio(streamID)
+	pcm, sampleRate, err := s.streamManager.CaptureAudioPCM(streamID)
 	if err != nil {
 		if err == streammgr.ErrStreamNotActive {
 			writeError(w, http.StatusConflict, "stream is not active", "STREAM_NOT_ACTIVE")
@@ -38,7 +39,7 @@ func (s *Server) captureStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(snap.Audio) == 0 {
+	if len(pcm) == 0 {
 		writeError(w, http.StatusConflict, "ring buffer is empty, no audio captured yet", "BUFFER_EMPTY")
 		return
 	}
@@ -47,15 +48,11 @@ func (s *Server) captureStream(w http.ResponseWriter, r *http.Request) {
 	if label == "" {
 		label = streamID
 	}
-	filename := fmt.Sprintf("%s-%s-%s-ringbuffer.wav",
-		label,
-		snap.StartTime.Format("20060102-150405"),
-		snap.EndTime.Format("20060102-150405"),
-	)
+	filename := fmt.Sprintf("%s-%s-ringbuffer.wav", label, time.Now().Format("20060102-150405"))
 	w.Header().Set("Content-Type", "audio/wav")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 
-	if err := capture.WriteWAV(w, snap); err != nil {
+	if err := chunkring.SerializeAudioWAVFromPCM(w, pcm, sampleRate); err != nil {
 		log.Printf("[CAPTURE] WAV write error stream=%s: %v", streamID, err)
 	}
 }

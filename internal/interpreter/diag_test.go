@@ -341,7 +341,7 @@ func decodeWithParams(pcm []byte, sidetoneHz int, wpm int) string {
 		WPM:        wpm,
 	}
 
-	decoder := New(cfg, decoderSampleRate)
+	decoder := New(cfg, decoderSampleRate, func(string, string, string) {})
 	if decoder == nil {
 		return "<nil decoder>"
 	}

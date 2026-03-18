@@ -201,7 +201,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           label="Q (sharpness)"
           value={local.notch.q}
           min={1}
-          max={30}
+          max={50}
           step={0.5}
           unit=""
           onChange={(v) =>
@@ -295,7 +295,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         <SliderRow
           label="Floor"
           value={local.noise_reducer.floor_db}
-          min={-40}
+          min={-60}
           max={0}
           step={1}
           unit="dB"
@@ -340,7 +340,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           label="Cutoff"
           value={local.low_pass.cutoff_hz}
           min={500}
-          max={3000}
+          max={5500}
           step={50}
           unit="Hz"
           onChange={(v) =>
@@ -394,7 +394,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           label="Hold"
           value={local.noise_gate.hold_ms}
           min={0}
-          max={500}
+          max={2000}
           step={10}
           unit="ms"
           onChange={(v) =>
@@ -408,7 +408,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           label="Release"
           value={local.noise_gate.release_ms}
           min={5}
-          max={500}
+          max={1000}
           step={5}
           unit="ms"
           onChange={(v) =>
@@ -448,7 +448,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           label="Drive"
           value={local.soft_clipper.drive_db}
           min={0}
-          max={24}
+          max={36}
           step={1}
           unit="dB"
           onChange={(v) =>
@@ -461,7 +461,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         <SliderRow
           label="Ceiling"
           value={local.soft_clipper.ceiling_db}
-          min={-12}
+          min={-24}
           max={0}
           step={1}
           unit="dB"

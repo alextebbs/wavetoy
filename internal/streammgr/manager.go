@@ -9,13 +9,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
+
+	"github.com/sammy/sdr-radio/internal/chunkring"
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
 	"github.com/sammy/sdr-radio/internal/filter"
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
-	"github.com/sammy/sdr-radio/internal/ringbuf"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
@@ -39,6 +41,9 @@ type Manager struct {
 
 	onDataStaleMu sync.RWMutex
 	onDataStale   func(streamID, channel string, stale bool)
+
+	onChunkCompleteMu sync.RWMutex
+	onChunkComplete    func(streamID string, meta chunkring.ChunkMeta)
 }
 
 type listenSession struct {
@@ -62,7 +67,7 @@ type activeStream struct {
 	subscribers   map[chan []byte]struct{}
 	wfSubscribers map[chan kiwi.WFFrame]struct{}
 	startedAt     time.Time
-	ringBuf       *ringbuf.RingBuffer
+	chunkRing     *chunkring.ChunkRing
 	filterChain  *filter.Chain
 	autoFallback bool
 	listen       *listenSession
@@ -77,6 +82,10 @@ type activeStream struct {
 	interp     interpreter.Interpreter
 	interpType string
 
+	tuneFreqKHz   float32
+	tunePassLo    int16
+	tunePassHi    int16
+
 	framesFromKiwi     atomic.Int64
 	bytesFromKiwi      atomic.Int64
 	fanoutDelivered    atomic.Int64
@@ -90,6 +99,15 @@ type activeStream struct {
 	perfFilterUs    int64
 	perfInterpUs    int64
 	perfBroadcastUs int64
+	perfChunkUs     int64
+
+	// WF pump performance tracking
+	wfPerfMu          sync.Mutex
+	wfPerfFrames      int64
+	wfPerfTotalUs     int64
+	wfPerfMaxUs       int64
+	wfPerfBroadcastUs int64
+	wfPerfChunkUs     int64
 }
 
 func New(database *db.DB, logger *streamlog.Logger) *Manager {
@@ -126,6 +144,14 @@ func (m *Manager) notifyInterpreterOutput(streamID string, output interpreter.Ou
 	if fn != nil {
 		fn(streamID, output)
 	}
+
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if ok {
+		data, _ := json.Marshal(output)
+		as.chunkRing.WriteEvent(time.Now(), "interpreter", data)
+	}
 }
 
 func (m *Manager) SetOnDataStale(fn func(streamID, channel string, stale bool)) {
@@ -140,6 +166,21 @@ func (m *Manager) notifyDataStale(streamID, channel string, stale bool) {
 	m.onDataStaleMu.RUnlock()
 	if fn != nil {
 		fn(streamID, channel, stale)
+	}
+}
+
+func (m *Manager) SetOnChunkComplete(fn func(streamID string, meta chunkring.ChunkMeta)) {
+	m.onChunkCompleteMu.Lock()
+	m.onChunkComplete = fn
+	m.onChunkCompleteMu.Unlock()
+}
+
+func (m *Manager) notifyChunkComplete(streamID string, meta chunkring.ChunkMeta) {
+	m.onChunkCompleteMu.RLock()
+	fn := m.onChunkComplete
+	m.onChunkCompleteMu.RUnlock()
+	if fn != nil {
+		fn(streamID, meta)
 	}
 }
 
@@ -204,8 +245,9 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 	if ok {
 		as.mu.RLock()
 		running := as.client != nil
+		reconnecting := as.reconnecting
 		as.mu.RUnlock()
-		if running {
+		if running || reconnecting {
 			return nil
 		}
 		client, wfClient, err := m.connectClient(ctx, stream)
@@ -267,6 +309,11 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 		}
 		existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, m.SampleRate(stream.ID)))
 		m.reconfigureInterpreter(existing, stream)
+		existing.mu.Lock()
+		existing.tuneFreqKHz = float32(stream.FrequencyKHz)
+		existing.tunePassLo = int16(stream.BandwidthLowHz)
+		existing.tunePassHi = int16(stream.BandwidthHighHz)
+		existing.mu.Unlock()
 		return nil
 	}
 
@@ -289,6 +336,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	existing.mu.Unlock()
 
 	m.setStreamStateInDBAndNotify(ctx, stream.ID, StateActive)
+	existing.chunkRing.SetSourceID(stream.SourceID)
 	existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, client.SampleRate()))
 	m.reconfigureInterpreter(existing, stream)
 	m.startPump(existing, client, gen)
@@ -393,8 +441,6 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	if bufMinutes <= 0 {
 		bufMinutes = 5
 	}
-	bufDuration := time.Duration(bufMinutes) * time.Minute
-	bufCapacity := 24 * 60 * bufMinutes * 2
 
 	now := time.Now()
 	as := &activeStream{
@@ -407,14 +453,21 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 		wfSubscribers:   make(map[chan kiwi.WFFrame]struct{}),
 		startedAt:       now,
 		lastConnectedAt: now,
-		ringBuf:         ringbuf.New(bufDuration, bufCapacity),
+		chunkRing:       chunkring.New(stream.ID, 1*time.Minute, bufMinutes, client.SampleRate()),
 		filterChain:     filter.NewChain(stream.Filters, client.SampleRate()),
 		interp:          interpreter.New(normalizeInterpConfig(stream.Interpreter), client.SampleRate(), m.interpLogFunc(stream.ID)),
 		interpType:      stream.Interpreter.Type,
 		autoFallback:    stream.AutoFallback,
 		listen:          newListenSession(stream.SourceID),
+		tuneFreqKHz:     float32(stream.FrequencyKHz),
+		tunePassLo:      int16(stream.BandwidthLowHz),
+		tunePassHi:      int16(stream.BandwidthHighHz),
 	}
 	m.wireAsyncInterpreter(as)
+	as.chunkRing.SetSourceID(stream.SourceID)
+	as.chunkRing.SetOnRotate(func(meta chunkring.ChunkMeta) {
+		m.notifyChunkComplete(stream.ID, meta)
+	})
 
 	m.mu.Lock()
 	if _, exists := m.streams[stream.ID]; exists {
@@ -610,6 +663,9 @@ func (m *Manager) Remove(streamID string) error {
 	if wfClient != nil {
 		_ = wfClient.Close()
 	}
+	if as.chunkRing != nil {
+		as.chunkRing.Close()
+	}
 	m.log.Remove(streamID)
 	return nil
 }
@@ -706,9 +762,9 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 			filtered := as.filterChain.Process(frame)
 			filterElapsed := time.Since(t0)
 
-			if as.ringBuf != nil {
-				as.ringBuf.Write(time.Now(), filtered)
-			}
+			tc := time.Now()
+			as.chunkRing.WriteAudio(time.Now(), filtered)
+			chunkElapsed := time.Since(tc)
 
 			t1 := time.Now()
 			as.broadcast(filtered)
@@ -739,7 +795,17 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 			as.perfFilterUs += filterElapsed.Microseconds()
 			as.perfInterpUs += interpElapsed.Microseconds()
 			as.perfBroadcastUs += broadcastElapsed.Microseconds()
+			as.perfChunkUs += chunkElapsed.Microseconds()
 			as.perfMu.Unlock()
+
+			if totalElapsed >= 50*time.Millisecond {
+				m.log.Warn(as.id, "pump.slow_frame", fmt.Sprintf(
+					"total=%dµs filter=%dµs chunk=%dµs broadcast=%dµs interp=%dµs",
+					totalElapsed.Microseconds(), filterElapsed.Microseconds(),
+					chunkElapsed.Microseconds(), broadcastElapsed.Microseconds(),
+					interpElapsed.Microseconds(),
+				))
+			}
 
 			if ls := as.listen; ls != nil && !ls.gotSound.Load() {
 				ls.gotSound.Store(true)
@@ -777,6 +843,8 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 		timer := time.NewTimer(wfTimeout)
 		defer timer.Stop()
 		gotFirstFrame := false
+		zoomSettled := false
+		droppedStaleFrames := 0
 
 		for {
 			select {
@@ -802,7 +870,21 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 			if !ok {
 				return
 			}
-			lastFrameAt = time.Now()
+
+			if !zoomSettled {
+				expectedZoom := wfClient.ConfiguredZoom()
+				if int(frame.Zoom) != expectedZoom {
+					droppedStaleFrames++
+					continue
+				}
+				zoomSettled = true
+				if droppedStaleFrames > 0 {
+					m.log.Info(as.id, "wf.zoom_settled", fmt.Sprintf("dropped %d stale frames before zoom=%d matched", droppedStaleFrames, expectedZoom))
+				}
+			}
+
+			wfFrameStart := time.Now()
+			lastFrameAt = wfFrameStart
 			if wfStale {
 				wfStale = false
 				m.log.Info(as.id, "pump.wf.resumed", "receiving frames again")
@@ -812,7 +894,36 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 				gotFirstFrame = true
 				timer.Stop()
 			}
+			tb := time.Now()
 			as.broadcastWF(frame)
+			wfBroadcastElapsed := time.Since(tb)
+
+			as.mu.RLock()
+			fk, pl, ph := as.tuneFreqKHz, as.tunePassLo, as.tunePassHi
+			as.mu.RUnlock()
+			tc := time.Now()
+			as.chunkRing.WriteWF(time.Now(), frame.Bins, frame.XBin, frame.Zoom, fk, pl, ph)
+			wfChunkElapsed := time.Since(tc)
+
+			wfTotalElapsed := time.Since(wfFrameStart)
+			as.wfPerfMu.Lock()
+			as.wfPerfFrames++
+			wfUs := wfTotalElapsed.Microseconds()
+			as.wfPerfTotalUs += wfUs
+			if wfUs > as.wfPerfMaxUs {
+				as.wfPerfMaxUs = wfUs
+			}
+			as.wfPerfBroadcastUs += wfBroadcastElapsed.Microseconds()
+			as.wfPerfChunkUs += wfChunkElapsed.Microseconds()
+			as.wfPerfMu.Unlock()
+
+			if wfTotalElapsed >= 50*time.Millisecond {
+				m.log.Warn(as.id, "pump.wf.slow_frame", fmt.Sprintf(
+					"total=%dµs broadcast=%dµs chunk=%dµs",
+					wfTotalElapsed.Microseconds(), wfBroadcastElapsed.Microseconds(),
+					wfChunkElapsed.Microseconds(),
+				))
+			}
 
 			if ls := as.listen; ls != nil && !ls.gotWF.Load() {
 				ls.gotWF.Store(true)
@@ -858,12 +969,14 @@ func (m *Manager) logAudioMetrics(as *activeStream, client *kiwi.Client, generat
 	filterUs := as.perfFilterUs
 	interpUs := as.perfInterpUs
 	broadcastUs := as.perfBroadcastUs
+	chunkUs := as.perfChunkUs
 	as.perfFrames = 0
 	as.perfTotalUs = 0
 	as.perfMaxUs = 0
 	as.perfFilterUs = 0
 	as.perfInterpUs = 0
 	as.perfBroadcastUs = 0
+	as.perfChunkUs = 0
 	as.perfMu.Unlock()
 
 	if frames > 0 {
@@ -871,6 +984,7 @@ func (m *Manager) logAudioMetrics(as *activeStream, client *kiwi.Client, generat
 		avgFilterUs := filterUs / frames
 		avgInterpUs := interpUs / frames
 		avgBcastUs := broadcastUs / frames
+		avgChunkUs := chunkUs / frames
 
 		budgetUs := int64(10_000_000) / frames // per-frame budget based on observed rate
 		maxPct := float64(0)
@@ -886,8 +1000,37 @@ func (m *Manager) logAudioMetrics(as *activeStream, client *kiwi.Client, generat
 		}
 
 		m.log.Log(as.id, level, "pump.perf", fmt.Sprintf(
-			"frames=%d avg=%dµs max=%dµs filter=%dµs interp=%dµs broadcast=%dµs max_budget=%.1f%%",
-			frames, avgUs, maxUs, avgFilterUs, avgInterpUs, avgBcastUs, maxPct,
+			"frames=%d avg=%dµs max=%dµs filter=%dµs interp=%dµs broadcast=%dµs chunk=%dµs max_budget=%.1f%%",
+			frames, avgUs, maxUs, avgFilterUs, avgInterpUs, avgBcastUs, avgChunkUs, maxPct,
+		))
+	}
+
+	as.wfPerfMu.Lock()
+	wfFrames := as.wfPerfFrames
+	wfTotalUs := as.wfPerfTotalUs
+	wfMaxUs := as.wfPerfMaxUs
+	wfBcastUs := as.wfPerfBroadcastUs
+	wfChunkUs := as.wfPerfChunkUs
+	as.wfPerfFrames = 0
+	as.wfPerfTotalUs = 0
+	as.wfPerfMaxUs = 0
+	as.wfPerfBroadcastUs = 0
+	as.wfPerfChunkUs = 0
+	as.wfPerfMu.Unlock()
+
+	if wfFrames > 0 {
+		wfAvgUs := wfTotalUs / wfFrames
+		wfAvgBcastUs := wfBcastUs / wfFrames
+		wfAvgChunkUs := wfChunkUs / wfFrames
+
+		level := streamlog.LevelDebug
+		if wfMaxUs >= 50_000 {
+			level = streamlog.LevelWarn
+		}
+
+		m.log.Log(as.id, level, "pump.wf.perf", fmt.Sprintf(
+			"frames=%d avg=%dµs max=%dµs broadcast=%dµs chunk=%dµs",
+			wfFrames, wfAvgUs, wfMaxUs, wfAvgBcastUs, wfAvgChunkUs,
 		))
 	}
 }
@@ -1010,12 +1153,16 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 
 			as.mu.Lock()
 			idleExpired := !as.autoFallback && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
-			if as.client != nil || idleExpired {
+			alreadyRunning = as.client != nil
+			if alreadyRunning || idleExpired {
 				as.mu.Unlock()
 				m.log.Debug(as.id, "reconnect.race", "state changed during connect, discarding")
 				_ = client.Close()
 				if wfClient != nil {
 					_ = wfClient.Close()
+				}
+				if alreadyRunning {
+					m.setStreamStateInDBAndNotify(context.Background(), as.id, StateActive)
 				}
 				return
 			}
@@ -1045,20 +1192,28 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 	}()
 }
 
-func (m *Manager) CaptureAudio(streamID string) (*ringbuf.Snapshot, error) {
+// CaptureAudioPCM returns the concatenated PCM audio from the ChunkRing.
+func (m *Manager) CaptureAudioPCM(streamID string) (pcm []byte, sampleRate int, err error) {
 	m.mu.RLock()
 	as, ok := m.streams[streamID]
 	m.mu.RUnlock()
 	if !ok {
-		return nil, ErrStreamNotActive
+		return nil, 0, ErrStreamNotActive
 	}
-	if as.ringBuf == nil {
-		return nil, fmt.Errorf("no ring buffer for stream %s", streamID)
+	pcm, sampleRate = as.chunkRing.SnapshotAudio()
+	m.log.Info(streamID, "capture", fmt.Sprintf("bytes=%d sample_rate=%d", len(pcm), sampleRate))
+	return pcm, sampleRate, nil
+}
+
+// ChunkRing returns the ChunkRing for a stream, or nil if not active.
+func (m *Manager) ChunkRing(streamID string) *chunkring.ChunkRing {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return nil
 	}
-	sampleRate := m.SampleRate(streamID)
-	snap := as.ringBuf.Snapshot(streamID, sampleRate)
-	m.log.Info(streamID, "capture", fmt.Sprintf("entries=%d duration=%s sample_rate=%d", len(snap.Audio), snap.EndTime.Sub(snap.StartTime), sampleRate))
-	return snap, nil
+	return as.chunkRing
 }
 
 func (m *Manager) CollectSnapshot(ctx context.Context, streamID string, duration time.Duration, stream models.Stream) (fallback.SnapshotResult, error) {

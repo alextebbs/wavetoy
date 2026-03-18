@@ -97,8 +97,6 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		AGCOn:                    p.AGCOn,
 		AGCGainDB:                p.AGCGainDB,
 		BufferMinutes:            p.BufferMinutes,
-		ActivityDetectionEnabled: false,
-		ActivitySensitivity:      0.5,
 		State:                    "created",
 		Version:                  1,
 		CreatedAt:                now,
@@ -108,17 +106,17 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 	_, err = db.Pool.Exec(ctx, `
 		INSERT INTO streams (
 			id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
-			mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-			activity_sensitivity, state, version, created_at, updated_at
+			mode, name, agc_on, agc_gain_db, buffer_minutes,
+			state, version, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11, $12,
-			$13, $14, $15, $16, $17
+			$7, $8, $9, $10, $11,
+			$12, $13, $14, $15
 		)
 	`,
 		stream.ID, stream.TenantID, stream.SourceID, stream.FrequencyKHz, stream.BandwidthLowHz, stream.BandwidthHighHz,
-		stream.Mode, stream.Name, stream.AGCOn, stream.AGCGainDB, stream.BufferMinutes, stream.ActivityDetectionEnabled,
-		stream.ActivitySensitivity, stream.State, stream.Version, stream.CreatedAt, stream.UpdatedAt,
+		stream.Mode, stream.Name, stream.AGCOn, stream.AGCGainDB, stream.BufferMinutes,
+		stream.State, stream.Version, stream.CreatedAt, stream.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -229,16 +227,16 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	var stream models.Stream
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
-		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
+		       mode, name, agc_on, agc_gain_db, buffer_minutes,
+		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_fallback, view_locked,
 		       created_at, updated_at
 		FROM streams
 		WHERE id = $1
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
-		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-		&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
+		&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 		&stream.AutoFallback, &stream.ViewLocked,
 		&stream.CreatedAt, &stream.UpdatedAt,
 	)
@@ -257,8 +255,8 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 	}
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
-		       mode, name, agc_on, agc_gain_db, buffer_minutes, activity_detection_enabled,
-		       activity_sensitivity, state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
+		       mode, name, agc_on, agc_gain_db, buffer_minutes,
+		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_fallback, view_locked,
 		       created_at, updated_at
 		FROM streams
@@ -276,8 +274,8 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		var stream models.Stream
 		if err := rows.Scan(
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
-			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes, &stream.ActivityDetectionEnabled,
-			&stream.ActivitySensitivity, &stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
+			&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 			&stream.AutoFallback, &stream.ViewLocked,
 			&stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {

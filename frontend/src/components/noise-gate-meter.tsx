@@ -82,7 +82,7 @@ export function NoiseGateMeter({
       const peakNorm = Math.max(0, Math.min(1, (peakDb.current - MIN_DB) / DB_RANGE));
       const threshNorm = Math.max(0, Math.min(1, (threshRef.current - MIN_DB) / DB_RANGE));
 
-      const barH = h - 16;
+      const barH = h;
       const barY = 0;
 
       const c = colorRef.current;
@@ -112,17 +112,6 @@ export function NoiseGateMeter({
       ctx.lineTo(threshX, barY + barH);
       ctx.stroke();
       ctx.setLineDash([]);
-
-      // dB tick labels
-      ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
-      ctx.font = "9px system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      for (const db of [-60, -40, -20, -10, 0]) {
-        const tx = ((db - MIN_DB) / DB_RANGE) * w;
-        ctx.fillRect(tx, barY + barH, 1, 3);
-        ctx.fillText(`${db}`, tx, barY + barH + 3);
-      }
 
       rafRef.current = requestAnimationFrame(draw);
     };

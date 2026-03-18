@@ -1,3 +1,4 @@
+// Conflict resolution & view source tagging: see planning/CONFLICTS.md
 import { create } from "zustand";
 
 export type ViewSource = "local" | "remote";
@@ -11,6 +12,7 @@ export interface BandViewState {
   allowOverflow: boolean;
 
   setView: (start: number, end: number) => void;
+  setViewQuiet: (start: number, end: number) => void;
   setViewRemote: (start: number, end: number) => void;
   setMaxBandwidth: (maxKHz: number) => void;
   setAllowOverflow: (allow: boolean) => void;
@@ -71,6 +73,12 @@ export const useBandViewStore = create<BandViewState>((set, get) => ({
     const { maxBandwidthKHz, allowOverflow } = get();
     const [s, e] = clampView(start, end, maxBandwidthKHz, allowOverflow);
     set({ startKHz: s, endKHz: e, viewSource: "local", initialized: true });
+  },
+
+  setViewQuiet: (start, end) => {
+    const { maxBandwidthKHz, allowOverflow } = get();
+    const [s, e] = clampView(start, end, maxBandwidthKHz, allowOverflow);
+    set({ startKHz: s, endKHz: e, viewSource: "remote", initialized: true });
   },
 
   setViewRemote: (targetStart, targetEnd) => {

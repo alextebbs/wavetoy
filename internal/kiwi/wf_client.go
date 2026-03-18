@@ -46,6 +46,7 @@ type WFClient struct {
 	framesIn       atomic.Int64
 	firstLogged    atomic.Bool
 	maxFreqKHz     atomic.Int64
+	configuredZoom atomic.Int32
 }
 
 const (
@@ -91,6 +92,7 @@ func ConnectWF(ctx context.Context, cfg WFConfig, timestamp int64, logFn LogFunc
 		frames: make(chan WFFrame, 32),
 	}
 	client.maxFreqKHz.Store(30000)
+	client.configuredZoom.Store(int32(cfg.Zoom))
 
 	if err := client.init(cfg); err != nil {
 		client.Close()
@@ -114,6 +116,10 @@ func (c *WFClient) MaxFreqKHz() int64 {
 	return c.maxFreqKHz.Load()
 }
 
+func (c *WFClient) ConfiguredZoom() int {
+	return int(c.configuredZoom.Load())
+}
+
 func (c *WFClient) Close() error {
 	var closeErr error
 	c.closeOnce.Do(func() {
@@ -135,6 +141,7 @@ func (c *WFClient) init(cfg WFConfig) error {
 }
 
 func (c *WFClient) Reconfigure(zoom int, centerKHz float64, speed int) error {
+	c.configuredZoom.Store(int32(zoom))
 	cmds := []string{
 		fmt.Sprintf("SET zoom=%d cf=%.3f", zoom, centerKHz),
 		fmt.Sprintf("SET wf_speed=%d", speed),

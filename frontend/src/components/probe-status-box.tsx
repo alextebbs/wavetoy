@@ -60,19 +60,19 @@ export function ProbeStatusBox({
             <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
               <span>
                 <span className="text-muted-foreground/50">INIT</span>{" "}
-                <span className={result.connected ? "text-primary" : "text-destructive"}>
+                <span className={result.connected ? "text-emerald-500" : "text-destructive"}>
                   {result.connected ? "PASS" : "FAIL"}
                 </span>
               </span>
               <span>
                 <span className="text-muted-foreground/50">SND</span>{" "}
-                <span className={result.snd_ok ? "text-primary" : "text-destructive"}>
+                <span className={result.snd_ok ? "text-emerald-500" : "text-destructive"}>
                   {result.snd_ok ? "PASS" : "FAIL"}
                 </span>
               </span>
               <span>
                 <span className="text-muted-foreground/50">WF</span>{" "}
-                <span className={result.wf_ok ? "text-primary" : "text-destructive"}>
+                <span className={result.wf_ok ? "text-emerald-500" : "text-destructive"}>
                   {result.wf_ok ? "PASS" : "FAIL"}
                 </span>
               </span>

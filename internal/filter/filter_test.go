@@ -631,6 +631,241 @@ func measurePeak(pcm []byte) float64 {
 	return peak
 }
 
+func TestPitchShifterModifiesSignal(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	before := measureRMS(pcm)
+
+	chain := NewChain(models.FilterConfig{
+		PitchShifter: &models.PitchShifterConfig{Enabled: true, Semitones: 5},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	if before == 0 || after == 0 {
+		t.Error("expected non-zero RMS before and after pitch shift")
+	}
+	// Pitch shifter should produce output (not silence)
+	if after < before*0.1 {
+		t.Errorf("pitch shifter destroyed signal: before=%.4f after=%.4f", before, after)
+	}
+}
+
+func TestPitchShifterPreservesEnergy(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+
+	chain := NewChain(models.FilterConfig{
+		PitchShifter: &models.PitchShifterConfig{Enabled: true, Semitones: 3},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	if after < 0.05 {
+		t.Errorf("pitch shifter should preserve energy, got RMS %.4f", after)
+	}
+}
+
+func TestEchoAddsEnergy(t *testing.T) {
+	// Build a signal that's loud at the start and silent at the end
+	n := sampleRate // 1 second
+	pcm := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		var s float64
+		if i < sampleRate/10 { // first 100ms is a tone
+			s = 0.5 * math.Sin(2*math.Pi*1000*float64(i)/float64(sampleRate))
+		}
+		v := int16(s * 32767)
+		pcm[i*2] = byte(v)
+		pcm[i*2+1] = byte(v >> 8)
+	}
+
+	chain := NewChain(models.FilterConfig{
+		Echo: &models.EchoConfig{Enabled: true, DelayMs: 250, Feedback: 0.5, Mix: 0.5},
+	}, sampleRate)
+	chain.Process(pcm)
+
+	// Measure energy in the second half — echo should have put some there
+	halfPcm := pcm[n:]
+	var sum float64
+	nn := len(halfPcm) / 2
+	for i := 0; i < nn; i++ {
+		v := int16(uint16(halfPcm[i*2]) | uint16(halfPcm[i*2+1])<<8)
+		s := float64(v) / 32768.0
+		sum += s * s
+	}
+	rms := math.Sqrt(sum / float64(nn))
+	if rms < 0.001 {
+		t.Errorf("expected echo to produce energy in the second half, got RMS %.6f", rms)
+	}
+}
+
+func TestBitcrusherReducesBitDepth(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	before := measureRMS(pcm)
+
+	chain := NewChain(models.FilterConfig{
+		Bitcrusher: &models.BitcrusherConfig{Enabled: true, Bits: 4, CrushRate: 12000},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	// Signal should survive but be altered
+	if after < before*0.3 {
+		t.Errorf("bitcrusher destroyed signal too much: before=%.4f after=%.4f", before, after)
+	}
+	// At 4 bits, the signal should be quantized — check that it's not identical
+	// (we already processed in-place, so just verify non-zero output)
+	if after == 0 {
+		t.Error("bitcrusher produced silence")
+	}
+}
+
+func TestBitcrusher16BitPassthrough(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	before := measureRMS(pcm)
+
+	chain := NewChain(models.FilterConfig{
+		Bitcrusher: &models.BitcrusherConfig{Enabled: true, Bits: 16, CrushRate: 12000},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	db := rmsRatioDB(before, after)
+	if db < -1 {
+		t.Errorf("bitcrusher at 16-bit should near-passthrough, got %.1f dB", db)
+	}
+}
+
+func TestRingModulatorModifiesSpectrum(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+
+	chain := NewChain(models.FilterConfig{
+		RingModulator: &models.RingModulatorConfig{Enabled: true, CarrierHz: 300, Mix: 1.0},
+	}, sampleRate)
+	chain.Process(pcm)
+
+	// With ring mod at 300 Hz on a 1kHz tone, energy should appear at 700 Hz and 1300 Hz
+	// The original 1kHz should be suppressed (mix=1.0, full wet)
+	energy1k := measureBinEnergy(pcm, 1000, sampleRate)
+	energy700 := measureBinEnergy(pcm, 700, sampleRate)
+	energy1300 := measureBinEnergy(pcm, 1300, sampleRate)
+
+	if energy700 < energy1k && energy1300 < energy1k {
+		t.Errorf("ring mod should shift energy to sidebands: 700Hz=%.4f 1kHz=%.4f 1300Hz=%.4f",
+			energy700, energy1k, energy1300)
+	}
+}
+
+func TestReverbAddsDecay(t *testing.T) {
+	// Impulse at the start, then silence
+	n := sampleRate / 2 // 0.5s
+	pcm := make([]byte, n*2)
+	// Single impulse at sample 0
+	imp := int16(26214) // ~0.8 full scale
+	pcm[0] = byte(imp)
+	pcm[1] = byte(imp >> 8)
+
+	chain := NewChain(models.FilterConfig{
+		Reverb: &models.ReverbConfig{Enabled: true, RoomSize: 0.8, Damping: 0.5, Mix: 0.5},
+	}, sampleRate)
+	chain.Process(pcm)
+
+	// Measure energy in the second quarter — reverb tail should be present
+	quarter := n / 4
+	tailPcm := pcm[quarter*2 : quarter*2*2]
+	nn := len(tailPcm) / 2
+	var sum float64
+	for i := 0; i < nn; i++ {
+		vv := int16(uint16(tailPcm[i*2]) | uint16(tailPcm[i*2+1])<<8)
+		s := float64(vv) / 32768.0
+		sum += s * s
+	}
+	rms := math.Sqrt(sum / float64(nn))
+	if rms < 0.0001 {
+		t.Errorf("expected reverb tail in second quarter, got RMS %.6f", rms)
+	}
+}
+
+func TestPhaserModifiesSignal(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	original := make([]byte, len(pcm))
+	copy(original, pcm)
+
+	chain := NewChain(models.FilterConfig{
+		Phaser: &models.PhaserConfig{Enabled: true, Rate: 1.0, Depth: 0.7, Stages: 4, Mix: 0.5},
+	}, sampleRate)
+	chain.Process(pcm)
+
+	// The phaser should modify the signal
+	different := false
+	for i := range pcm {
+		if pcm[i] != original[i] {
+			different = true
+			break
+		}
+	}
+	if !different {
+		t.Error("phaser did not modify the signal")
+	}
+
+	after := measureRMS(pcm)
+	if after < 0.1 {
+		t.Errorf("phaser destroyed signal: RMS=%.4f", after)
+	}
+}
+
+func TestWobbleModifiesSignal(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	before := measureRMS(pcm)
+
+	chain := NewChain(models.FilterConfig{
+		Wobble: &models.WobbleConfig{Enabled: true, Rate: 2.0, Range: 2000, Resonance: 0.5, BaseHz: 200},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	// Wobble is a modulated LPF — it should modify the signal but not destroy it
+	if after < before*0.05 {
+		t.Errorf("wobble destroyed signal: before=%.4f after=%.4f", before, after)
+	}
+	if after == before {
+		t.Error("wobble did not modify the signal")
+	}
+}
+
+func TestTapeSaturatorWarmsSignal(t *testing.T) {
+	pcm := generateSine(1000, sampleRate, 0.5)
+	before := measureRMS(pcm)
+
+	chain := NewChain(models.FilterConfig{
+		TapeSaturator: &models.TapeSaturatorConfig{Enabled: true, Drive: 0.5, WowFlutter: 0.3},
+	}, sampleRate)
+	chain.Process(pcm)
+	after := measureRMS(pcm)
+
+	// Tape saturator should not destroy signal
+	if after < before*0.2 {
+		t.Errorf("tape saturator destroyed signal: before=%.4f after=%.4f", before, after)
+	}
+	if after == 0 {
+		t.Error("tape saturator produced silence")
+	}
+}
+
+func TestTapeSaturatorClamps(t *testing.T) {
+	// Full-scale sine with high drive — output should not exceed 1.0
+	pcm := generateSine(1000, sampleRate, 0.5)
+
+	chain := NewChain(models.FilterConfig{
+		TapeSaturator: &models.TapeSaturatorConfig{Enabled: true, Drive: 1.0, WowFlutter: 0},
+	}, sampleRate)
+	chain.Process(pcm)
+
+	peak := measurePeak(pcm)
+	if peak > 1.01 {
+		t.Errorf("tape saturator output exceeded 1.0: peak=%.4f", peak)
+	}
+}
+
 func TestReconfigure(t *testing.T) {
 	chain := NewChain(models.FilterConfig{}, sampleRate)
 

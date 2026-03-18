@@ -18,6 +18,7 @@ import { BandViewport, computeOptimalWFConfig } from "@/components/waterfall/ban
 import { FrequencyScale } from "@/components/waterfall/frequency-scale";
 import { TuningOverlay } from "@/components/waterfall/tuning-overlay";
 import { WaterfallDisplay } from "@/components/waterfall/waterfall-display";
+import { WaterfallTimeline, type WaterfallTimelineHandle } from "@/components/waterfall/waterfall-timeline";
 import type { WaterfallHandle } from "@/components/waterfall/types";
 import { useBandViewStore } from "@/lib/band-view-store";
 import {
@@ -54,6 +55,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
 import { streamLog } from "@/lib/stream-logger";
+import { ChunkTileManager } from "@/lib/chunk-tile-manager";
+import { RingBufferSource } from "@/lib/chunk-loader";
 
 const AUDIO_TYPE = 0x02;
 const WATERFALL_TYPE = 0x01;
@@ -177,6 +180,8 @@ export function StreamPlayerPage() {
   const [interpreterWpm, setInterpreterWpm] = useState(0);
   const [detectedSidetoneHz, setDetectedSidetoneHz] = useState(0);
   const [voiceProgress, setVoiceProgress] = useState(0);
+  const [freqAnimating, setFreqAnimating] = useState(false);
+  const freqAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshFavoriteSources = useCallback(() => {
     void listFavoriteSources()
@@ -237,6 +242,7 @@ export function StreamPlayerPage() {
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
   const waterfallRef = useRef<WaterfallHandle>(null);
+  const timelineRef = useRef<WaterfallTimelineHandle>(null);
   const spectrumRef = useRef<SpectrumHandle>(null);
 
   const setOverride = useThemeStore((s) => s.setOverride);
@@ -310,6 +316,10 @@ export function StreamPlayerPage() {
     sampleCount: 0,
   });
   const lastPacketAtRef = useRef(0);
+  const prefillDoneRef = useRef(false);
+  const prefillAbortRef = useRef<AbortController | null>(null);
+  const liveWFCountRef = useRef(0);
+  const tileManagerRef = useRef<ChunkTileManager | null>(null);
   const lastAutoPatchRef = useRef("");
   const resamplerRef = useRef<ResamplerState>({
     carryPos: 0,
@@ -663,12 +673,45 @@ export function StreamPlayerPage() {
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
               lastRemoteUpdateAtRef.current = performance.now();
+              setFreqAnimating(true);
+              if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
+              freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
               setMode(s.mode);
               setLo(s.bandwidth_low_hz);
               setHi(s.bandwidth_high_hz);
+            }
+
+            if (!prefillDoneRef.current && waterfallRef.current) {
+              prefillDoneRef.current = true;
+              liveWFCountRef.current = 0;
+              prefillAbortRef.current?.abort();
+              const ac = new AbortController();
+              prefillAbortRef.current = ac;
+              const maxBw = msg.max_freq_khz || 30000;
+
+              const source = new RingBufferSource(streamId);
+              const mgr = new ChunkTileManager(
+                source,
+                waterfallRef.current,
+                maxBw,
+                liveWFCountRef,
+              );
+              tileManagerRef.current = mgr;
+
+              source.fetchRewind().then((rewind) => {
+                if (ac.signal.aborted) return;
+                console.log("[tile-mgr] rewind metadata:", rewind.chunks.length, "chunks", rewind.chunks);
+                mgr.buildManifest(rewind.chunks).then((n) => {
+                  console.log("[tile-mgr] buildManifest done, totalFrames:", n);
+                }).catch((err) => {
+                  console.error("[tile-mgr] buildManifest error:", err);
+                });
+              }).catch((err) => {
+                console.error("[tile-mgr] fetchRewind error:", err);
+              });
             }
           } else if (msg.type === "stream_updated" && msg.stream) {
             const s = msg.stream as Stream;
@@ -679,6 +722,9 @@ export function StreamPlayerPage() {
               s.bandwidth_low_hz, s.bandwidth_high_hz,
             );
             lastRemoteUpdateAtRef.current = performance.now();
+            setFreqAnimating(true);
+            if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
+            freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
             setStream(s);
             setSourceId(s.source_id);
             setFrequency(s.frequency_khz);
@@ -708,6 +754,9 @@ export function StreamPlayerPage() {
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
               lastRemoteUpdateAtRef.current = performance.now();
+              setFreqAnimating(true);
+              if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
+              freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
@@ -739,6 +788,12 @@ export function StreamPlayerPage() {
             appendLogEntries(entries);
           } else if (msg.type === "stream_state_changed" && typeof msg.state === "string") {
             setStream((prev) => prev ? { ...prev, state: msg.state as string } : prev);
+          } else if (msg.type === "chunk_complete") {
+            tileManagerRef.current?.onChunkComplete({
+              started_at: msg.started_at,
+              ended_at: msg.ended_at,
+              source_id: msg.source_id,
+            });
           } else if (msg.type === "stream_data_stale") {
             const stale = msg.stale === true;
             if (msg.channel === "audio") setNoAudio(stale);
@@ -790,6 +845,7 @@ export function StreamPlayerPage() {
         const xBin = dv.getUint32(0, true);
         const zoom = dv.getUint16(4, true);
         const bins = new Uint8Array(ev.data, 9);
+        liveWFCountRef.current++;
         waterfallRef.current?.pushFrame(bins, xBin, zoom);
         spectrumRef.current?.pushFrame(bins, xBin, zoom);
         return;
@@ -1063,13 +1119,20 @@ export function StreamPlayerPage() {
     useBandViewStore.getState().setAllowOverflow(viewLocked);
   }, [viewLocked]);
 
-  // When locked, re-center view on frequency whenever it changes
+  // When locked, re-center view on frequency whenever it changes.
+  // Remote updates use setViewRemote (animated, no outbound wf_config).
+  // Local updates use setView (instant, triggers wf_config for data coverage).
   useEffect(() => {
     if (!viewLocked) return;
-    const { startKHz, endKHz } = useBandViewStore.getState();
-    const span = endKHz - startKHz;
+    const store = useBandViewStore.getState();
+    const span = store.endKHz - store.startKHz;
     const newStart = frequency - span / 2;
-    useBandViewStore.getState().setView(newStart, newStart + span);
+    const isRemote = performance.now() - lastRemoteUpdateAtRef.current < 150;
+    if (isRemote) {
+      store.setViewRemote(newStart, newStart + span);
+    } else {
+      store.setView(newStart, newStart + span);
+    }
   }, [frequency, viewLocked]);
 
   // When locked, panning/zooming should retune to center
@@ -1122,6 +1185,8 @@ export function StreamPlayerPage() {
       }
       intentionalCloseRef.current = true;
       wsRef.current?.close();
+      prefillAbortRef.current?.abort();
+      tileManagerRef.current = null;
     };
   }, [connect, refreshMapSources, streamId]);
 
@@ -1414,53 +1479,64 @@ export function StreamPlayerPage() {
           </div>
         </header>
 
-        {/* Spectrum + freq scale + waterfall */}
-        <BandViewport
-          className="min-w-0 flex-1"
-          zoomToCenter={viewLocked}
-          onClickFrequency={(freqKHz) => {
-            setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
-          }}
-          onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
-            const ws = wsRef.current;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "wf_config",
-                  zoom,
-                  center_khz: centerKHz,
-                  start_khz: viewStartKHz,
-                  end_khz: viewEndKHz,
-                })
-              );
-            }
-          }}
-          onDataCoverageChange={() => {
-            // Both waterfall and spectrum handle their own coverage
-            // transitions via pushFrame() using actual frame metadata
-          }}
-        >
-          <TuningOverlay
-            centerFreqKHz={frequency}
-            passbandLowHz={lo}
-            passbandHighHz={hi}
-            onFrequencyChange={viewLocked ? undefined : setFrequency}
-            onBandwidthChange={(newLo, newHi) => {
-              setLo(newLo);
-              setHi(newHi);
+        {/* Timeline + Spectrum + freq scale + waterfall */}
+        <div className="flex min-w-0 flex-1">
+          <WaterfallTimeline
+            ref={timelineRef}
+            onScrollOffset={(offset) => waterfallRef.current?.setScrollOffset(offset)}
+            onSnapToLive={() => waterfallRef.current?.scrollToLive()}
+          />
+          <BandViewport
+            className="min-w-0 flex-1"
+            zoomToCenter={viewLocked}
+            onClickFrequency={(freqKHz) => {
+              setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
             }}
-          />
-          <SpectrumDisplay
-            ref={spectrumRef}
-            className="w-full shrink-0"
-            style={{ height: spectrumHeight }}
-          />
-          <FrequencyScale onResizeStart={onSpectrumResizeStart} />
-          <WaterfallDisplay
-            ref={waterfallRef}
-            className="min-h-0 flex-1"
-          />
-        </BandViewport>
+            onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
+              const ws = wsRef.current;
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "wf_config",
+                    zoom,
+                    center_khz: centerKHz,
+                    start_khz: viewStartKHz,
+                    end_khz: viewEndKHz,
+                  })
+                );
+              }
+            }}
+            onDataCoverageChange={() => {
+              // Both waterfall and spectrum handle their own coverage
+              // transitions via pushFrame() using actual frame metadata
+            }}
+          >
+            <TuningOverlay
+              centerFreqKHz={frequency}
+              passbandLowHz={lo}
+              passbandHighHz={hi}
+              centerLocked={viewLocked}
+              animate={freqAnimating}
+              onFrequencyChange={viewLocked ? undefined : setFrequency}
+              onBandwidthChange={(newLo, newHi) => {
+                setLo(newLo);
+                setHi(newHi);
+              }}
+            />
+            <SpectrumDisplay
+              ref={spectrumRef}
+              className="w-full shrink-0"
+              style={{ height: spectrumHeight }}
+            />
+            <FrequencyScale onResizeStart={onSpectrumResizeStart} />
+            <WaterfallDisplay
+              ref={waterfallRef}
+              timelineRef={timelineRef}
+              className="min-h-0 flex-1"
+              onOverlayUpdate={(state) => tileManagerRef.current?.checkViewport(state)}
+            />
+          </BandViewport>
+        </div>
       </div>
 
       {/* Right: info panel (full height, animated) */}

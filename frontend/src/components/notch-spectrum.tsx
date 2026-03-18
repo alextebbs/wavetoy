@@ -16,7 +16,7 @@ const SAMPLE_RATE = 12000;
 const NYQUIST = SAMPLE_RATE / 2;
 const HZ_PER_BIN = SAMPLE_RATE / FFT_SIZE;
 
-const TICK_HZ = [500, 1000, 2000, 3000, 4000, 5000];
+
 
 type Props = {
   samplesRef: RefObject<Float32Array>;
@@ -95,8 +95,6 @@ export function NotchSpectrum({
   qRef.current = q;
   onCenterChangeRef.current = onCenterChange;
 
-  const LABEL_AREA = 14;
-
   const pxToHz = useCallback(
     (clientX: number) => {
       const canvas = canvasRef.current;
@@ -149,16 +147,15 @@ export function NotchSpectrum({
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       const w = rect.width;
-      const totalH = rect.height;
-      const h = totalH - LABEL_AREA;
+      const h = rect.height;
       const bw = Math.round(w * dpr);
-      const bh = Math.round(totalH * dpr);
+      const bh = Math.round(h * dpr);
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
         canvas.height = bh;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, totalH);
+      ctx.clearRect(0, 0, w, h);
 
       const samples = samplesRef.current;
       if (samples && samples.length > 0) {
@@ -235,18 +232,6 @@ export function NotchSpectrum({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Frequency tick labels
-      ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
-      ctx.font = "9px system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      for (const hz of TICK_HZ) {
-        const tx = (hz / NYQUIST) * w;
-        ctx.fillRect(tx, h, 1, 3);
-        const label = hz >= 1000 ? `${hz / 1000}k` : `${hz}`;
-        ctx.fillText(label, tx, h + 3);
-      }
-
       rafRef.current = requestAnimationFrame(draw);
     };
 
@@ -258,7 +243,7 @@ export function NotchSpectrum({
     <canvas
       ref={canvasRef}
       className={cn("w-full cursor-crosshair", className)}
-      style={{ height: height + LABEL_AREA }}
+      style={{ height }}
     />
   );
 }

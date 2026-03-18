@@ -1,3 +1,4 @@
+// Center-lock rendering & animation: see planning/CONFLICTS.md
 import { useCallback, useRef, useState } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
 import { useThemeStore } from "@/lib/theme";
@@ -9,16 +10,22 @@ interface TuningOverlayProps {
   centerFreqKHz: number;
   passbandLowHz: number;
   passbandHighHz: number;
+  centerLocked?: boolean;
+  animate?: boolean;
   onFrequencyChange?: (freqKHz: number) => void;
   onBandwidthChange?: (lo: number, hi: number) => void;
 }
 
 type DragKind = "left" | "right" | "center";
 
+const SLIDE_TRANSITION = "left 200ms ease-out, right 200ms ease-out";
+
 export function TuningOverlay({
   centerFreqKHz,
   passbandLowHz,
   passbandHighHz,
+  centerLocked,
+  animate,
   onFrequencyChange,
   onBandwidthChange,
 }: TuningOverlayProps) {
@@ -142,12 +149,21 @@ export function TuningOverlay({
   const span = endKHz - startKHz;
   if (span <= 0) return null;
 
-  const lowKHz = effectiveFreq + effectiveLo / 1000;
-  const highKHz = effectiveFreq + effectiveHi / 1000;
+  let leftPct: number;
+  let rightPct: number;
+  let centerPct: number;
 
-  const leftPct = ((lowKHz - startKHz) / span) * 100;
-  const rightPct = ((highKHz - startKHz) / span) * 100;
-  const centerPct = ((effectiveFreq - startKHz) / span) * 100;
+  if (centerLocked) {
+    centerPct = 50;
+    leftPct = 50 + ((effectiveLo / 1000) / span) * 100;
+    rightPct = 50 + ((effectiveHi / 1000) / span) * 100;
+  } else {
+    const lowKHz = effectiveFreq + effectiveLo / 1000;
+    const highKHz = effectiveFreq + effectiveHi / 1000;
+    leftPct = ((lowKHz - startKHz) / span) * 100;
+    rightPct = ((highKHz - startKHz) / span) * 100;
+    centerPct = ((effectiveFreq - startKHz) / span) * 100;
+  }
 
   const tuning = useThemeStore((s) => s.theme.tuning);
 
@@ -162,6 +178,7 @@ export function TuningOverlay({
         style={{
           left: `${Math.max(0, leftPct)}%`,
           right: `${Math.max(0, 100 - rightPct)}%`,
+          transition: animate && !isDragging ? SLIDE_TRANSITION : "none",
         }}
       >
         {/* Passband fill — drag to retune */}
@@ -215,12 +232,15 @@ export function TuningOverlay({
       {centerPct >= 0 && centerPct <= 100 && (
         <>
           <div
-            className="absolute inset-y-0 z-10 pointer-events-none transition-[width] duration-150"
+            className="absolute inset-y-0 z-10 pointer-events-none"
             style={{
               left: `${centerPct}%`,
               width: thickElement === "center" ? 3 : 1,
               transform: "translateX(-50%)",
               backgroundColor: tuning.centerLine,
+              transition: animate && !isDragging
+                ? "left 200ms ease-out, width 150ms"
+                : "width 150ms",
             }}
           />
           <div

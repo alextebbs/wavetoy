@@ -9,10 +9,15 @@ import { useBandViewStore } from "@/lib/band-view-store";
 import { colorMapToFilterTables, getColorMap } from "@/lib/display-colors";
 import { useThemeStore } from "@/lib/theme";
 import { WaterfallRenderer } from "./waterfall-renderer";
+import { WaterfallOverlayLayer, type WaterfallOverlayHandle } from "./waterfall-overlay";
+import type { WaterfallTimelineHandle } from "./waterfall-timeline";
 import type { WaterfallHandle } from "./types";
+import type { WaterfallMarker } from "./waterfall-overlay";
 
 interface WaterfallDisplayProps {
   className?: string;
+  timelineRef?: React.RefObject<WaterfallTimelineHandle | null>;
+  onOverlayUpdate?: (state: import("./waterfall-renderer").OverlayState) => void;
 }
 
 const FILTER_ID = "wf-colormap";
@@ -20,11 +25,15 @@ const FILTER_ID = "wf-colormap";
 export const WaterfallDisplay = forwardRef<
   WaterfallHandle,
   WaterfallDisplayProps
->(function WaterfallDisplay({ className }, ref) {
+>(function WaterfallDisplay({ className, timelineRef, onOverlayUpdate: onOverlayUpdateProp }, ref) {
   const colorMapName = useThemeStore((s) => s.theme.display.defaultColorMap);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WaterfallRenderer | null>(null);
+  const overlayRef = useRef<WaterfallOverlayHandle>(null);
+  const markersListRef = useRef<WaterfallMarker[]>([]);
+  const overlayUpdatePropRef = useRef(onOverlayUpdateProp);
+  overlayUpdatePropRef.current = onOverlayUpdateProp;
 
   const filterTables = useMemo(
     () => colorMapToFilterTables(getColorMap(colorMapName)),
@@ -57,6 +66,47 @@ export const WaterfallDisplay = forwardRef<
       setDataCoverage(startKHz: number, endKHz: number) {
         rendererRef.current?.setDataCoverage(startKHz, endKHz);
       },
+      insertHistoricalTile(
+        startRow: number,
+        rawBins: Uint8Array[],
+        dataStartKHz: number,
+        dataEndKHz: number,
+      ) {
+        rendererRef.current?.insertHistoricalTile(
+          startRow,
+          rawBins,
+          dataStartKHz,
+          dataEndKHz,
+        );
+      },
+      setHistoryExtent(lowestRow: number) {
+        rendererRef.current?.setHistoryExtent(lowestRow);
+      },
+      removeTilesInRange(startRow: number, endRow: number) {
+        rendererRef.current?.removeTilesInRange(startRow, endRow);
+      },
+      addMarker(marker: WaterfallMarker) {
+        overlayRef.current?.addMarker(marker);
+        const list = markersListRef.current;
+        const idx = list.findIndex((m) => m.id === marker.id);
+        if (idx >= 0) list[idx] = marker;
+        else list.push(marker);
+      },
+      removeMarker(id: string) {
+        overlayRef.current?.removeMarker(id);
+        markersListRef.current = markersListRef.current.filter(
+          (m) => m.id !== id
+        );
+      },
+      rowCount() {
+        return rendererRef.current?.rowCount ?? 0;
+      },
+      setScrollOffset(offset: number) {
+        rendererRef.current?.setScrollOffset(offset);
+      },
+      scrollToLive() {
+        rendererRef.current?.scrollToLive();
+      },
     }),
     []
   );
@@ -73,6 +123,12 @@ export const WaterfallDisplay = forwardRef<
     renderer.setView(s.startKHz, s.endKHz);
     renderer.setMaxBandwidth(s.maxBandwidthKHz || 30000);
     renderer.setDataCoverage(0, s.maxBandwidthKHz || 30000);
+
+    renderer.onOverlayUpdate = (state) => {
+      overlayRef.current?.update(state);
+      timelineRef?.current?.update(state, markersListRef.current);
+      overlayUpdatePropRef.current?.(state);
+    };
 
     renderer.startRenderLoop();
 
@@ -117,6 +173,7 @@ export const WaterfallDisplay = forwardRef<
         className="block min-h-0 flex-1 pointer-events-none"
         style={{ filter: `url(#${FILTER_ID})` }}
       />
+      <WaterfallOverlayLayer ref={overlayRef} />
     </div>
   );
 });

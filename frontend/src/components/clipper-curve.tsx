@@ -104,15 +104,6 @@ export function ClipperCurve({
     }
     ctx.stroke();
 
-    // Axis labels
-    ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
-    ctx.font = "9px system-ui, sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText("out", pad + 2, pad + 6);
-    ctx.textAlign = "right";
-    ctx.textBaseline = "bottom";
-    ctx.fillText("in", pad + plotW - 2, pad + plotH - 2);
   }, [driveDb, ceilingDb, primaryColor]);
 
   return (

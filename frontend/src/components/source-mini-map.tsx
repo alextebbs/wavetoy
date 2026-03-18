@@ -13,7 +13,7 @@ type SourceMiniMapProps = {
 };
 
 export function SourceMiniMap({ source, className }: SourceMiniMapProps) {
-  const mapColors = useThemeStore((s) => s.theme.map);
+  const mapColors = useThemeStore((s) => s.baseTheme.map);
   const hasCoords =
     source &&
     typeof source.latitude === "number" &&

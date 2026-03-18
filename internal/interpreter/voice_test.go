@@ -10,7 +10,7 @@ import (
 
 func TestVoiceInterpreter_BuffersAndChunks(t *testing.T) {
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 	defer v.Reset()
 
 	// Feed less than one chunk (5 seconds = 60000 samples at 12 kHz)
@@ -33,14 +33,17 @@ func TestVoiceInterpreter_VADSkipsQuietChunks(t *testing.T) {
 	defer func() { EnableVAD = old }()
 
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 	defer v.Reset()
 
 	var mu sync.Mutex
-	var outputs []Output
+	var textOutputs []Output
 	v.SetOutputCallback(func(o Output) {
+		if o.Text == "" {
+			return
+		}
 		mu.Lock()
-		outputs = append(outputs, o)
+		textOutputs = append(textOutputs, o)
 		mu.Unlock()
 	})
 
@@ -52,19 +55,19 @@ func TestVoiceInterpreter_VADSkipsQuietChunks(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// No output should have been produced (VAD skipped silent chunk,
+	// No text output should have been produced (VAD skipped silent chunk,
 	// and even if it reached inference, there's no whisper pool)
 	mu.Lock()
-	n := len(outputs)
+	n := len(textOutputs)
 	mu.Unlock()
 	if n != 0 {
-		t.Errorf("expected no outputs for silent audio, got %d", n)
+		t.Errorf("expected no text outputs for silent audio, got %d", n)
 	}
 }
 
 func TestVoiceInterpreter_OutputCallbackWired(t *testing.T) {
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 	defer v.Reset()
 
 	v.SetOutputCallback(func(o Output) {})
@@ -79,7 +82,7 @@ func TestVoiceInterpreter_OutputCallbackWired(t *testing.T) {
 
 func TestVoiceInterpreter_Reset(t *testing.T) {
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 
 	frame := makeSilentPCM(1000)
 	v.Feed(frame)
@@ -100,7 +103,7 @@ func TestVoiceInterpreter_Reset(t *testing.T) {
 
 func TestVADPass_DetectsTone(t *testing.T) {
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 	defer v.Reset()
 
 	// Prime with a quiet chunk first
@@ -119,7 +122,7 @@ func TestVADPass_DetectsTone(t *testing.T) {
 
 func TestVADPass_RejectsSilence(t *testing.T) {
 	cfg := Config{Type: "voice", Enabled: true}
-	v := NewVoice(cfg, 12000)
+	v := NewVoice(cfg, 12000, func(string, string, string) {})
 	defer v.Reset()
 
 	// Prime

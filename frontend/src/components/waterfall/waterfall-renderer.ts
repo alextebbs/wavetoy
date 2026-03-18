@@ -1,33 +1,50 @@
 import { buildLUT, WATERFALL_COLOR_MAPS } from "@/lib/display-colors";
-import { useThemeStore } from "@/lib/theme";
 
 export interface RendererOptions {
   minLevel?: number;
   maxLevel?: number;
-  historySize?: number;
   rowScale?: number;
+  tileHeight?: number;
 }
 
-const DEFAULT_HISTORY = 4096;
+export interface OverlayState {
+  totalRows: number;
+  scrollOffset: number;
+  rowScale: number;
+  height: number;
+  dpr: number;
+  maxScrollOffset: number;
+  isLive: boolean;
+}
 
-interface WFLayer {
+const DEFAULT_TILE_HEIGHT = 256;
+const NUM_BINS = 1024;
+const MAX_ZOOM = 14;
+
+interface WFTile {
   canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  rawBins: (Uint8Array | null)[];
+  rowCount: number;
   dataStartKHz: number;
   dataEndKHz: number;
-  rowCount: number;
-  yOffset: number;
-  rawBins: (Uint8Array | null)[];
+  startRow: number;
+  historical: boolean;
 }
 
 export class WaterfallRenderer {
   private visibleCanvas: HTMLCanvasElement;
   private visibleCtx: CanvasRenderingContext2D;
 
-  private offscreen!: HTMLCanvasElement;
-  private offCtx!: CanvasRenderingContext2D;
-  private readonly numBins = 1024;
-  private readonly historySize: number;
+  private readonly numBins = NUM_BINS;
+  private readonly tileHeight: number;
+  private readonly rowScale: number;
+
+  private tiles: WFTile[] = [];
+  private liveTile!: WFTile;
   private totalRows = 0;
+  private scrollOffset = 0;
+  private lowestStartRow = 0;
 
   private lut: Uint8Array;
   private rowImageData!: ImageData;
@@ -37,29 +54,19 @@ export class WaterfallRenderer {
 
   private minLevel: number;
   private maxLevel: number;
-
   private autoLevel = true;
   private smoothMin: number;
   private smoothMax: number;
   private samplesCount = 0;
   private readonly AUTO_ALPHA = 0.05;
-  private readonly rowScale: number;
 
   private dataStartKHz = 0;
   private dataEndKHz = 30000;
   private maxBandwidthKHz = 30000;
-
   private viewStartKHz = 0;
   private viewEndKHz = 30000;
 
-  private rawBins: (Uint8Array | null)[] = [];
-
-  private backgroundLayers: WFLayer[] = [];
-
-  private timeLabelPositions: { y: number; label: string }[] = [];
-  private timeLabelsDirty = true;
-  private rateWindowStart = 0;
-  private rateWindowRows = 0;
+  onOverlayUpdate: ((state: OverlayState) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.visibleCanvas = canvas;
@@ -67,9 +74,8 @@ export class WaterfallRenderer {
     if (!ctx) throw new Error("Failed to get 2D context");
     this.visibleCtx = ctx;
 
-    this.historySize = options.historySize ?? DEFAULT_HISTORY;
-    this.rowScale = options.rowScale ?? 3;
-    this.initOffscreen();
+    this.tileHeight = options.tileHeight ?? DEFAULT_TILE_HEIGHT;
+    this.rowScale = options.rowScale ?? 1;
 
     this.minLevel = options.minLevel ?? -110;
     this.maxLevel = options.maxLevel ?? -10;
@@ -77,27 +83,50 @@ export class WaterfallRenderer {
     this.smoothMax = this.maxLevel;
 
     this.lut = buildLUT(WATERFALL_COLOR_MAPS.muted);
+
+    const scratchCanvas = document.createElement("canvas");
+    scratchCanvas.width = this.numBins;
+    scratchCanvas.height = 1;
+    const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
+    if (!scratchCtx) throw new Error("Failed to create scratch context");
+    this.rowImageData = scratchCtx.createImageData(this.numBins, 1);
+
+    this.liveTile = this.createTile(0, this.dataStartKHz, this.dataEndKHz);
+    this.tiles.push(this.liveTile);
   }
 
-  private initOffscreen(): void {
-    this.offscreen = document.createElement("canvas");
-    this.offscreen.width = this.numBins;
-    this.offscreen.height = this.historySize;
-    const offCtx = this.offscreen.getContext("2d", { alpha: false });
-    if (!offCtx) throw new Error("Failed to get offscreen 2D context");
-    this.offCtx = offCtx;
-    offCtx.fillStyle = "#000000";
-    offCtx.fillRect(0, 0, this.numBins, this.historySize);
-    this.rowImageData = offCtx.createImageData(this.numBins, 1);
+  private createTile(
+    startRow: number,
+    dataStartKHz: number,
+    dataEndKHz: number
+  ): WFTile {
+    const canvas = document.createElement("canvas");
+    canvas.width = this.numBins;
+    canvas.height = this.tileHeight;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("Failed to create tile context");
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, this.numBins, this.tileHeight);
+    return {
+      canvas,
+      ctx,
+      rawBins: [],
+      rowCount: 0,
+      dataStartKHz,
+      dataEndKHz,
+      startRow,
+      historical: false,
+    };
   }
+
+  // --- Public API (preserved from old renderer) ---
 
   setLevels(min: number, max: number): void {
     this.autoLevel = false;
     this.minLevel = min;
     this.maxLevel = max;
-    this.reRenderOffscreen();
-    for (const layer of this.backgroundLayers) {
-      this.reRenderLayer(layer);
+    for (const tile of this.tiles) {
+      this.reRenderTile(tile);
     }
     this.needsRepaint = true;
   }
@@ -117,39 +146,16 @@ export class WaterfallRenderer {
   setDataCoverage(startKHz: number, endKHz: number): void {
     if (startKHz === this.dataStartKHz && endKHz === this.dataEndKHz) return;
 
-    // Freeze current offscreen as a trimmed background layer
-    const rows = Math.min(this.totalRows, this.historySize);
-    if (rows > 0) {
-      const trimmed = document.createElement("canvas");
-      trimmed.width = this.numBins;
-      trimmed.height = rows;
-      const tCtx = trimmed.getContext("2d", { alpha: false });
-      if (tCtx) {
-        tCtx.drawImage(
-          this.offscreen,
-          0, 0, this.numBins, rows,
-          0, 0, this.numBins, rows
-        );
-      }
-      this.backgroundLayers.push({
-        canvas: trimmed,
-        dataStartKHz: this.dataStartKHz,
-        dataEndKHz: this.dataEndKHz,
-        rowCount: rows,
-        yOffset: 0,
-        rawBins: this.rawBins.slice(0, rows),
-      });
+    if (this.liveTile.rowCount > 0) {
+      this.liveTile = this.createTile(this.totalRows, startKHz, endKHz);
+      this.tiles.push(this.liveTile);
+    } else {
+      this.liveTile.dataStartKHz = startKHz;
+      this.liveTile.dataEndKHz = endKHz;
     }
 
     this.dataStartKHz = startKHz;
     this.dataEndKHz = endKHz;
-
-    this.totalRows = 0;
-    this.rawBins = [];
-    this.rateWindowStart = 0;
-    this.rateWindowRows = 0;
-    this.timeLabelsDirty = true;
-    this.initOffscreen();
     this.needsRepaint = true;
   }
 
@@ -157,13 +163,12 @@ export class WaterfallRenderer {
     this.maxBandwidthKHz = maxKHz;
   }
 
-  private static readonly MAX_ZOOM = 14;
-
   pushFrame(bins: Uint8Array, xBin: number, zoom: number): void {
-    const totalBins = this.numBins * (1 << WaterfallRenderer.MAX_ZOOM);
-    const binScale = 1 << (WaterfallRenderer.MAX_ZOOM - zoom);
+    const totalBins = this.numBins * (1 << MAX_ZOOM);
+    const binScale = 1 << (MAX_ZOOM - zoom);
     const frameStart = (xBin / totalBins) * this.maxBandwidthKHz;
-    const frameEnd = ((xBin + this.numBins * binScale) / totalBins) * this.maxBandwidthKHz;
+    const frameEnd =
+      ((xBin + this.numBins * binScale) / totalBins) * this.maxBandwidthKHz;
 
     if (
       Math.abs(frameStart - this.dataStartKHz) > 0.5 ||
@@ -199,22 +204,109 @@ export class WaterfallRenderer {
     if (width < 1 || height < 1) return;
     this.visibleCanvas.width = width;
     this.visibleCanvas.height = height;
-    this.timeLabelsDirty = true;
     this.blitToVisible();
   }
 
   destroy(): void {
     this.stopRenderLoop();
     this.queue.length = 0;
-    this.backgroundLayers.length = 0;
-    this.timeLabelPositions.length = 0;
-    this.rateWindowStart = 0;
-    this.rateWindowRows = 0;
+    this.tiles.length = 0;
   }
 
   get currentLevels(): { min: number; max: number } {
     return { min: this.minLevel, max: this.maxLevel };
   }
+
+  // --- Phase 3 hooks ---
+
+  get rowCount(): number {
+    return this.totalRows;
+  }
+
+  get maxScrollOffset(): number {
+    return this.totalRows - this.lowestStartRow;
+  }
+
+  get isLive(): boolean {
+    return this.scrollOffset === 0;
+  }
+
+  getScrollOffset(): number {
+    return this.scrollOffset;
+  }
+
+  setScrollOffset(offset: number): void {
+    const clamped = Math.max(0, Math.min(offset, this.maxScrollOffset));
+    if (clamped === this.scrollOffset) return;
+    this.scrollOffset = clamped;
+    this.needsRepaint = true;
+  }
+
+  scrollToLive(): void {
+    this.setScrollOffset(0);
+  }
+
+  /**
+   * Inform the renderer of the full extent of historical data (including
+   * chunks not yet loaded). This ensures maxScrollOffset and the timeline
+   * scrollbar are correct even before tiles exist.
+   */
+  setHistoryExtent(lowestRow: number): void {
+    if (lowestRow < this.lowestStartRow) {
+      this.lowestStartRow = lowestRow;
+      this.needsRepaint = true;
+    }
+  }
+
+  /**
+   * Remove all tiles whose startRow falls within [startRow, endRow).
+   * Used by the tile manager to evict distant historical data.
+   */
+  removeTilesInRange(startRow: number, endRow: number): void {
+    this.tiles = this.tiles.filter((tile) => {
+      if (tile === this.liveTile) return true;
+      return tile.startRow < startRow || tile.startRow >= endRow;
+    });
+    this.needsRepaint = true;
+  }
+
+  /**
+   * Insert a pre-built historical tile into the tile list. Used by the chunk
+   * loader to inject parsed WF data from rewind chunks.
+   */
+  insertHistoricalTile(
+    startRow: number,
+    rawBinsArray: Uint8Array[],
+    dataStartKHz: number,
+    dataEndKHz: number
+  ): void {
+    const tile = this.createTile(startRow, dataStartKHz, dataEndKHz);
+    tile.historical = true;
+    for (const bins of rawBinsArray) {
+      tile.rawBins.push(new Uint8Array(bins));
+      this.colorMapLine(bins);
+      tile.ctx.putImageData(
+        this.rowImageData,
+        0,
+        this.tileHeight - 1 - tile.rowCount
+      );
+      tile.rowCount++;
+    }
+
+    if (startRow < this.lowestStartRow) {
+      this.lowestStartRow = startRow;
+    }
+
+    const insertIdx = this.tiles.findIndex((t) => t.startRow > startRow);
+    if (insertIdx === -1) {
+      this.tiles.splice(this.tiles.length - 1, 0, tile);
+    } else {
+      this.tiles.splice(insertIdx, 0, tile);
+    }
+    this.needsRepaint = true;
+  }
+
+  // --- Private methods ---
 
   private flush(): void {
     const lines = this.queue.splice(0, this.queue.length);
@@ -223,50 +315,50 @@ export class WaterfallRenderer {
     if (hasNewData) {
       for (const bins of lines) {
         if (this.autoLevel) this.updateAutoLevel(bins);
-        this.renderToOffscreen(bins);
+        this.appendToLiveTile(bins);
       }
-      for (const layer of this.backgroundLayers) {
-        layer.yOffset += lines.length;
-      }
-      this.measureRate(lines.length);
-    }
-
-    // Prune layers that have scrolled off the bottom of the visible canvas
-    const visH = this.visibleCanvas.height;
-    if (visH > 0) {
-      const before = this.backgroundLayers.length;
-      this.backgroundLayers = this.backgroundLayers.filter(
-        (l) => l.yOffset * this.rowScale < visH
-      );
-      if (this.backgroundLayers.length < before) this.needsRepaint = true;
     }
 
     if (hasNewData || this.needsRepaint) {
+      this.pruneTiles();
       this.blitToVisible();
       this.needsRepaint = false;
+      this.onOverlayUpdate?.({
+        totalRows: this.totalRows,
+        scrollOffset: this.scrollOffset,
+        rowScale: this.rowScale,
+        height: this.visibleCanvas.height,
+        dpr: window.devicePixelRatio || 1,
+        maxScrollOffset: this.maxScrollOffset,
+        isLive: this.isLive,
+      });
     }
   }
 
-  private renderToOffscreen(bins: Uint8Array): void {
-    if (this.totalRows > 0) {
-      this.offCtx.drawImage(
-        this.offscreen,
-        0, 0, this.numBins, this.historySize - 1,
-        0, 1, this.numBins, this.historySize - 1
+  private appendToLiveTile(bins: Uint8Array): void {
+    if (this.liveTile.rowCount >= this.tileHeight) {
+      this.liveTile = this.createTile(
+        this.totalRows,
+        this.dataStartKHz,
+        this.dataEndKHz
       );
+      this.tiles.push(this.liveTile);
     }
 
-    if (this.rawBins.length >= this.historySize) {
-      this.rawBins.pop();
-    }
-    this.rawBins.unshift(new Uint8Array(bins));
+    const tile = this.liveTile;
+    const canvasY = this.tileHeight - 1 - tile.rowCount;
 
+    tile.rawBins.push(new Uint8Array(bins));
     this.colorMapLine(bins);
-    this.offCtx.putImageData(this.rowImageData, 0, 0);
+    tile.ctx.putImageData(this.rowImageData, 0, canvasY);
+    tile.rowCount++;
     this.totalRows++;
+    if (this.scrollOffset > 0) {
+      this.scrollOffset++;
+    }
   }
 
-  private colorMapLine(bins: Uint8Array): void {
+  private colorMapLine(bins: Uint8Array, invert = false): void {
     const pixels = this.rowImageData.data;
     const minDb = this.minLevel;
     const range = this.maxLevel - minDb;
@@ -276,7 +368,8 @@ export class WaterfallRenderer {
 
     for (let x = 0; x < numBins; x++) {
       const dBm = bins[x] - 255;
-      const idx = Math.max(0, Math.min(255, ((dBm - minDb) * invRange) | 0));
+      const raw = Math.max(0, Math.min(255, ((dBm - minDb) * invRange) | 0));
+      const idx = invert ? 255 - raw : raw;
       const base = idx << 2;
       const px = x << 2;
       pixels[px] = lut[base];
@@ -307,170 +400,95 @@ export class WaterfallRenderer {
     this.visibleCtx.fillStyle = "#000000";
     this.visibleCtx.fillRect(0, 0, width, height);
 
-    // Draw background layers first (oldest → newest), then foreground
-    for (const layer of this.backgroundLayers) {
-      this.blitLayer(
-        layer.canvas,
-        layer.dataStartKHz,
-        layer.dataEndKHz,
-        layer.rowCount,
-        layer.yOffset,
-        width,
-        height,
-        viewSpan
-      );
+    const visibleRowsTop = this.scrollOffset;
+    const visibleRowsBottom =
+      this.scrollOffset + Math.ceil(height / this.rowScale);
+
+    for (const tile of this.tiles) {
+      if (tile.rowCount === 0) continue;
+
+      // Tile occupies global rows [startRow, startRow + rowCount - 1]
+      // "Rows from live" for the newest row = totalRows - 1 - (startRow + rowCount - 1)
+      //                                    = totalRows - startRow - rowCount
+      const tileTopRowsFromLive = this.totalRows - tile.startRow - tile.rowCount;
+      const tileBotRowsFromLive = this.totalRows - tile.startRow - 1;
+
+      if (tileTopRowsFromLive > visibleRowsBottom) continue;
+      if (tileBotRowsFromLive < visibleRowsTop) continue;
+
+      this.blitTile(tile, width, height, viewSpan);
     }
 
-    // Draw current (foreground) layer
-    const fgRows = Math.min(this.totalRows, this.historySize);
-    if (fgRows > 0) {
-      this.blitLayer(
-        this.offscreen,
-        this.dataStartKHz,
-        this.dataEndKHz,
-        fgRows,
-        0,
-        width,
-        height,
-        viewSpan
-      );
-    }
-
-    this.drawTimeLabels();
   }
 
-  private blitLayer(
-    canvas: HTMLCanvasElement,
-    layerStartKHz: number,
-    layerEndKHz: number,
-    rowCount: number,
-    yOffset: number,
+  private blitTile(
+    tile: WFTile,
     visibleWidth: number,
     visibleHeight: number,
     viewSpan: number
   ): void {
-    const layerSpan = layerEndKHz - layerStartKHz;
-    if (layerSpan <= 0 || rowCount <= 0) return;
+    const layerSpan = tile.dataEndKHz - tile.dataStartKHz;
+    if (layerSpan <= 0 || tile.rowCount <= 0) return;
 
-    const scaledOffset = yOffset * this.rowScale;
-    if (scaledOffset >= visibleHeight) return;
-
-    const overlapStart = Math.max(layerStartKHz, this.viewStartKHz);
-    const overlapEnd = Math.min(layerEndKHz, this.viewEndKHz);
+    const overlapStart = Math.max(tile.dataStartKHz, this.viewStartKHz);
+    const overlapEnd = Math.min(tile.dataEndKHz, this.viewEndKHz);
     if (overlapStart >= overlapEnd) return;
 
-    const srcX = ((overlapStart - layerStartKHz) / layerSpan) * this.numBins;
+    const srcX = ((overlapStart - tile.dataStartKHz) / layerSpan) * this.numBins;
     const srcW = ((overlapEnd - overlapStart) / layerSpan) * this.numBins;
-
     const dstX = ((overlapStart - this.viewStartKHz) / viewSpan) * visibleWidth;
     const dstW = ((overlapEnd - overlapStart) / viewSpan) * visibleWidth;
+    if (srcW < 0.5 || dstW < 0.5) return;
 
-    const srcH = Math.min(rowCount, Math.ceil((visibleHeight - scaledOffset) / this.rowScale));
+    const scaledOffset =
+      (this.totalRows - tile.startRow - tile.rowCount - this.scrollOffset) *
+      this.rowScale;
+    if (scaledOffset >= visibleHeight) return;
+
+    const srcY = this.tileHeight - tile.rowCount;
+    const srcH = Math.min(
+      tile.rowCount,
+      Math.ceil((visibleHeight - scaledOffset) / this.rowScale)
+    );
+    if (srcH <= 0) return;
     const dstH = srcH * this.rowScale;
-    if (srcH <= 0 || srcW < 0.5 || dstW < 0.5) return;
 
     this.visibleCtx.imageSmoothingEnabled = srcW < dstW;
     this.visibleCtx.drawImage(
-      canvas,
-      srcX, 0, srcW, srcH,
+      tile.canvas,
+      srcX, srcY, srcW, srcH,
       dstX, scaledOffset, dstW, dstH
     );
   }
 
-  private reRenderOffscreen(): void {
-    const count = Math.min(this.rawBins.length, this.historySize);
-    for (let i = 0; i < count; i++) {
-      const bins = this.rawBins[i];
+  private reRenderTile(tile: WFTile): void {
+    tile.ctx.fillStyle = "#000000";
+    tile.ctx.fillRect(0, 0, this.numBins, this.tileHeight);
+    for (let i = 0; i < tile.rowCount; i++) {
+      const bins = tile.rawBins[i];
       if (!bins) continue;
-      this.colorMapLine(bins);
-      this.offCtx.putImageData(this.rowImageData, 0, i);
+      this.colorMapLine(bins, tile.historical);
+      tile.ctx.putImageData(
+        this.rowImageData,
+        0,
+        this.tileHeight - 1 - i
+      );
     }
   }
 
-  private reRenderLayer(layer: WFLayer): void {
-    const layerCtx = layer.canvas.getContext("2d", { alpha: false });
-    if (!layerCtx) return;
-    const count = Math.min(layer.rawBins.length, layer.rowCount);
-    for (let i = 0; i < count; i++) {
-      const bins = layer.rawBins[i];
-      if (!bins) continue;
-      this.colorMapLine(bins);
-      layerCtx.putImageData(this.rowImageData, 0, i);
-    }
-  }
-
-  private measureRate(newRows: number): void {
-    const now = performance.now();
-    if (this.rateWindowStart === 0) {
-      this.rateWindowStart = now;
-      this.rateWindowRows = 0;
-      return;
-    }
-    this.rateWindowRows += newRows;
-    const elapsed = (now - this.rateWindowStart) / 1000;
-    if (elapsed >= 2 && this.timeLabelsDirty) {
-      this.rebuildTimeLabels(this.rateWindowRows / elapsed);
-    }
-  }
-
-  private rebuildTimeLabels(rowsPerSecond: number): void {
+  private pruneTiles(): void {
     const { height } = this.visibleCanvas;
-    if (height === 0 || rowsPerSecond <= 0) return;
+    if (height === 0) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const pxPerSec = rowsPerSecond * this.rowScale;
-    const fontSize = Math.round(9 * dpr);
-    const minGap = 30 * dpr;
-    const intervals = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
-
-    const positions: { y: number; label: string }[] = [];
-    let lastY = -Infinity;
-
-    for (const secs of intervals) {
-      const y = Math.round(secs * pxPerSec);
-      if (y < fontSize || y > height - fontSize) continue;
-      if (y - lastY < minGap) continue;
-      positions.push({ y, label: secs >= 60 ? `${Math.round(secs / 60)}m` : `${secs}s` });
-      lastY = y;
-    }
-
-    this.timeLabelPositions = positions;
-    this.timeLabelsDirty = false;
-  }
-
-  private drawTimeLabels(): void {
-    if (this.timeLabelPositions.length === 0) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const ctx = this.visibleCtx;
-    const fontSize = Math.round(9 * dpr);
-    const tickLen = 5 * dpr;
-    const labelX = tickLen + 3 * dpr;
-
-    ctx.save();
-    ctx.font = `${fontSize}px system-ui, sans-serif`;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-
-    const d = useThemeStore.getState().theme.display;
-    const tickColor = d.freqScaleTickMinor;
-    const labelColor = d.freqScaleTickMajor;
-
-    for (const { y, label } of this.timeLabelPositions) {
-      ctx.strokeStyle = tickColor;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, y + 0.5);
-      ctx.lineTo(tickLen, y + 0.5);
-      ctx.stroke();
-
-      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-      ctx.fillText(label, labelX + 1, y + 1);
-      ctx.fillStyle = labelColor;
-      ctx.fillText(label, labelX, y);
-    }
-
-    ctx.restore();
+    this.tiles = this.tiles.filter((tile) => {
+      if (tile === this.liveTile) return true;
+      // Historical tiles are managed by ChunkTileManager; don't auto-prune.
+      if (tile.historical) return true;
+      const displayTopY =
+        (this.totalRows - tile.startRow - tile.rowCount - this.scrollOffset) *
+        this.rowScale;
+      return displayTopY < height;
+    });
   }
 
   private updateAutoLevel(bins: Uint8Array): void {
@@ -498,4 +516,5 @@ export class WaterfallRenderer {
     this.minLevel = this.smoothMin;
     this.maxLevel = this.smoothMax;
   }
+
 }
