@@ -320,6 +320,9 @@ export function StreamPlayerPage() {
     firTail: new Float32Array(0),
   });
   const waveformSamplesRef = useRef<Float32Array>(new Float32Array(0));
+  const tabHiddenAtRef = useRef(0);
+  const droppingStaleRef = useRef(false);
+  const lastRemoteUpdateAtRef = useRef(0);
 
   const appendLogEntry = useCallback((entry: Omit<LogEntry, "id">) => {
     setLogLines((prev) => [
@@ -371,6 +374,24 @@ export function StreamPlayerPage() {
   }, []);
 
 
+  useEffect(() => {
+    const onVisChange = () => {
+      if (document.hidden) {
+        tabHiddenAtRef.current = performance.now();
+      } else if (tabHiddenAtRef.current > 0) {
+        const away = performance.now() - tabHiddenAtRef.current;
+        if (away > 2000) {
+          droppingStaleRef.current = true;
+          workletRef.current?.port.postMessage("flush");
+          setTimeout(() => { droppingStaleRef.current = false; }, 300);
+        }
+        tabHiddenAtRef.current = 0;
+      }
+    };
+    document.addEventListener("visibilitychange", onVisChange);
+    return () => document.removeEventListener("visibilitychange", onVisChange);
+  }, []);
+
   const ensureAudio = useCallback(async () => {
     if (!audioCtxRef.current) {
       streamLog.debug("audio.create", "creating AudioContext");
@@ -378,7 +399,7 @@ export function StreamPlayerPage() {
       streamLog.debug("audio.create", `initial state=${ctx.state}`);
       const workletCode =
         "class SdrAudioProcessor extends AudioWorkletProcessor {\n" +
-        "  constructor() { super(); this.bufferSize = 48000 * 3; this.buf = new Float32Array(this.bufferSize); this.w = 0; this.r = 0; this.started = false; this.threshold = 8192; this.lowWatermark = 768; this.fadeIn = 0; this.port.onmessage = (ev)=>{ const a=ev.data; for(let i=0;i<a.length;i++){ this.buf[this.w]=a[i]; this.w=(this.w+1)%this.bufferSize; if(this.w===this.r){ this.r=(this.r+1)%this.bufferSize; } } }; }\n" +
+        "  constructor() { super(); this.bufferSize = 48000 * 3; this.buf = new Float32Array(this.bufferSize); this.w = 0; this.r = 0; this.started = false; this.threshold = 8192; this.lowWatermark = 768; this.fadeIn = 0; this.port.onmessage = (ev)=>{ if(ev.data==='flush'){ this.w=0; this.r=0; this.started=false; return; } const a=ev.data; for(let i=0;i<a.length;i++){ this.buf[this.w]=a[i]; this.w=(this.w+1)%this.bufferSize; if(this.w===this.r){ this.r=(this.r+1)%this.bufferSize; } } }; }\n" +
         "  process(_, outputs){ const out=outputs[0][0]; let rem=this.w-this.r; if(rem<0) rem+=this.bufferSize; if(this.started && rem < this.lowWatermark) this.started=false; if(!this.started && rem>=this.threshold) { this.started=true; this.fadeIn=128; } if(!this.started){ for(let i=0;i<out.length;i++) out[i]=0; return true; } for(let i=0;i<out.length;i++){ if(this.r===this.w){ out[i]=0; continue; } let s=this.buf[this.r]; this.r=(this.r+1)%this.bufferSize; if(this.fadeIn>0){ const k=(128-this.fadeIn)/128; s*=k; this.fadeIn--; } out[i]=s; } return true; }\n" +
         "}\nregisterProcessor('sdr-audio-processor', SdrAudioProcessor);\n";
       const blob = new Blob([workletCode], { type: "text/javascript" });
@@ -641,6 +662,7 @@ export function StreamPlayerPage() {
                 s.source_id, s.frequency_khz, s.mode,
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
+              lastRemoteUpdateAtRef.current = performance.now();
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
@@ -656,6 +678,7 @@ export function StreamPlayerPage() {
               s.source_id, s.frequency_khz, s.mode,
               s.bandwidth_low_hz, s.bandwidth_high_hz,
             );
+            lastRemoteUpdateAtRef.current = performance.now();
             setStream(s);
             setSourceId(s.source_id);
             setFrequency(s.frequency_khz);
@@ -684,6 +707,7 @@ export function StreamPlayerPage() {
                 s.source_id, s.frequency_khz, s.mode,
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
+              lastRemoteUpdateAtRef.current = performance.now();
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
@@ -761,6 +785,7 @@ export function StreamPlayerPage() {
       if (packet.length < 2) return;
 
       if (packet[0] === WATERFALL_TYPE && packet.length > 9) {
+        if (droppingStaleRef.current) return;
         const dv = new DataView(ev.data, 1, 8);
         const xBin = dv.getUint32(0, true);
         const zoom = dv.getUint16(4, true);
@@ -771,6 +796,7 @@ export function StreamPlayerPage() {
       }
 
       if (packet[0] !== AUDIO_TYPE || packet.length < 3) return;
+      if (droppingStaleRef.current) return;
       const pcmBytes = packet.subarray(1);
       const now = performance.now();
       if (lastPacketAtRef.current > 0) {
@@ -1028,8 +1054,14 @@ export function StreamPlayerPage() {
   );
 
   useEffect(() => {
+    if (performance.now() - lastRemoteUpdateAtRef.current < 150) return;
     throttledAutoPatch(sourceId, frequency, mode, lo, hi);
   }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch]);
+
+  // Sync overflow permission with view lock state
+  useEffect(() => {
+    useBandViewStore.getState().setAllowOverflow(viewLocked);
+  }, [viewLocked]);
 
   // When locked, re-center view on frequency whenever it changes
   useEffect(() => {

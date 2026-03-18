@@ -142,6 +142,74 @@ const defaultTheme: SDRTheme = {
   statusWarning: "#2dd4bf",
 };
 
+const defaultV2: SDRTheme = {
+  name: "default-v2",
+  label: "Default v2",
+  ui: {
+    background: "0 0% 0%",
+    foreground: "166 20% 82%",
+    card: "200 35% 7%",
+    cardForeground: "166 20% 82%",
+    popover: "200 35% 7%",
+    popoverForeground: "166 20% 82%",
+    primary: "45 95% 55%",
+    primaryForeground: "220 20% 8%",
+    secondary: "175 25% 13%",
+    secondaryForeground: "166 20% 82%",
+    muted: "175 20% 12%",
+    mutedForeground: "170 15% 48%",
+    accent: "50 30% 14%",
+    accentForeground: "45 60% 85%",
+    destructive: "0 55% 42%",
+    destructiveForeground: "0 0% 95%",
+    border: "175 25% 15%",
+    input: "175 25% 15%",
+    ring: "45 95% 55%",
+  },
+  display: {
+    defaultColorMap: "default",
+    waterfallBg: "#020408",
+    spectrumBg: "#060a12",
+    spectrumFillOpacity: 0.8,
+    spectrumGradientStops: [
+      [0, "#ffe880"],
+      [0.12, "#c8f040"],
+      [0.3, "#40e850"],
+      [0.5, "#14b880"],
+      [0.75, "#0a6e6e"],
+      [1, "#041820"],
+    ],
+    spectrumGridLine: "rgba(60, 185, 160, 0.1)",
+    spectrumGridLabel: "rgba(60, 185, 160, 0.45)",
+    spectrumPeakTrace: "#f5c040",
+    spectrumPassbandFill: "rgba(245, 192, 64, 0.10)",
+    freqScaleBg: "#060a12",
+    freqScaleTickMajor: "#3cb8a0",
+    freqScaleTickMinor: "#1a4a42",
+    freqScaleLabel: "#3cb8a0",
+    freqScaleUnitLabel: "#1a4a42",
+  },
+  map: {
+    background: "#060a12",
+    countryLines: "#1a4a42",
+    countryLineOpacity: 0.8,
+    markerColor: "#f5c040",
+    markerGlow: "rgba(245,192,64,0.5)",
+    selectedRing: "#fde68a",
+    crosshair: "rgba(253,230,138,0.8)",
+    snrFallback: "#f5c040",
+    snrHueRange: [0, 160],
+    snrSaturation: 85,
+    snrLightness: 55,
+  },
+  tuning: {
+    passbandFill: "rgba(245,192,64,0.10)",
+    passbandBorder: "rgba(245,192,64,0.45)",
+    centerLine: "rgba(251,146,60,0.90)",
+  },
+  statusWarning: "#f5c040",
+};
+
 const alert: SDRTheme = {
   name: "alert",
   label: "Alert",
@@ -275,7 +343,10 @@ const muted: SDRTheme = {
   statusWarning: "#888888",
 };
 
-export const THEMES: Record<string, SDRTheme> = { default: defaultTheme };
+export const THEMES: Record<string, SDRTheme> = {
+  default: defaultTheme,
+  "default-v2": defaultV2,
+};
 export const MUTED_THEME = muted;
 
 // ─── Store ───────────────────────────────────────────────────────────────────
