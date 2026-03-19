@@ -38,9 +38,10 @@ import {
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
 import { useSourcePicker } from "@/hooks/use-source-picker";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RewindIcon, RotateCwIcon, ScissorsIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
+import { AudioWaveformIcon, ClockIcon, Crosshair, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RewindIcon, RotateCwIcon, ScissorsIcon, SettingsIcon, Volume2Icon, VolumeOffIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
+import { StreamSettingsPanel } from "@/components/stream-settings-panel";
 import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
@@ -48,7 +49,7 @@ import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
 import { streamLog, PerfBucket, ResourceMonitor } from "@/lib/stream-logger";
 import { useTuningStore } from "@/lib/tuning-store";
 import { useScrollBackStore } from "@/lib/scroll-back-store";
-import { RingBufferSource } from "@/lib/chunk-loader";
+import { RemoteChunkSource, type ChunkSource } from "@/lib/chunk-loader";
 import { HistoricalAudioPlayer } from "@/lib/historical-audio-player";
 import { ScrubController } from "@/lib/scrub-controller";
 import { parseWFChunk } from "@/lib/chunk-parser";
@@ -133,11 +134,11 @@ function formatDuration(ms: number): string {
 
 export function StreamPlayerPage() {
   const { streamId } = useParams({ from: "/streams/$streamId" });
+  const { scrollback: scrollbackParam } = useSearch({ from: "/streams/$streamId" });
   const navigate = useNavigate();
   const [stream, setStream] = useState<Stream | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [status, setStatus] = useState("idle");
-  const [deleting, setDeleting] = useState(false);
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [captureFilename, setCaptureFilename] = useState("capture.wav");
   const [logLines, setLogLines] = useState<LogEntry[]>([]);
@@ -169,11 +170,12 @@ export function StreamPlayerPage() {
   const refreshRecentSourcesRef = useRef(refreshRecentSources);
   refreshRecentSourcesRef.current = refreshRecentSources;
 
-  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(!!scrollbackParam);
+  const scrollbackTargetRef = useRef<number | null>(scrollbackParam ?? null);
+  scrollbackTargetRef.current = scrollbackParam ?? null;
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
-  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
-  const [editName, setEditName] = useState("");
+  const [sidebarTab, setSidebarTab] = useState("source");
   const setMaxBandwidth = useBandViewStore((s) => s.setMaxBandwidth);
   const setView = useBandViewStore((s) => s.setView);
   const setViewRemote = useBandViewStore((s) => s.setViewRemote);
@@ -260,18 +262,21 @@ export function StreamPlayerPage() {
     passbandHi: number;
   } | null>(null);
   const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
+  const streamLocked = useScrollBackStore((s) => s.streamLocked);
+  const shouldMuteUI = isInScrollBack || streamLocked;
   const isSyncingScrollRef = useRef(false);
   const isDraggingTimelineRef = useRef(false);
   const tailScrollRafRef = useRef(0);
   const tailScrollOffsetRef = useRef(0);
   const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const histWFCacheRef = useRef<{
-    startedAt: string;
+    startedAt: number;
     frames: import("@/lib/chunk-parser").WFChunkFrame[];
     loading: boolean;
   } | null>(null);
-  const histWFSourceRef = useRef<RingBufferSource | null>(null);
+  const histWFSourceRef = useRef<ChunkSource | null>(null);
   const lastScrollBackSpectrumRowRef = useRef<number | null>(null);
+  const lastScrollbackChunkRef = useRef<number | null>(null);
   const streamRateRef = useRef(12000);
   const audioMetricsRef = useRef<AudioMetrics>({
     startedAt: performance.now(),
@@ -321,6 +326,10 @@ export function StreamPlayerPage() {
     document.title = name ? `${name} — wavetoy` : "wavetoy";
     return () => { document.title = "wavetoy"; };
   }, [stream?.name]);
+
+  useEffect(() => {
+    useScrollBackStore.getState().setStreamLocked(!!stream?.locked);
+  }, [stream?.locked]);
 
   useEffect(() => {
     const resumeOnGesture = () => {
@@ -440,7 +449,6 @@ export function StreamPlayerPage() {
     isPlayingHistoryRef.current = false;
     useScrollBackStore.getState().set(false);
     histWFCacheRef.current = null;
-    histWFSourceRef.current = null;
     waterfallRef.current?.setPlaybackHead(null);
     setPlaybackTuning(null);
     if (histWaveformRafRef.current) {
@@ -473,7 +481,7 @@ export function StreamPlayerPage() {
     const scrubGain = scrubGainRef.current;
     if (!ctx || !scrubGain) return null;
 
-    const source = new RingBufferSource(streamId);
+    const source = new RemoteChunkSource(streamId);
     const ctrl = new ScrubController(ctx, scrubGain, source);
 
     ctrl.onSettled = (targetRow) => {
@@ -554,13 +562,13 @@ export function StreamPlayerPage() {
     const targetRow = totalRows - scrollOffset - lookahead;
 
     if (!histPlayerRef.current) {
-      const source = new RingBufferSource(streamId);
+      const source = new RemoteChunkSource(streamId);
       histPlayerRef.current = new HistoricalAudioPlayer(ctx, histGain, source);
     }
 
     const player = histPlayerRef.current;
 
-    const wfSource = new RingBufferSource(streamId);
+    const wfSource = histWFSourceRef.current ?? new RemoteChunkSource(streamId);
     histWFSourceRef.current = wfSource;
     histWFCacheRef.current = null;
 
@@ -768,19 +776,37 @@ export function StreamPlayerPage() {
 
               const wf = waterfallRef.current;
               wf.resetLiveFrameCount();
-              const source = new RingBufferSource(streamId);
+              const source = new RemoteChunkSource(streamId);
+              histWFSourceRef.current = source;
               wf.setChunkSource(source);
 
-              source.fetchRewind().then((rewind) => {
+              const now = Math.floor(Date.now() / 1000);
+              const dayAgo = now - 86400;
+              source.fetchManifest(dayAgo, now).then(async (manifest) => {
                 if (ac.signal.aborted) return;
-                wf.loadManifest(rewind.chunks, {
-                  sampleRate: rewind.sample_rate,
-                  chunkDurationS: rewind.chunk_duration_s,
-                }).then(() => {}).catch((err) => {
+                try {
+                  await wf.loadManifest(manifest.chunks, {
+                    sampleRate: manifest.sample_rate,
+                    chunkDurationS: manifest.chunk_duration_s,
+                  });
+                  const target = scrollbackTargetRef.current;
+                  if (target && target > 0) {
+                    const m = wf.chunkManifest();
+                    const chunk = m.find((c) => c.startedAt === target);
+                    if (chunk) {
+                      const lookahead = Math.round(wf.visibleRows() * 0.1);
+                      const offset = Math.max(0, wf.rowCount() - chunk.startRow - lookahead);
+                      wf.setScrollOffset(offset);
+                      useScrollBackStore.getState().set(true);
+                      pushSpectrumForRow(wf.rowCount() - offset - lookahead);
+                      lastScrollbackChunkRef.current = target;
+                    }
+                  }
+                } catch (err) {
                   console.error("[wf] loadManifest error:", err);
-                });
+                }
               }).catch((err) => {
-                console.error("[wf] fetchRewind error:", err);
+                console.error("[wf] fetchManifest error:", err);
               });
             }
           } else if (msg.type === "stream_updated" && msg.stream) {
@@ -1049,7 +1075,11 @@ export function StreamPlayerPage() {
       name?: string;
       filters?: FilterConfig;
       interpreter?: InterpreterConfig;
-      auto_fallback?: boolean;
+      auto_probe?: boolean;
+      quality_fallback?: boolean;
+      offload_chunks?: boolean;
+      keep_alive?: boolean;
+      locked?: boolean;
       view_locked?: boolean;
     },
   ) => {
@@ -1073,16 +1103,9 @@ export function StreamPlayerPage() {
 
 
   const onDeleteStream = async () => {
-    setDeleting(true);
-    try {
-      await deleteStream(streamId);
-      wsRef.current?.close();
-      await navigate({ to: "/" });
-    } catch {
-      // delete failed
-    } finally {
-      setDeleting(false);
-    }
+    await deleteStream(streamId);
+    wsRef.current?.close();
+    await navigate({ to: "/" });
   };
 
   const captureWav = useCallback(async (): Promise<ArrayBuffer> => {
@@ -1140,10 +1163,10 @@ export function StreamPlayerPage() {
   );
 
   useEffect(() => {
-    if (isInScrollBack) return;
+    if (!sourceId || shouldMuteUI) return;
     if (useTuningStore.getState().isRemoteRecent()) return;
     throttledAutoPatch(sourceId, frequency, mode, lo, hi);
-  }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch, isInScrollBack]);
+  }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch, shouldMuteUI]);
 
   useEffect(() => {
     spectrumRef.current?.setPassband(frequency, lo, hi);
@@ -1178,9 +1201,13 @@ export function StreamPlayerPage() {
     spectrumRef.current?.setHistoricalMode(isInScrollBack || isPlayingHistory);
   }, [isInScrollBack, isPlayingHistory]);
 
+  useEffect(() => {
+    if (timelineOpen) waterfallRef.current?.requestRepaint();
+  }, [timelineOpen]);
+
   // When locked, panning/zooming should retune to center
   useEffect(() => {
-    if (!viewLocked || isInScrollBack) return;
+    if (!viewLocked || shouldMuteUI) return;
     return useBandViewStore.subscribe((state) => {
       if (state.viewSource !== "local") return;
       const center = (state.startKHz + state.endKHz) / 2;
@@ -1189,7 +1216,7 @@ export function StreamPlayerPage() {
         useTuningStore.getState().setFrequency(rounded);
       }
     });
-  }, [viewLocked, frequency, isInScrollBack]);
+  }, [viewLocked, frequency, shouldMuteUI]);
 
   useEffect(() => {
     void getStream(streamId)
@@ -1270,9 +1297,6 @@ export function StreamPlayerPage() {
               wsRef={wsRef}
               audioCtxRef={audioCtxRef}
               gainNodeRef={gainNodeRef}
-              onToggleFallback={(enabled) => {
-                sendPatch({ auto_fallback: enabled });
-              }}
             />
           </div>
           {recentSources.length > 0 && (
@@ -1313,7 +1337,7 @@ export function StreamPlayerPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className={`h-6 gap-1 px-2 text-[10px] transition-opacity duration-200 ${isInScrollBack ? "opacity-40 pointer-events-none" : ""}`}
+                          className={`h-6 gap-1 px-2 text-[10px] transition-opacity duration-200 ${shouldMuteUI ? "opacity-40 pointer-events-none" : ""}`}
                           onClick={() => sendPatch({ source_id: src.id })}
                         >
                           <RotateCwIcon className="size-3" />
@@ -1365,9 +1389,15 @@ export function StreamPlayerPage() {
       id: "logs",
       icon: <ScrollTextIcon className="size-4" />,
       label: "Logs",
-      content: <LogsPanel lines={logLines} streamId={streamId} />,
+      content: <LogsPanel lines={logLines} streamId={streamId} stream={stream} onPatch={sendPatch} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress, isInScrollBack]);
+    {
+      id: "settings",
+      icon: <SettingsIcon className="size-4" />,
+      label: "Settings",
+      content: <StreamSettingsPanel stream={stream} onPatch={sendPatch} onDelete={onDeleteStream} />,
+    },
+  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress, shouldMuteUI]);
 
   if (notFound) return <ErrorPage code="404" />;
 
@@ -1392,7 +1422,7 @@ export function StreamPlayerPage() {
               </span>
             </Tooltip>
           )}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 pr-2">
             {peers.map((p, i) => (
               <Tooltip key={p.session_id} content={`user ${p.session_id.slice(0, 8)} connected`}>
                 <span
@@ -1402,17 +1432,6 @@ export function StreamPlayerPage() {
               </Tooltip>
             ))}
           </div>
-          <Tooltip content="Stream settings">
-            <button
-              className="font-xanh-mono min-w-0 truncate text-base transition-colors hover:text-muted-foreground"
-              onClick={() => {
-                setEditName(stream?.name ?? "");
-                setStreamSettingsOpen(true);
-              }}
-            >
-              {stream?.name || "Untitled stream"}
-            </button>
-          </Tooltip>
           <Tooltip content={muted ? "Unmute" : "Mute"}>
             <Button
               variant="ghost"
@@ -1426,6 +1445,15 @@ export function StreamPlayerPage() {
               }}
             >
               {muted ? <VolumeOffIcon className="size-4" /> : <Volume2Icon className="size-4" />}
+            </Button>
+          </Tooltip>
+          <Tooltip content={stream?.locked ? "Unlock settings" : "Lock settings"}>
+            <Button
+              variant={stream?.locked ? "outline" : "ghost"}
+              size="icon"
+              onClick={() => stream && sendPatch({ locked: !stream.locked })}
+            >
+              {stream?.locked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
             </Button>
           </Tooltip>
           <Tooltip content={sidebarOpen ? "Hide info panel" : "Show info panel"}>
@@ -1445,7 +1473,7 @@ export function StreamPlayerPage() {
             value={isPlayingHistory && playbackTuning ? playbackTuning.freqKHz : frequency}
             optimistic={!isPlayingHistory && frequency !== confirmedFrequency}
             onSubmit={(kHz) => useTuningStore.getState().setFrequency(kHz)}
-            dimmed={isInScrollBack && !isPlayingHistory}
+            dimmed={shouldMuteUI && !isPlayingHistory}
             playbackMode={isPlayingHistory}
           />
           <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
@@ -1453,7 +1481,7 @@ export function StreamPlayerPage() {
               variant={viewLocked ? "outline" : "ghost"}
               size="icon"
               className="size-8"
-              style={isInScrollBack ? { opacity: 0.35, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" }}
+              style={shouldMuteUI ? { opacity: 0.35, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" }}
               onClick={() => {
                 const next = !viewLocked;
                 sendPatch({ view_locked: next });
@@ -1465,7 +1493,7 @@ export function StreamPlayerPage() {
                 }
               }}
             >
-              {viewLocked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
+              <Crosshair className="size-4" />
             </Button>
           </Tooltip>
         </div>
@@ -1475,7 +1503,7 @@ export function StreamPlayerPage() {
           <Tooltip content="Demodulation mode">
             <div
               className="flex h-8 overflow-hidden rounded-md border border-border"
-              style={isInScrollBack ? { pointerEvents: "none" } : undefined}
+              style={shouldMuteUI ? { pointerEvents: "none" } : undefined}
             >
               {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
                 <button
@@ -1492,7 +1520,7 @@ export function StreamPlayerPage() {
                       : "bg-transparent text-muted-foreground hover:text-foreground"
                   }`}
                   style={{
-                    ...(isInScrollBack && !isPlayingHistory && mode === m ? { opacity: 0.35 } : {}),
+                    ...(shouldMuteUI && !isPlayingHistory && mode === m ? { opacity: 0.35 } : {}),
                     ...(isPlayingHistory && mode === m ? { backgroundColor: d.displayStatusPlayback, color: "black" } : {}),
                     transition: "opacity 0.2s ease, background-color 0.2s ease, color 0.2s ease",
                   }}
@@ -1513,9 +1541,9 @@ export function StreamPlayerPage() {
                   value={isPlayingHistory && playbackTuning ? playbackTuning.passbandLo : lo}
                   onChange={(e) => useTuningStore.getState().setLo(Number(e.target.value))}
                   className="h-full w-full border-0 text-xs shadow-none focus-visible:ring-0"
-                  disabled={isInScrollBack}
+                  disabled={shouldMuteUI}
                   style={{
-                    ...(isInScrollBack && !isPlayingHistory ? { opacity: 0.35 } : {}),
+                    ...(shouldMuteUI && !isPlayingHistory ? { opacity: 0.35 } : {}),
                     ...(isPlayingHistory ? { color: d.displayStatusPlaybackHead } : {}),
                     transition: "opacity 0.2s ease, color 0.2s ease",
                   }}
@@ -1531,9 +1559,9 @@ export function StreamPlayerPage() {
                   value={isPlayingHistory && playbackTuning ? playbackTuning.passbandHi : hi}
                   onChange={(e) => useTuningStore.getState().setHi(Number(e.target.value))}
                   className="h-full w-full border-0 text-xs shadow-none focus-visible:ring-0"
-                  disabled={isInScrollBack}
+                  disabled={shouldMuteUI}
                   style={{
-                    ...(isInScrollBack && !isPlayingHistory ? { opacity: 0.35 } : {}),
+                    ...(shouldMuteUI && !isPlayingHistory ? { opacity: 0.35 } : {}),
                     ...(isPlayingHistory ? { color: d.displayStatusPlaybackHead } : {}),
                     transition: "opacity 0.2s ease, color 0.2s ease",
                   }}
@@ -1576,20 +1604,24 @@ export function StreamPlayerPage() {
               stopHistoricalPlayback();
               waterfallRef.current?.scrollToLive();
             }
-            histWFSourceRef.current = null;
             histWFCacheRef.current = null;
             lastScrollBackSpectrumRowRef.current = null;
+            lastScrollbackChunkRef.current = null;
+            navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({}), replace: true });
             return;
           }
           if (offset > 0 && !isPlayingHistory && !isSyncingScrollRef.current) {
-            if (!histWFSourceRef.current) {
-              histWFSourceRef.current = new RingBufferSource(streamId);
-            }
             if (wf) {
               const lookahead = Math.round(wf.visibleRows() * 0.1);
               const headRow = wf.rowCount() - offset - lookahead;
               lastScrollBackSpectrumRowRef.current = headRow;
               pushSpectrumForRow(headRow);
+              const m = wf.chunkManifest();
+              const chunk = m.find((c) => c.frameCount > 0 && headRow >= c.startRow && headRow < c.startRow + c.frameCount);
+              if (chunk && chunk.startedAt !== lastScrollbackChunkRef.current) {
+                lastScrollbackChunkRef.current = chunk.startedAt;
+                navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({ scrollback: chunk.startedAt }), replace: true });
+              }
             }
           }
           if (isPlayingHistory && !isSyncingScrollRef.current) {
@@ -1623,10 +1655,11 @@ export function StreamPlayerPage() {
         onSnapToLive={() => {
           if (isPlayingHistory) stopHistoricalPlayback();
           else {
-            histWFSourceRef.current = null;
             histWFCacheRef.current = null;
             lastScrollBackSpectrumRowRef.current = null;
           }
+          lastScrollbackChunkRef.current = null;
+          navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({}), replace: true });
           useScrollBackStore.getState().set(false);
           waterfallRef.current?.scrollToLive();
         }}
@@ -1654,10 +1687,10 @@ export function StreamPlayerPage() {
         <BandViewport
           className="min-w-0 flex-1"
           zoomToCenter={viewLocked}
-          onClickFrequency={isInScrollBack ? undefined : (freqKHz) => {
+          onClickFrequency={shouldMuteUI ? undefined : (freqKHz) => {
             useTuningStore.getState().setFrequency(Math.round(freqKHz * 100) / 100);
           }}
-          onWFConfigChange={isInScrollBack ? undefined : (zoom, centerKHz, viewStartKHz, viewEndKHz) => {
+          onWFConfigChange={shouldMuteUI ? undefined : (zoom, centerKHz, viewStartKHz, viewEndKHz) => {
             const ws = wsRef.current;
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(
@@ -1718,9 +1751,6 @@ export function StreamPlayerPage() {
               const headRow = state.totalRows - state.scrollOffset - lookahead;
               if (headRow === lastScrollBackSpectrumRowRef.current) return;
               lastScrollBackSpectrumRowRef.current = headRow;
-              if (!histWFSourceRef.current) {
-                histWFSourceRef.current = new RingBufferSource(streamId);
-              }
               pushSpectrumForRow(headRow);
             }}
           />
@@ -1745,6 +1775,8 @@ export function StreamPlayerPage() {
           <InfoPanelHolder
             tabs={sidebarTabs}
             defaultTab="source"
+            activeTab={sidebarTab}
+            onTabChange={setSidebarTab}
             actions={
               <Tooltip content="Ring buffer">
                 <Button
@@ -1760,80 +1792,6 @@ export function StreamPlayerPage() {
           />
         </div>
       </aside>
-
-      {/* ── Stream settings modal ── */}
-      {streamSettingsOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setStreamSettingsOpen(false);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setStreamSettingsOpen(false);
-          }}
-        >
-          <div className="w-80 rounded-lg border bg-background p-4 shadow-lg">
-            <Input
-              autoFocus
-              value={editName}
-              onChange={(e) => setEditName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  const name = editName.trim();
-                  if (name && name !== stream?.name) {
-                    sendPatch({ name });
-                    if (stream) setStream({ ...stream, name });
-                  }
-                  setStreamSettingsOpen(false);
-                  setEditName("");
-                }
-              }}
-              className="mb-4 h-8 text-sm"
-              placeholder="Untitled stream"
-            />
-            <div className="flex items-center justify-between">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs text-destructive"
-                disabled={deleting}
-                onClick={() => void onDeleteStream()}
-              >
-                <XIcon className="size-3" />
-                {deleting ? "..." : "Kill"}
-              </Button>
-              <div className="flex gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-xs"
-                  onClick={() => {
-                    setStreamSettingsOpen(false);
-                    setEditName("");
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  className="text-xs"
-                  onClick={() => {
-                    const name = editName.trim();
-                    if (name && name !== stream?.name) {
-                      sendPatch({ name });
-                      if (stream) setStream({ ...stream, name });
-                    }
-                    setStreamSettingsOpen(false);
-                    setEditName("");
-                  }}
-                >
-                  Save
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Source picker overlay ── */}
       <SourceOverlay

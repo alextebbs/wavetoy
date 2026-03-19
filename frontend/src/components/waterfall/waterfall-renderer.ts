@@ -1,6 +1,8 @@
 import { buildLUT, WATERFALL_COLOR_MAPS } from "@/lib/display-colors";
 import { WaterfallRendererBase, type BaseTile } from "./waterfall-renderer-base";
 
+const MIN_CHUNK_DISPLAY_ROWS = 60;
+
 export type { OverlayState, RendererOptions } from "./waterfall-renderer-base";
 
 interface WFTile extends BaseTile {
@@ -75,7 +77,26 @@ export class WaterfallRenderer extends WaterfallRendererBase<WFTile> {
     const visibleRowsBottom =
       this.scrollOffset + Math.ceil(height / this.rowScale);
 
+    const firstInProgress =
+      this.chunks.length > 0 && !this.chunks[this.chunks.length - 1]!.complete
+        ? this.chunks[this.chunks.length - 1]!
+        : null;
+
     for (const chunk of this.chunks) {
+      if (chunk !== firstInProgress) {
+        const expectedHeight = Math.max(chunk.expectedWF, MIN_CHUNK_DISPLAY_ROWS);
+        if (chunk.frameCount < expectedHeight) {
+          this.drawChunkMissingOverlay(
+            chunk,
+            expectedHeight,
+            width,
+            height,
+            visibleRowsTop,
+            visibleRowsBottom,
+          );
+        }
+      }
+
       for (const tile of chunk.tiles) {
         if (tile.rowCount === 0) continue;
         const tileTopRowsFromLive =
@@ -138,6 +159,35 @@ export class WaterfallRenderer extends WaterfallRendererBase<WFTile> {
       pixels[px + 2] = 0;
       pixels[px + 3] = 255;
     }
+  }
+
+  private drawChunkMissingOverlay(
+    chunk: { startRow: number; frameCount: number },
+    expectedHeight: number,
+    width: number,
+    height: number,
+    visibleRowsTop: number,
+    visibleRowsBottom: number,
+  ): void {
+    const missingRows = expectedHeight - chunk.frameCount;
+    if (missingRows <= 0) return;
+
+    const regionTopFromLive = this.totalRows - chunk.startRow - expectedHeight;
+    const regionBottomFromLive = this.totalRows - chunk.startRow - chunk.frameCount;
+
+    if (regionBottomFromLive < visibleRowsTop || regionTopFromLive > visibleRowsBottom) return;
+
+    const clipTop = Math.max(regionTopFromLive, visibleRowsTop);
+    const clipBottom = Math.min(regionBottomFromLive, visibleRowsBottom);
+    if (clipTop >= clipBottom) return;
+
+    const canvasYTop = (clipTop - this.scrollOffset) * this.rowScale;
+    const canvasYBottom = (clipBottom - this.scrollOffset) * this.rowScale;
+    const rectHeight = canvasYBottom - canvasYTop;
+    if (rectHeight <= 0) return;
+
+    this.ctx.fillStyle = "rgba(102, 26, 26, 0.6)";
+    this.ctx.fillRect(0, canvasYTop, width, rectHeight);
   }
 
   private blitTile(

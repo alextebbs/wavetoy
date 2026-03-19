@@ -177,6 +177,12 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 
 			if strings.HasPrefix(topic, "stream:") {
 				streamID := strings.TrimPrefix(topic, "stream:")
+
+				if streamID == mfStreamID {
+					_ = client.writeJSON(minefieldWSConnected())
+					continue
+				}
+
 				s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.connect", "client", "wavetoy", fmt.Sprintf("session=%s", client.sessionID[:min(8, len(client.sessionID))]))
 
 				s.startLogPumpForClient(streamID, client)
@@ -348,7 +354,7 @@ func (s *Server) handleSwitchFallback(r *http.Request, streamID, sourceID string
 		"sample_rate": s.streamManager.SampleRate(stream.ID),
 	})
 
-	if s.fallbackManager != nil && stream.AutoFallback && prevSourceID != sourceID {
+	if s.fallbackManager != nil && stream.AutoProbe && prevSourceID != sourceID {
 		go s.fallbackManager.NotifySwitch(r.Context(), streamID, prevSourceID, sourceID)
 	}
 }

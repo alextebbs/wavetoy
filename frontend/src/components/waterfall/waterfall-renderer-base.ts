@@ -49,7 +49,7 @@ const MAX_ZOOM = 14;
 const EVICT_DISTANCE_ROWS = 4 * 480;
 
 interface ChunkEntry<T extends BaseTile> {
-  startedAt: string;
+  startedAt: number;
   sourceId: string;
   startRow: number;
   frameCount: number;
@@ -60,7 +60,16 @@ interface ChunkEntry<T extends BaseTile> {
   expectedWF: number;
   audioBytes: number;
   actualWF: number | null;
+  failCount: number;
+  nextRetryAt: number;
 }
+
+interface GapEntry {
+  startRow: number;
+  rowCount: number;
+}
+
+const GAP_CSS_PX = 60;
 
 function coverageFromFrame(
   xBin: number,
@@ -85,6 +94,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   protected liveTile!: T;
   protected totalRows = 0;
   protected chunks: ChunkEntry<T>[] = [];
+  protected gaps: GapEntry[] = [];
   protected minLevel: number;
   protected maxLevel: number;
   protected viewStartKHz = 0;
@@ -109,7 +119,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   private chunkSource: ChunkSource | null = null;
   private liveFrameCount = 0;
   private liveChunkStartRow = 0;
-  private liveChunkStartedAt: string | null = null;
+  private liveChunkStartedAt: number | null = null;
   private streamSampleRate = 12000;
   private streamChunkDurationS = 60;
   private markers = new Map<string, WaterfallMarker>();
@@ -291,14 +301,14 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   }
 
   get chunkManifest(): ReadonlyArray<{
-    startedAt: string;
+    startedAt: number;
     startRow: number;
     frameCount: number;
     complete: boolean;
     audioBytes: number;
   }> {
     const result: Array<{
-      startedAt: string;
+      startedAt: number;
       startRow: number;
       frameCount: number;
       complete: boolean;
@@ -381,6 +391,10 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     this.setScrollOffset(0);
   }
 
+  requestRepaint(): void {
+    this.needsRepaint = true;
+  }
+
   // ---------------------------------------------------------------------------
   // Chunk-aware public API
   // ---------------------------------------------------------------------------
@@ -402,34 +416,74 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       this.streamChunkDurationS = streamInfo.chunkDurationS;
     }
     const sorted = [...chunkMetas].sort(
-      (a, b) =>
-        new Date(a.started_at).getTime() - new Date(b.started_at).getTime(),
+      (a, b) => a.started_at - b.started_at,
     );
 
     if (sorted.length === 0) return 0;
 
     const liveCount = this.liveFrameCount;
 
+    const frameCounts: number[] = [];
+    const hasGapBefore: boolean[] = [];
     let totalFrames = 0;
+
     for (let i = 0; i < sorted.length; i++) {
       const c = sorted[i];
       let count = c.wf_frames;
       if (i === sorted.length - 1 && !c.complete && liveCount > 0) {
         count = Math.max(0, count - liveCount);
       }
+      frameCounts.push(count);
       totalFrames += count;
+
+      if (i > 0) {
+        const elapsed = c.started_at - sorted[i - 1].started_at;
+        hasGapBefore.push(elapsed > this.streamChunkDurationS * 1.5);
+      } else {
+        hasGapBefore.push(false);
+      }
     }
 
     if (totalFrames === 0) return 0;
 
-    let currentRow = -totalFrames;
+    const dpr = window.devicePixelRatio || 1;
+    const gapRowCount = Math.ceil(GAP_CSS_PX * dpr / this.rowScale);
+    const numGaps = hasGapBefore.filter(Boolean).length;
+
+    const endRowCount = gapRowCount;
+    let currentRow = -(totalFrames + numGaps * gapRowCount + endRowCount);
     this.chunks = [];
+    this.gaps = [];
+
+    this.addMarker({
+      id: "history-end",
+      row: currentRow,
+      label: "END",
+      metadata: {
+        type: "end",
+        gapStartRow: currentRow,
+        gapRowCount: endRowCount,
+      },
+    });
+    currentRow += endRowCount;
 
     for (let i = 0; i < sorted.length; i++) {
       const c = sorted[i];
-      let count = c.wf_frames;
-      if (i === sorted.length - 1 && !c.complete && liveCount > 0) {
-        count = Math.max(0, count - liveCount);
+      const count = frameCounts[i];
+
+      if (hasGapBefore[i]) {
+        this.gaps.push({ startRow: currentRow, rowCount: gapRowCount });
+        this.addMarker({
+          id: `gap-${i}`,
+          row: currentRow,
+          label: "NO DATA",
+          metadata: {
+            type: "gap",
+            gapStartRow: currentRow,
+            gapRowCount: gapRowCount,
+          },
+        });
+        currentRow += gapRowCount;
       }
 
       const entry: ChunkEntry<T> = {
@@ -444,6 +498,8 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
         expectedWF: c.wf_frames,
         audioBytes: c.audio_bytes,
         actualWF: null,
+        failCount: 0,
+        nextRetryAt: 0,
       };
       this.chunks.push(entry);
 
@@ -453,7 +509,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       this.addMarker({
         id: `chunk-${c.started_at}`,
         row: markerRow,
-        label: c.started_at,
+        label: String(c.started_at),
         metadata: {
           started_at: c.started_at,
           source_id: c.source_id,
@@ -468,7 +524,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     }
 
     if (this.chunks.length > 0) {
-      this.lowestStartRow = this.chunks[0].startRow;
+      this.lowestStartRow = -(totalFrames + numGaps * gapRowCount + endRowCount);
       this.needsRepaint = true;
     }
 
@@ -482,8 +538,8 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   }
 
   onChunkComplete(msg: {
-    started_at: string;
-    ended_at?: string;
+    started_at: number;
+    ended_at?: number;
     source_id?: string;
     wf_frames?: number;
     audio_bytes?: number;
@@ -532,6 +588,8 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
         expectedWF,
         audioBytes,
         actualWF: null,
+        failCount: 0,
+        nextRetryAt: 0,
       };
       this.chunks.push(entry);
       this.fetchChunk(entry);
@@ -542,7 +600,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     this.addMarker({
       id: `chunk-${msg.started_at}`,
       row: endRow,
-      label: msg.started_at,
+      label: String(msg.started_at),
       metadata: {
         started_at: msg.started_at,
         ended_at: msg.ended_at,
@@ -724,7 +782,9 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       const nearView = this.isNearViewport(ci, topFromLive, bottomFromLive);
 
       if ((inView || nearView) && !slot.loaded && !slot.loading && slot.frameCount > 0) {
-        this.fetchChunk(slot);
+        if (slot.failCount === 0 || performance.now() >= slot.nextRetryAt) {
+          this.fetchChunk(slot);
+        }
       }
     }
 
@@ -792,7 +852,16 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
         `frames=${fetchedCount} elapsed=${elapsed.toFixed(1)}ms`,
       );
     } catch (err) {
-      console.error(`Failed to load chunk ${entry.startedAt}:`, err);
+      entry.failCount++;
+      const MAX_RETRIES = 5;
+      if (entry.failCount >= MAX_RETRIES) {
+        entry.loaded = true;
+        streamLog.warn("wf.chunk.failed", `chunk=${entry.startedAt} giving up after ${MAX_RETRIES} failures`);
+      } else {
+        const backoffMs = Math.min(2000 * Math.pow(2, entry.failCount - 1), 30000);
+        entry.nextRetryAt = performance.now() + backoffMs;
+        streamLog.warn("wf.chunk.retry", `chunk=${entry.startedAt} attempt=${entry.failCount}/${MAX_RETRIES} backoff=${backoffMs}ms err=${err}`);
+      }
     } finally {
       entry.loading = false;
     }

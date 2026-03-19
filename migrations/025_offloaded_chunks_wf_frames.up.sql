@@ -1,0 +1,2 @@
+ALTER TABLE offloaded_chunks ADD COLUMN wf_frames INT NOT NULL DEFAULT 0;
+ALTER TABLE offloaded_chunks ADD COLUMN events INT NOT NULL DEFAULT 0;

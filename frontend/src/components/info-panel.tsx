@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
@@ -13,6 +13,8 @@ export interface InfoPanelTab {
 interface InfoPanelHolderProps {
   tabs: InfoPanelTab[];
   defaultTab?: string;
+  activeTab?: string;
+  onTabChange?: (id: string) => void;
   actions?: ReactNode;
   className?: string;
 }
@@ -20,10 +22,23 @@ interface InfoPanelHolderProps {
 export function InfoPanelHolder({
   tabs,
   defaultTab,
+  activeTab: controlledTab,
+  onTabChange,
   actions,
   className,
 }: InfoPanelHolderProps) {
-  const [activeId, setActiveId] = useState(defaultTab ?? tabs[0]?.id ?? "");
+  const [internalId, setInternalId] = useState(defaultTab ?? tabs[0]?.id ?? "");
+
+  useEffect(() => {
+    if (controlledTab != null) setInternalId(controlledTab);
+  }, [controlledTab]);
+
+  const activeId = controlledTab ?? internalId;
+  const setActiveId = (id: string) => {
+    setInternalId(id);
+    onTabChange?.(id);
+  };
+
   const activeTab = tabs.find((t) => t.id === activeId);
 
   return (

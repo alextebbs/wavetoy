@@ -311,16 +311,16 @@ func (cr *ChunkRing) GetChunk(index int) *Chunk {
 	return nil
 }
 
-// GetChunkByTime returns a completed chunk whose StartedAt matches t (truncated to millisecond).
-// Returns nil if no match is found.
+// GetChunkByTime returns a completed chunk whose StartedAt matches t
+// at unix-second granularity. Returns nil if no match is found.
 func (cr *ChunkRing) GetChunkByTime(t time.Time) *Chunk {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
-	target := t.Truncate(time.Millisecond)
+	target := t.Unix()
 	for i := 0; i < cr.ringCount; i++ {
 		slot := (cr.ringHead - cr.ringCount + i + cr.ringSize) % cr.ringSize
 		c := cr.ring[slot]
-		if c != nil && c.StartedAt.Truncate(time.Millisecond).Equal(target) {
+		if c != nil && c.StartedAt.Unix() == target {
 			return c
 		}
 	}
@@ -360,6 +360,22 @@ func (cr *ChunkRing) Available() []ChunkMeta {
 		}
 	}
 	result = append(result, metaFromChunk(cr.current))
+	return result
+}
+
+// GetChunksInRange returns all completed chunks whose time range overlaps [from, to).
+func (cr *ChunkRing) GetChunksInRange(from, to time.Time) []*Chunk {
+	cr.mu.RLock()
+	defer cr.mu.RUnlock()
+
+	var result []*Chunk
+	for i := 0; i < cr.ringCount; i++ {
+		slot := (cr.ringHead - cr.ringCount + i + cr.ringSize) % cr.ringSize
+		c := cr.ring[slot]
+		if c != nil && c.StartedAt.Before(to) && c.EndedAt.After(from) {
+			result = append(result, c)
+		}
+	}
 	return result
 }
 

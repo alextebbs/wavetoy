@@ -2,7 +2,7 @@ import type { ChunkSource } from "./chunk-loader";
 import { decodeAndResampleWav } from "./resample";
 
 export interface ChunkInfo {
-  startedAt: string;
+  startedAt: number;
   startRow: number;
   frameCount: number;
   complete: boolean;
@@ -41,6 +41,7 @@ export class HistoricalAudioPlayer {
   private tailRetries = 0;
   private static readonly MAX_TAIL_RETRIES = 15;
   private static readonly TAIL_RETRY_MS = 200;
+  private static readonly MAX_CONSECUTIVE_SKIPS = 10;
 
   constructor(
     audioCtx: AudioContext,
@@ -59,23 +60,39 @@ export class HistoricalAudioPlayer {
     this.stopPlayback();
     this.chunks = params.chunks;
 
-    const chunkIdx = this.resolveChunk(params.targetRow);
+    let chunkIdx = this.resolveChunk(params.targetRow);
     if (chunkIdx < 0) return;
 
-    const chunk = this.chunks[chunkIdx];
-    const progress =
-      chunk.frameCount > 0
-        ? Math.max(
-            0,
-            Math.min(
-              1,
-              (params.targetRow - chunk.startRow) / chunk.frameCount,
-            ),
-          )
-        : 0;
+    let buffer: AudioBuffer | null = null;
+    let progress = 0;
+    let skipped = 0;
 
-    const buffer = await this.fetchAndDecode(chunk.startedAt);
-    if (!buffer) return;
+    while (chunkIdx >= 0) {
+      const chunk = this.chunks[chunkIdx];
+      progress =
+        skipped === 0 && chunk.frameCount > 0
+          ? Math.max(
+              0,
+              Math.min(
+                1,
+                (params.targetRow - chunk.startRow) / chunk.frameCount,
+              ),
+            )
+          : 0;
+
+      buffer = await this.fetchAndDecode(chunk.startedAt);
+      if (buffer) break;
+
+      skipped++;
+      if (skipped >= HistoricalAudioPlayer.MAX_CONSECUTIVE_SKIPS) {
+        console.error("[hist-audio] too many broken chunks at start, giving up");
+        return;
+      }
+      console.warn("[hist-audio] skipping broken chunk at start:", chunk.startedAt);
+      chunkIdx = this.nextPlayableChunk(chunkIdx + 1);
+    }
+
+    if (!buffer || chunkIdx < 0) return;
 
     this.currentChunkIdx = chunkIdx;
     this.currentBuffer = buffer;
@@ -93,23 +110,43 @@ export class HistoricalAudioPlayer {
     this.cancelPrefetch();
     this.stopSources();
 
-    const chunkIdx = this.resolveChunk(targetRow);
+    let chunkIdx = this.resolveChunk(targetRow);
     if (chunkIdx < 0) {
       this.stopPlayback();
       return;
     }
 
-    const chunk = this.chunks[chunkIdx];
-    const progress =
-      chunk.frameCount > 0
-        ? Math.max(
-            0,
-            Math.min(1, (targetRow - chunk.startRow) / chunk.frameCount),
-          )
-        : 0;
+    let buffer: AudioBuffer | null = null;
+    let progress = 0;
+    let skipped = 0;
 
-    const buffer = await this.fetchAndDecode(chunk.startedAt);
-    if (!buffer || !this.playing) return;
+    while (chunkIdx >= 0) {
+      const chunk = this.chunks[chunkIdx];
+      progress =
+        skipped === 0 && chunk.frameCount > 0
+          ? Math.max(
+              0,
+              Math.min(1, (targetRow - chunk.startRow) / chunk.frameCount),
+            )
+          : 0;
+
+      buffer = await this.fetchAndDecode(chunk.startedAt);
+      if (buffer) break;
+
+      skipped++;
+      if (skipped >= HistoricalAudioPlayer.MAX_CONSECUTIVE_SKIPS) {
+        console.error("[hist-audio] too many broken chunks during seek, stopping");
+        this.stopPlayback();
+        return;
+      }
+      console.warn("[hist-audio] skipping broken chunk during seek:", chunk.startedAt);
+      chunkIdx = this.nextPlayableChunk(chunkIdx + 1);
+    }
+
+    if (!buffer || !this.playing || chunkIdx < 0) {
+      this.stopPlayback();
+      return;
+    }
 
     this.currentChunkIdx = chunkIdx;
     this.currentBuffer = buffer;
@@ -206,31 +243,51 @@ export class HistoricalAudioPlayer {
   }
 
   private async advanceToNextChunk(): Promise<void> {
-    const nextIdx = this.nextPlayableChunk(this.currentChunkIdx + 1);
-    if (nextIdx < 0) {
-      this.enterTailing();
+    let searchFrom = this.currentChunkIdx + 1;
+    let skipped = 0;
+
+    while (true) {
+      const nextIdx = this.nextPlayableChunk(searchFrom);
+      if (nextIdx < 0) {
+        this.enterTailing();
+        return;
+      }
+
+      let buffer: AudioBuffer | null = null;
+
+      if (skipped === 0 && this.nextBuffer) {
+        buffer = this.nextBuffer;
+      } else {
+        buffer = await this.fetchAndDecode(this.chunks[nextIdx].startedAt);
+      }
+
+      this.nextBuffer = null;
+      this.nextSource = null;
+      this.nextScheduled = false;
+
+      if (!this.playing) return;
+
+      if (!buffer) {
+        skipped++;
+        if (skipped >= HistoricalAudioPlayer.MAX_CONSECUTIVE_SKIPS) {
+          console.error("[hist-audio] skipped", skipped, "consecutive chunks, stopping");
+          this.onReachLive?.();
+          this.stopPlayback();
+          return;
+        }
+        console.warn("[hist-audio] skipping broken chunk:", this.chunks[nextIdx].startedAt);
+        searchFrom = nextIdx + 1;
+        continue;
+      }
+
+      this.currentChunkIdx = nextIdx;
+      this.currentBuffer = buffer;
+      this.startOffset = 0;
+
+      this.playCurrentSource();
+      this.prefetchNext();
       return;
     }
-
-    let buffer = this.nextBuffer;
-    if (!buffer) {
-      buffer = await this.fetchAndDecode(this.chunks[nextIdx].startedAt);
-    }
-    if (!buffer || !this.playing) {
-      this.onReachLive?.();
-      this.stopPlayback();
-      return;
-    }
-
-    this.currentChunkIdx = nextIdx;
-    this.currentBuffer = buffer;
-    this.nextBuffer = null;
-    this.nextSource = null;
-    this.nextScheduled = false;
-    this.startOffset = 0;
-
-    this.playCurrentSource();
-    this.prefetchNext();
   }
 
   private async prefetchNext(): Promise<void> {
@@ -398,7 +455,7 @@ export class HistoricalAudioPlayer {
   }
 
   private async fetchAndDecode(
-    startedAt: string,
+    startedAt: number,
   ): Promise<AudioBuffer | null> {
     try {
       const raw = await this.chunkSource.fetchAudio(startedAt);

@@ -42,6 +42,15 @@ const streamsRoute = createRoute({
 const streamPlayerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/streams/$streamId",
+  validateSearch: (search: Record<string, unknown>): { scrollback?: number } => {
+    const s = search?.scrollback;
+    if (typeof s === "number" && s > 0) return { scrollback: s };
+    if (typeof s === "string") {
+      const n = parseInt(s, 10);
+      if (!Number.isNaN(n) && n > 0) return { scrollback: n };
+    }
+    return {};
+  },
   component: StreamPlayerPage,
 });
 

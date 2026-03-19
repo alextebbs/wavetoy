@@ -23,6 +23,10 @@ func (s *Server) listStreams(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getStream(w http.ResponseWriter, r *http.Request) {
+	if isMinefield(r) {
+		s.minefieldStream(w, r)
+		return
+	}
 	streamID := chi.URLParam(r, "id")
 	stream, err := s.db.GetStreamByID(r.Context(), streamID)
 	if err != nil {

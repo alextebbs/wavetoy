@@ -26,8 +26,8 @@ export interface WaterfallHandle {
     streamInfo?: { sampleRate: number; chunkDurationS: number },
   ): Promise<number>;
   onChunkComplete(msg: {
-    started_at: string;
-    ended_at?: string;
+    started_at: number;
+    ended_at?: number;
     source_id?: string;
     wf_frames?: number;
     audio_bytes?: number;
@@ -36,7 +36,7 @@ export interface WaterfallHandle {
   rowCount(): number;
   getScrollOffset(): number;
   chunkManifest(): ReadonlyArray<{
-    startedAt: string;
+    startedAt: number;
     startRow: number;
     frameCount: number;
     complete: boolean;
@@ -47,6 +47,7 @@ export interface WaterfallHandle {
   setPlaybackHead(row: number | null): void;
   visibleRows(): number;
   cssToRows(px: number): number;
+  requestRepaint(): void;
 }
 
 export const WF_BINS = 1024;

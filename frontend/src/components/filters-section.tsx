@@ -30,7 +30,7 @@ export function FiltersSection({
   onFiltersChange,
   samplesRef,
 }: FiltersSectionProps) {
-  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
+  const shouldMuteUI = useScrollBackStore((s) => s.isInScrollBack || s.streamLocked);
   const bypassed = filters.bypassed ?? false;
   const anyEnabled = hasAnyFilterEnabled(filters);
 
@@ -46,13 +46,13 @@ export function FiltersSection({
         />
       </div>
       {anyEnabled && (
-        <div className={`flex shrink-0 items-center justify-between border-t border-border/60 px-3 py-2 transition-opacity duration-200${isInScrollBack ? " opacity-40 pointer-events-none" : ""}`}>
+        <div className={`flex shrink-0 items-center justify-between border-t border-border/60 px-3 py-2 transition-opacity duration-200${shouldMuteUI ? " opacity-40 pointer-events-none" : ""}`}>
           <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
             {bypassed ? "Filters disabled" : "Filters active"}
           </span>
           <button
             type="button"
-            disabled={isInScrollBack}
+            disabled={shouldMuteUI}
             onClick={() => onFiltersChange({ ...filters, bypassed: !bypassed })}
             className={
               "flex h-6 items-center gap-1.5 rounded px-2 text-[10px] font-medium uppercase tracking-wider transition-colors " +

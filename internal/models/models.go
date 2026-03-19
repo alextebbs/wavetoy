@@ -195,8 +195,13 @@ type Stream struct {
 	Interpreter              interpreter.Config `json:"interpreter"`
 	WFViewStartKHz           float64            `json:"wf_view_start_khz"`
 	WFViewEndKHz             float64      `json:"wf_view_end_khz"`
-	AutoFallback             bool         `json:"auto_fallback"`
+	AutoProbe                bool         `json:"auto_probe"`
+	QualityFallback          bool         `json:"quality_fallback"`
+	OffloadChunks            bool         `json:"offload_chunks"`
+	KeepAlive                bool         `json:"keep_alive"`
+	Locked                   bool         `json:"locked"`
 	ViewLocked               bool         `json:"view_locked"`
+	LogLevel                 string       `json:"log_level"`
 	CreatedAt                time.Time    `json:"created_at"`
 	UpdatedAt                time.Time    `json:"updated_at"`
 }

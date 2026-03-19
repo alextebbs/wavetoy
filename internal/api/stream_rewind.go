@@ -2,9 +2,10 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,10 +13,42 @@ import (
 	"github.com/sammy/sdr-radio/internal/chunkring"
 )
 
-func (s *Server) streamRewind(w http.ResponseWriter, r *http.Request) {
+type rewindChunkJSON struct {
+	StartedAt  int64  `json:"started_at"`
+	EndedAt    int64  `json:"ended_at"`
+	Complete   bool   `json:"complete"`
+	AudioBytes int    `json:"audio_bytes"`
+	WFFrames   int    `json:"wf_frames"`
+	Events     int    `json:"events"`
+	Source     string `json:"source"`
+	SourceID   string `json:"source_id,omitempty"`
+}
+
+func (s *Server) streamManifest(w http.ResponseWriter, r *http.Request) {
+	if isMinefield(r) {
+		s.minefieldManifest(w, r)
+		return
+	}
 	streamID := chi.URLParam(r, "id")
 	if strings.TrimSpace(streamID) == "" {
 		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
+		return
+	}
+
+	fromStr := chi.URLParam(r, "from")
+	toStr := chi.URLParam(r, "to")
+	fromTS, err := strconv.ParseInt(fromStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid 'from' timestamp — use unix seconds", "VALIDATION")
+		return
+	}
+	toTS, err := strconv.ParseInt(toStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid 'to' timestamp — use unix seconds", "VALIDATION")
+		return
+	}
+	if toTS <= fromTS {
+		writeError(w, http.StatusBadRequest, "'to' must be after 'from'", "VALIDATION")
 		return
 	}
 
@@ -25,123 +58,236 @@ func (s *Server) streamRewind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	avail := cr.Available()
-	sr := 12000
-	if len(avail) > 0 {
-		// Get sample rate from the stream manager
-		sr = s.streamManager.SampleRate(streamID)
+	sr := s.streamManager.SampleRate(streamID)
+	if sr <= 0 {
+		sr = 12000
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	fromTime := time.Unix(fromTS, 0)
+	toTime := time.Unix(toTS, 0)
+	chunkDurS := int(cr.ChunkDuration().Seconds())
+
+	ringChunks := cr.Available()
+	ringSet := make(map[int64]bool, len(ringChunks))
+
+	var chunks []rewindChunkJSON
+	for _, rc := range ringChunks {
+		ts := rc.StartedAt.Unix()
+		if ts < fromTS || ts >= toTS {
+			if rc.EndedAt == nil || rc.EndedAt.Unix() <= fromTS {
+				continue
+			}
+		}
+		ringSet[ts] = true
+
+		var endedAt int64
+		if rc.EndedAt != nil {
+			endedAt = rc.EndedAt.Unix()
+		} else {
+			endedAt = rc.StartedAt.Add(cr.ChunkDuration()).Unix()
+		}
+
+		chunks = append(chunks, rewindChunkJSON{
+			StartedAt:  ts,
+			EndedAt:    endedAt,
+			Complete:   rc.Complete,
+			AudioBytes: rc.AudioBytes,
+			WFFrames:   rc.WFFrames,
+			Events:     rc.Events,
+			Source:     "ring",
+			SourceID:   rc.SourceID,
+		})
+	}
+
+	s3c := s.streamManager.S3Client()
+	if s3c != nil {
+		s3Chunks, err := s.db.ListOffloadedChunks(r.Context(), streamID, fromTime, toTime)
+		if err != nil {
+			slog.Warn("manifest: s3 chunk lookup failed", "stream", streamID, "err", err)
+		} else {
+			for _, sc := range s3Chunks {
+				ts := sc.StartedAt.Unix()
+				if ringSet[ts] {
+					continue
+				}
+				wfFrames := sc.WFFrames
+				if wfFrames == 0 && chunkDurS > 0 {
+					wfFrames = chunkDurS * 8
+				}
+				chunks = append(chunks, rewindChunkJSON{
+					StartedAt:  ts,
+					EndedAt:    sc.EndedAt.Unix(),
+					Complete:   true,
+					AudioBytes: int(sc.SizeBytes),
+					WFFrames:   wfFrames,
+					Events:     sc.Events,
+					Source:     "s3",
+				})
+			}
+		}
+	}
+
+	resp := map[string]any{
 		"stream_id":        streamID,
 		"sample_rate":      sr,
-		"chunk_duration_s": int(cr.ChunkDuration().Seconds()),
-		"chunks":           avail,
-	})
+		"chunk_duration_s": chunkDurS,
+		"chunks":           chunks,
+	}
+
+	if s.streamManager.S3Client() != nil {
+		stats, err := s.db.OffloadedChunkStats(r.Context(), streamID)
+		if err != nil {
+			slog.Warn("manifest: s3 stats failed", "stream", streamID, "err", err)
+		} else if stats != nil {
+			resp["s3_history"] = map[string]any{
+				"count":  stats.Count,
+				"oldest": stats.Oldest.Unix(),
+				"newest": stats.Newest.Unix(),
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) streamRewindChunkAudio(w http.ResponseWriter, r *http.Request) {
-	cr, chunk, ok := s.resolveRewindChunk(w, r)
+	if isMinefield(r) {
+		s.minefieldAudio(w, r)
+		return
+	}
+	streamID, ts, ok := s.parseRewindParams(w, r)
 	if !ok {
 		return
-	}
-	_ = cr
-
-	w.Header().Set("Content-Type", "audio/wav")
-	if chunk.Complete {
-		w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
-	}
-	w.Header().Set("X-Chunk-StartedAt", chunk.StartedAt.Format("2006-01-02T15:04:05.000Z"))
-	w.Header().Set("X-Chunk-Complete", fmt.Sprintf("%t", chunk.Complete))
-
-	if err := chunkring.SerializeAudioWAV(w, chunk); err != nil {
-		return // Client likely disconnected; headers already sent.
-	}
-}
-
-func (s *Server) streamRewindChunkWF(w http.ResponseWriter, r *http.Request) {
-	cr, chunk, ok := s.resolveRewindChunk(w, r)
-	if !ok {
-		return
-	}
-	_ = cr
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if chunk.Complete {
-		w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
-	}
-	w.Header().Set("X-Chunk-StartedAt", chunk.StartedAt.Format("2006-01-02T15:04:05.000Z"))
-	w.Header().Set("X-Chunk-Complete", fmt.Sprintf("%t", chunk.Complete))
-
-	if err := chunkring.SerializeWF(w, chunk); err != nil {
-		return
-	}
-}
-
-func (s *Server) streamRewindChunkEvents(w http.ResponseWriter, r *http.Request) {
-	cr, chunk, ok := s.resolveRewindChunk(w, r)
-	if !ok {
-		return
-	}
-	_ = cr
-
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	if chunk.Complete {
-		w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
-	}
-	w.Header().Set("X-Chunk-StartedAt", chunk.StartedAt.Format("2006-01-02T15:04:05.000Z"))
-	w.Header().Set("X-Chunk-Complete", fmt.Sprintf("%t", chunk.Complete))
-
-	if err := chunkring.SerializeEvents(w, chunk); err != nil {
-		return
-	}
-}
-
-// resolveRewindChunk extracts the stream and chunk started_at timestamp from
-// the request, looks up the chunk, and writes an error response if anything
-// fails. Returns the ChunkRing, the resolved Chunk, and whether the lookup
-// succeeded.
-func (s *Server) resolveRewindChunk(w http.ResponseWriter, r *http.Request) (*chunkring.ChunkRing, *chunkring.Chunk, bool) {
-	streamID := chi.URLParam(r, "id")
-	if strings.TrimSpace(streamID) == "" {
-		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
-		return nil, nil, false
-	}
-
-	startedAtStr := chi.URLParam(r, "started_at")
-	if decoded, err := url.PathUnescape(startedAtStr); err == nil {
-		startedAtStr = decoded
-	}
-	slog.Debug("resolveRewindChunk", "started_at_raw", startedAtStr)
-	t, err := time.Parse(time.RFC3339Nano, startedAtStr)
-	if err != nil {
-		slog.Warn("resolveRewindChunk: parse failed", "raw", startedAtStr, "err", err)
-		writeError(w, http.StatusBadRequest, "invalid started_at timestamp", "VALIDATION")
-		return nil, nil, false
 	}
 
 	cr := s.streamManager.ChunkRing(streamID)
-	if cr == nil {
-		writeError(w, http.StatusNotFound, "stream not active", "NOT_FOUND")
-		return nil, nil, false
+	if cr != nil {
+		if chunk := s.findRingChunk(cr, ts); chunk != nil {
+			w.Header().Set("Content-Type", "audio/wav")
+			s.setChunkCacheHeaders(w, chunk)
+			chunkring.SerializeAudioWAV(w, chunk)
+			return
+		}
 	}
 
-	// Check if it's the in-progress chunk
+	s.proxyS3Object(w, r, streamID, ts, "audio.wav", "audio/wav")
+}
+
+func (s *Server) streamRewindChunkWF(w http.ResponseWriter, r *http.Request) {
+	if isMinefield(r) {
+		s.minefieldWF(w, r)
+		return
+	}
+	streamID, ts, ok := s.parseRewindParams(w, r)
+	if !ok {
+		return
+	}
+
+	cr := s.streamManager.ChunkRing(streamID)
+	if cr != nil {
+		if chunk := s.findRingChunk(cr, ts); chunk != nil {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			s.setChunkCacheHeaders(w, chunk)
+			chunkring.SerializeWF(w, chunk)
+			return
+		}
+	}
+
+	s.proxyS3Object(w, r, streamID, ts, "wf.bin", "application/octet-stream")
+}
+
+func (s *Server) streamRewindChunkEvents(w http.ResponseWriter, r *http.Request) {
+	if isMinefield(r) {
+		s.minefieldEvents(w, r)
+		return
+	}
+	streamID, ts, ok := s.parseRewindParams(w, r)
+	if !ok {
+		return
+	}
+
+	cr := s.streamManager.ChunkRing(streamID)
+	if cr != nil {
+		if chunk := s.findRingChunk(cr, ts); chunk != nil {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			s.setChunkCacheHeaders(w, chunk)
+			chunkring.SerializeEvents(w, chunk)
+			return
+		}
+	}
+
+	s.proxyS3Object(w, r, streamID, ts, "events.jsonl", "application/x-ndjson")
+}
+
+func (s *Server) parseRewindParams(w http.ResponseWriter, r *http.Request) (string, int64, bool) {
+	streamID := chi.URLParam(r, "id")
+	if strings.TrimSpace(streamID) == "" {
+		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
+		return "", 0, false
+	}
+
+	tsStr := chi.URLParam(r, "ts")
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid timestamp — use unix seconds", "VALIDATION")
+		return "", 0, false
+	}
+
+	return streamID, ts, true
+}
+
+func (s *Server) findRingChunk(cr *chunkring.ChunkRing, ts int64) *chunkring.Chunk {
+	t := time.Unix(ts, 0)
+
 	current := cr.GetCurrent()
-	if current != nil && current.StartedAt.Truncate(time.Millisecond).Equal(t.Truncate(time.Millisecond)) {
-		return cr, current, true
+	if current != nil && current.StartedAt.Unix() == ts {
+		return current
 	}
 
-	chunk := cr.GetChunkByTime(t)
-	if chunk == nil {
-		writeError(w, http.StatusNotFound, "chunk not found or evicted", "NOT_FOUND")
-		return nil, nil, false
+	return cr.GetChunkByTime(t)
+}
+
+func (s *Server) setChunkCacheHeaders(w http.ResponseWriter, chunk *chunkring.Chunk) {
+	if chunk.Complete {
+		w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
 	}
-	return cr, chunk, true
+	w.Header().Set("X-Chunk-StartedAt", fmt.Sprintf("%d", chunk.StartedAt.Unix()))
+	w.Header().Set("X-Chunk-Complete", fmt.Sprintf("%t", chunk.Complete))
+}
+
+func (s *Server) proxyS3Object(w http.ResponseWriter, r *http.Request, streamID string, ts int64, filename, contentType string) {
+	s3c := s.streamManager.S3Client()
+	if s3c == nil {
+		writeError(w, http.StatusNotFound, "chunk not found", "NOT_FOUND")
+		return
+	}
+
+	row, err := s.db.GetOffloadedChunkByTime(r.Context(), streamID, time.Unix(ts, 0))
+	if err != nil {
+		slog.Warn("rewind: s3 lookup failed", "stream", streamID, "ts", ts, "err", err)
+		writeError(w, http.StatusInternalServerError, "storage lookup failed", "INTERNAL_ERROR")
+		return
+	}
+	if row == nil {
+		writeError(w, http.StatusNotFound, "chunk not found", "NOT_FOUND")
+		return
+	}
+
+	key := fmt.Sprintf("%s/streams/%s/%d/%s", s3c.Prefix(), streamID, row.StartedAt.Unix(), filename)
+	body, _, err := s3c.GetObject(r.Context(), key)
+	if err != nil {
+		slog.Warn("rewind: s3 get failed", "key", key, "err", err)
+		writeError(w, http.StatusBadGateway, "failed to retrieve from storage", "STORAGE_ERROR")
+		return
+	}
+	defer body.Close()
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
+	w.Header().Set("X-Chunk-StartedAt", fmt.Sprintf("%d", row.StartedAt.Unix()))
+	w.Header().Set("X-Chunk-Complete", "true")
+	w.Header().Set("X-Chunk-Source", "s3")
+	io.Copy(w, body)
 }

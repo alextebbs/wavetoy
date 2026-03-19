@@ -327,9 +327,6 @@ func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []s
 	if patch.AGCGainDB != nil {
 		fields = append(fields, "agc_gain_db")
 	}
-	if patch.BufferMinutes != nil && *patch.BufferMinutes != existing.BufferMinutes {
-		fields = append(fields, "buffer_minutes")
-	}
 	if patch.Filters != nil {
 		fields = append(fields, "filters")
 	}
@@ -338,6 +335,9 @@ func collectChangedFields(existing *models.Stream, patch patchStreamRequest) []s
 	}
 	if patch.ViewLocked != nil && *patch.ViewLocked != existing.ViewLocked {
 		fields = append(fields, "view_locked")
+	}
+	if patch.LogLevel != nil && *patch.LogLevel != existing.LogLevel {
+		fields = append(fields, "log_level")
 	}
 	return fields
 }

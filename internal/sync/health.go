@@ -27,7 +27,7 @@ func NewHealthChecker(database *db.DB) *HealthChecker {
 	return &HealthChecker{
 		db:          database,
 		concurrency: defaultConcurrency,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		client:      healthClient(),
 	}
 }
 
@@ -39,7 +39,14 @@ func NewHealthCheckerWithConcurrency(database *db.DB, concurrency int) *HealthCh
 	return &HealthChecker{
 		db:          database,
 		concurrency: concurrency,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		client:      healthClient(),
+	}
+}
+
+func healthClient() *http.Client {
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 }
 

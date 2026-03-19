@@ -153,8 +153,8 @@ export class ScrubController {
   private chunkSource: ChunkSource;
   private node: AudioWorkletNode;
 
-  private decoded = new Map<string, DecodedChunk>();
-  private fetchPromises = new Map<string, Promise<void>>();
+  private decoded = new Map<number, DecodedChunk>();
+  private fetchPromises = new Map<number, Promise<void>>();
 
   private windowStartRow = 0;
   private windowEndRow = 0;

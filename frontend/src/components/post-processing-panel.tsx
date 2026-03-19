@@ -64,7 +64,7 @@ function merge(filters: FilterConfig): Required<FilterConfig> {
 }
 
 export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disabled }: Props) {
-  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
+  const shouldMuteUI = useScrollBackStore((s) => s.isInScrollBack || s.streamLocked);
   const [local, setLocal] = useState(() => merge(filters));
 
   useEffect(() => {
@@ -87,19 +87,13 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
   ) => push({ ...local, [key]: { ...local[key], ...patch } });
 
   return (
-    <div className={`border-t border-border/60 transition-opacity duration-200${disabled ? " opacity-40 pointer-events-none select-none" : ""}${isInScrollBack && !disabled ? " opacity-40 pointer-events-none select-none" : ""}`}>
+    <div className={`border-t border-border/60 transition-opacity duration-200${disabled ? " opacity-40 pointer-events-none select-none" : ""}${shouldMuteUI && !disabled ? " opacity-40 pointer-events-none select-none" : ""}`}>
       {/* ── Noise Blanker ── */}
       <FilterSection
         label="Noise Blanker"
         enabled={local.noise_blanker.enabled}
         onToggle={(on) => updateFilter("noise_blanker", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Suppresses impulse noise — clicks, pops, static crashes, and ignition interference."
-            when="Use when you hear sharp, crackling bursts of noise, especially on HF bands near electrical equipment or thunderstorms."
-            how="Compares instantaneous amplitude against a short moving average. When a spike exceeds the threshold ratio, the output is blanked (replaced with silence) for a brief gate period. A delay line ensures blanking starts slightly before the impulse reaches the output."
-          />
-        }
+        tip="Compares instantaneous amplitude against a short moving average. When a spike exceeds the threshold ratio, the output is blanked (replaced with silence) for a brief gate period. A delay line ensures blanking starts slightly before the impulse reaches the output."
       >
         <NoiseBlankerMeter
           samplesRef={samplesRef}
@@ -123,13 +117,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="High-Pass"
         enabled={local.high_pass.enabled}
         onToggle={(on) => updateFilter("high_pass", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Removes low-frequency content below the cutoff frequency."
-            when="Use to eliminate mains hum (50/60 Hz), DC offset, or low-frequency rumble from the antenna or receiver."
-            how="Second-order Butterworth IIR biquad filter with 12 dB/octave rolloff. Coefficients are computed from the Audio EQ Cookbook (Bristow-Johnson). 5 multiply-adds per sample, zero latency."
-          />
-        }
+        tip="Second-order Butterworth IIR biquad filter with 12 dB/octave rolloff. Coefficients from the Audio EQ Cookbook (Bristow-Johnson). 5 multiply-adds per sample, zero latency."
       >
         <PassFilterSpectrum
           samplesRef={samplesRef}
@@ -155,13 +143,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Notch Filter"
         enabled={local.notch.enabled}
         onToggle={(on) => updateFilter("notch", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Removes a narrow frequency band while passing everything else."
-            when="Use to kill a specific known interference tone — a heterodyne whistle, birdie, or power-supply whine at a fixed frequency."
-            how="Second-order IIR band-reject biquad filter. Q controls the notch width: higher Q = narrower and deeper notch. At Q=10, the notch is a few tens of Hz wide with >20 dB rejection at center."
-          />
-        }
+        tip="Second-order IIR band-reject biquad filter. Q controls the notch width: higher Q = narrower and deeper notch. At Q=10, the notch is a few tens of Hz wide with >20 dB rejection at center."
       >
         <NotchSpectrum
           samplesRef={samplesRef}
@@ -196,13 +178,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Autonotch"
         enabled={local.autonotch.enabled}
         onToggle={(on) => updateFilter("autonotch", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Automatically finds and removes tonal interference without you needing to know the frequency."
-            when="Use when you hear whistles, carriers, or birdies but don't know their exact frequency, or when the interference drifts. Unlike the manual notch, this adapts in real time."
-            how="Variable-leak LMS (Least Mean Squares) adaptive FIR filter. Learns to predict tonal (repetitive) components of the signal — the prediction is subtracted, leaving only broadband content (voice, noise). Converges within ~100ms. Based on Warren Pratt's WDSP algorithm."
-          />
-        }
+        tip="Variable-leak LMS (Least Mean Squares) adaptive FIR filter. Learns to predict tonal (repetitive) components of the signal — the prediction is subtracted, leaving only broadband content (voice, noise). Converges within ~100ms. Based on Warren Pratt's WDSP algorithm."
       >
         <AutonotchMeter
           samplesRef={samplesRef}
@@ -226,13 +202,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Noise Reduction"
         enabled={local.noise_reducer.enabled}
         onToggle={(on) => updateFilter("noise_reducer", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Reduces broadband background noise (hiss, static) while preserving the signal."
-            when="Use on any noisy reception — especially weak HF signals buried in atmospheric or receiver noise. The primary tool for improving intelligibility."
-            how="MMSE-STSA (Ephraim-Malah 1984) spectral noise reduction. 512-point FFT with 50% overlap-add. Estimates noise per frequency bin using speech probability tracking, computes optimal gain via the Ephraim-Malah function, and applies decision-directed a priori SNR smoothing. Dynamic frequency averaging reduces musical noise artifacts. Strength controls the smoothing factor; floor sets the minimum gain per bin."
-          />
-        }
+        tip="MMSE-STSA (Ephraim-Malah 1984) spectral noise reduction. 512-point FFT with 50% overlap-add. Estimates noise per frequency bin using speech probability tracking, computes optimal gain via the Ephraim-Malah function, and applies decision-directed a priori SNR smoothing. Dynamic frequency averaging reduces musical noise artifacts. Strength controls the smoothing factor; floor sets the minimum gain per bin."
       >
         <NoiseReducerSpectrum
           samplesRef={samplesRef}
@@ -266,13 +236,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Low-Pass"
         enabled={local.low_pass.enabled}
         onToggle={(on) => updateFilter("low_pass", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Removes high-frequency content above the cutoff frequency."
-            when="Use to cut high-frequency hiss and noise above the signal of interest. For SSB voice, a cutoff around 2.5–3 kHz removes upper hiss without affecting intelligibility."
-            how="Second-order Butterworth IIR biquad filter with 12 dB/octave rolloff. Same structure as the high-pass but with low-pass coefficients. Zero latency, 5 multiply-adds per sample."
-          />
-        }
+        tip="Second-order Butterworth IIR biquad filter with 12 dB/octave rolloff. Same structure as the high-pass but with low-pass coefficients. Zero latency, 5 multiply-adds per sample."
       >
         <PassFilterSpectrum
           samplesRef={samplesRef}
@@ -298,13 +262,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Noise Gate"
         enabled={local.noise_gate.enabled}
         onToggle={(on) => updateFilter("noise_gate", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Silences the output when signal level drops below a threshold, producing clean silence between transmissions."
-            when="Use when monitoring a frequency with intermittent transmissions (repeaters, marine channels). Mutes the background noise during gaps."
-            how="Per-sample envelope follower with attack/release smoothing and a hold timer. When signal drops below threshold, the hold timer counts down before the gate closes with a smooth fade-out. This prevents clicky transitions and keeps the gate open during natural speech pauses."
-          />
-        }
+        tip="Per-sample envelope follower with attack/release smoothing and a hold timer. When signal drops below threshold, the hold timer counts down before the gate closes with a smooth fade-out. This prevents clicky transitions and keeps the gate open during natural speech pauses."
       >
         <NoiseGateMeter
           samplesRef={samplesRef}
@@ -346,13 +304,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Soft Clipper"
         enabled={local.soft_clipper.enabled}
         onToggle={(on) => updateFilter("soft_clipper", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Smoothly compresses loud peaks instead of hard-clipping them, taming sudden volume spikes."
-            when="Use when strong nearby stations or static crashes cause jarring volume jumps. Keeps the listening level comfortable without harsh distortion."
-            how="Tanh waveshaping curve: output = ceiling * tanh(input * drive / ceiling). Small signals pass linearly; large signals are smoothly compressed toward the ceiling. Drive controls how much gain is applied before the curve; ceiling sets the maximum output level. Same nonlinearity used in analog tube amplifiers."
-          />
-        }
+        tip="Tanh waveshaping curve: output = ceiling * tanh(input * drive / ceiling). Small signals pass linearly; large signals are smoothly compressed toward the ceiling. Drive controls how much gain is applied before the curve; ceiling sets the maximum output level."
       >
         <ClipperCurve
           driveDb={local.soft_clipper.drive_db}
@@ -385,13 +337,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Ring Modulator"
         enabled={local.ring_modulator.enabled}
         onToggle={(on) => updateFilter("ring_modulator", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Multiplies the audio by a sine wave carrier, producing metallic, robotic, or alien-sounding output."
-            when="Use for the classic 'Dalek' or 'robot voice' effect. Low carrier frequencies create a tremolo feel; mid frequencies produce the iconic robotic voice; high frequencies get alien and metallic."
-            how="Per-sample multiplication of the input by sin(2π·f·t). This is DSB-SC (double-sideband suppressed-carrier) modulation — it shifts every frequency in the input by ±carrierHz, destroying the harmonic relationships that make voice sound human."
-          />
-        }
+        tip="Per-sample multiplication of the input by sin(2π·f·t). DSB-SC (double-sideband suppressed-carrier) modulation — shifts every frequency in the input by ±carrierHz, destroying the harmonic relationships that make voice sound human."
       >
         <RingModScope
           carrierHz={local.ring_modulator.carrier_hz}
@@ -424,13 +370,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Echo"
         enabled={local.echo.enabled}
         onToggle={(on) => updateFilter("echo", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Adds repeating delayed copies of the audio, creating an echo effect with adjustable decay."
-            when="Use to add atmosphere or space to any signal. Subtle settings (short delay, low feedback) add room-like ambience. High feedback creates long, ambient reverb tails from radio noise."
-            how="Circular delay buffer with feedback. Each sample is mixed with a delayed copy of itself, and the result is written back into the buffer for subsequent repeats. Feedback controls decay rate; mix controls dry/wet balance."
-          />
-        }
+        tip="Circular delay buffer with feedback. Each sample is mixed with a delayed copy of itself, and the result is written back into the buffer for subsequent repeats. Feedback controls decay rate; mix controls dry/wet balance."
       >
         <EchoTrail
           delayMs={local.echo.delay_ms}
@@ -473,13 +413,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         label="Reverb"
         enabled={local.reverb.enabled}
         onToggle={(on) => updateFilter("reverb", { enabled: on })}
-        tip={
-          <FilterTip
-            what="Adds artificial room ambience, simulating the sound of the signal echoing in a physical space."
-            when="Use to add spatial depth and atmosphere. Small room sizes create a tight, boxy sound. Large sizes create cavernous, cathedral-like reverb. Great for ambient shortwave listening."
-            how="Schroeder/Freeverb architecture: four parallel comb filters with one-pole damping feed into two cascaded allpass diffusors. Delay lengths are mutually prime to prevent metallic coloring. Damping simulates high-frequency absorption in room surfaces."
-          />
-        }
+        tip="Schroeder/Freeverb architecture: four parallel comb filters with one-pole damping feed into two cascaded allpass diffusors. Delay lengths are mutually prime to prevent metallic coloring. Damping simulates high-frequency absorption in room surfaces."
       >
         <ReverbDecay
           roomSize={local.reverb.room_size}
@@ -551,16 +485,6 @@ function FilterSection({
         <Switch checked={enabled} onCheckedChange={onToggle} />
       </div>
       {enabled && <div className="mt-3 space-y-2">{children}</div>}
-    </div>
-  );
-}
-
-function FilterTip({ what, when, how }: { what: string; when: string; how: string }) {
-  return (
-    <div className="space-y-1.5">
-      <p>{what}</p>
-      <p className="text-muted-foreground">{when}</p>
-      <p className="text-muted-foreground/70">{how}</p>
     </div>
   );
 }

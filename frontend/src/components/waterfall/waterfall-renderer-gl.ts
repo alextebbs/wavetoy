@@ -9,6 +9,8 @@ interface GLTile extends BaseTile {
   texture: WebGLTexture | null;
 }
 
+const MIN_CHUNK_DISPLAY_ROWS = 60;
+
 const VERT_SRC = `#version 300 es
 in vec2 a_pos;
 uniform vec4 u_srcRect;
@@ -167,7 +169,27 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     const visibleRowsBottom =
       effectiveOffset + Math.ceil(height / this.rowScale);
 
+    const firstInProgress =
+      this.chunks.length > 0 && !this.chunks[this.chunks.length - 1]!.complete
+        ? this.chunks[this.chunks.length - 1]!
+        : null;
+
     for (const chunk of this.chunks) {
+      if (chunk !== firstInProgress) {
+        const expectedHeight = Math.max(chunk.expectedWF, MIN_CHUNK_DISPLAY_ROWS);
+        if (chunk.frameCount < expectedHeight) {
+          this.drawChunkMissingOverlay(
+            gl,
+            chunk,
+            expectedHeight,
+            width,
+            height,
+            visibleRowsTop,
+            visibleRowsBottom,
+          );
+        }
+      }
+
       for (const tile of chunk.tiles) {
         if (tile.rowCount === 0 || !tile.texture) continue;
         const tileTop = this.totalRows - tile.startRow - tile.rowCount;
@@ -335,6 +357,39 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  private drawChunkMissingOverlay(
+    gl: WebGL2RenderingContext,
+    chunk: { startRow: number; frameCount: number },
+    expectedHeight: number,
+    width: number,
+    height: number,
+    visibleRowsTop: number,
+    visibleRowsBottom: number,
+  ): void {
+    const missingRows = expectedHeight - chunk.frameCount;
+    if (missingRows <= 0) return;
+
+    const regionTopFromLive = this.totalRows - chunk.startRow - expectedHeight;
+    const regionBottomFromLive = this.totalRows - chunk.startRow - chunk.frameCount;
+
+    if (regionBottomFromLive < visibleRowsTop || regionTopFromLive > visibleRowsBottom) return;
+
+    const clipTop = Math.max(regionTopFromLive, visibleRowsTop);
+    const clipBottom = Math.min(regionBottomFromLive, visibleRowsBottom);
+    if (clipTop >= clipBottom) return;
+
+    const canvasYTop = (clipTop - this.scrollOffset) * this.rowScale;
+    const canvasYBottom = (clipBottom - this.scrollOffset) * this.rowScale;
+    const rectHeight = canvasYBottom - canvasYTop;
+    if (rectHeight <= 0) return;
+
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, height - canvasYBottom, width, rectHeight);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
   }
 
   private drawTile(

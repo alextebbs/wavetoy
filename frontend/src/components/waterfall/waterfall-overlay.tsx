@@ -21,11 +21,12 @@ const MONO_FONT = '"Iosevka Charon Mono", ui-monospace, SFMono-Regular, Menlo, M
 const EXPECTED_WF_PER_CHUNK = 1360;
 const FULLNESS_THRESHOLD = 0.8;
 
-function formatTimestamp(iso: string): string {
+function formatTimestamp(ts: string | number): string {
   try {
-    return new Date(iso).toISOString();
+    const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+    return d.toISOString();
   } catch {
-    return iso;
+    return String(ts);
   }
 }
 
@@ -54,8 +55,8 @@ function buildDiagInfo(
   const complete = meta?.complete as boolean | undefined;
   const inProgress = complete === false;
 
-  const time = meta?.started_at
-    ? formatTimestamp(meta.started_at as string)
+  const time = meta?.started_at != null
+    ? formatTimestamp(meta.started_at as string | number)
     : marker.label;
 
   const wfFrames = (meta?.wf_frames as number | undefined) ?? 0;
@@ -129,7 +130,77 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       [],
     );
 
+    function createGapNode(): HTMLDivElement {
+      const el = document.createElement("div");
+      el.style.position = "absolute";
+      el.style.top = "0";
+      el.style.left = "0";
+      el.style.width = "100%";
+      el.style.display = "none";
+      el.style.pointerEvents = "none";
+      el.style.willChange = "transform";
+      el.style.overflow = "hidden";
+      el.style.borderTop = "1px solid rgba(180, 30, 30, 0.6)";
+      el.style.background = [
+        "repeating-linear-gradient(-45deg, transparent, transparent 5px, rgba(40, 4, 4, 0.4) 5px, rgba(40, 4, 4, 0.4) 10px)",
+        "#050000",
+      ].join(", ");
+
+      const label = document.createElement("span");
+      label.textContent = "NO DATA";
+      label.style.position = "absolute";
+      label.style.top = "50%";
+      label.style.left = "50%";
+      label.style.transform = "translate(-50%, -50%)";
+      label.style.color = "rgba(200, 55, 55, 0.75)";
+      label.style.fontSize = "11px";
+      label.style.fontWeight = "600";
+      label.style.letterSpacing = "3px";
+      label.style.fontFamily = MONO_FONT;
+      label.style.whiteSpace = "nowrap";
+      label.style.userSelect = "none";
+      el.appendChild(label);
+
+      return el;
+    }
+
+    function createEndNode(): HTMLDivElement {
+      const el = document.createElement("div");
+      el.style.position = "absolute";
+      el.style.top = "0";
+      el.style.left = "0";
+      el.style.width = "100%";
+      el.style.display = "none";
+      el.style.pointerEvents = "none";
+      el.style.willChange = "transform";
+      el.style.overflow = "hidden";
+      el.style.background = [
+        "repeating-linear-gradient(-45deg, transparent, transparent 5px, rgba(4, 22, 38, 0.4) 5px, rgba(4, 22, 38, 0.4) 10px)",
+        "#000306",
+      ].join(", ");
+
+      const label = document.createElement("span");
+      label.textContent = "END";
+      label.style.position = "absolute";
+      label.style.top = "50%";
+      label.style.left = "50%";
+      label.style.transform = "translate(-50%, -50%)";
+      label.style.color = "rgba(10, 105, 95, 0.7)";
+      label.style.fontSize = "11px";
+      label.style.fontWeight = "600";
+      label.style.letterSpacing = "3px";
+      label.style.fontFamily = MONO_FONT;
+      label.style.whiteSpace = "nowrap";
+      label.style.userSelect = "none";
+      el.appendChild(label);
+
+      return el;
+    }
+
     function createMarkerNode(marker: WaterfallMarker): HTMLDivElement {
+      if (marker.metadata?.type === "gap") return createGapNode();
+      if (marker.metadata?.type === "end") return createEndNode();
+
       const el = document.createElement("div");
       el.style.position = "absolute";
       el.style.top = "0";
@@ -147,18 +218,16 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       line.style.height = "1px";
       line.style.backgroundColor = "rgba(255, 255, 255, 0.25)";
       line.style.mixBlendMode = "screen";
-      line.style.opacity = "0";
-      line.style.transition = "opacity 0.15s ease";
       el.appendChild(line);
 
       const pill = document.createElement("div");
       pill.style.position = "absolute";
-      pill.style.bottom = "0";
+      pill.style.top = "1px";
       pill.style.right = "0";
       pill.style.fontSize = "10px";
       pill.style.lineHeight = "14px";
       pill.style.padding = "1px 5px";
-      pill.style.borderRadius = "3px 0 0 0";
+      pill.style.borderRadius = "0 0 0 3px";
       pill.style.backgroundColor = "rgba(0, 0, 0, 0.55)";
       pill.style.whiteSpace = "nowrap";
       pill.style.pointerEvents = "auto";
@@ -168,7 +237,6 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       pill.style.display = "flex";
       pill.style.alignItems = "center";
       pill.style.gap = "6px";
-      pill.style.transition = "border-radius 0.15s ease";
 
       const d = themeRef.current;
       const info = buildDiagInfo(marker, {
@@ -211,12 +279,10 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       }
 
       pill.addEventListener("mouseenter", () => {
-        line.style.opacity = "1";
         pill.style.borderRadius = "0";
       });
       pill.addEventListener("mouseleave", () => {
-        line.style.opacity = "0";
-        pill.style.borderRadius = "3px 0 0 0";
+        pill.style.borderRadius = "0 0 0 3px";
       });
 
       el.appendChild(pill);
@@ -246,14 +312,32 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       update(state: OverlayState) {
         const { totalRows, scrollOffset, rowScale, height, dpr, playbackRow } = state;
         const cssHeight = height / dpr;
-        const traceVisible = showTuningTraceRef.current;
 
         for (const [id, marker] of markersRef.current) {
           const node = nodesRef.current.get(id);
           if (!node) continue;
 
-          if (!traceVisible) {
-            node.style.display = "none";
+          const meta = marker.metadata;
+          if (meta && (meta.type === "gap" || meta.type === "end")) {
+            const inScrollback = scrollOffset > 0 || playbackRow !== null;
+            if (meta.type === "end" && !inScrollback) {
+              node.style.display = "none";
+              continue;
+            }
+
+            const gapStart = meta.gapStartRow as number;
+            const gapRows = meta.gapRowCount as number;
+            const topFromLive = totalRows - gapStart - gapRows;
+            const cssYTop = (topFromLive - scrollOffset) * rowScale / dpr;
+            const cssH = gapRows * rowScale / dpr;
+
+            if (cssYTop + cssH < 0 || cssYTop > cssHeight) {
+              node.style.display = "none";
+            } else {
+              node.style.display = "";
+              node.style.height = `${cssH}px`;
+              node.style.transform = `translateY(${cssYTop}px)`;
+            }
             continue;
           }
 

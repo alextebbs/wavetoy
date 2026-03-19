@@ -18,15 +18,32 @@ import (
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
+	s3client "github.com/sammy/sdr-radio/internal/s3"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
 var ErrStreamNotActive = errors.New("stream is not active")
 
+func (m *Manager) syncStreamLogLevel(streamID, logLevel string) {
+	lvl := streamlog.LevelInfo
+	if logLevel != "" {
+		switch logLevel {
+		case "debug":
+			lvl = streamlog.LevelDebug
+		case "warn":
+			lvl = streamlog.LevelWarn
+		case "error":
+			lvl = streamlog.LevelError
+		}
+	}
+	m.log.SetLevel(streamID, lvl)
+}
+
 type Manager struct {
 	db         *db.DB
 	log        *streamlog.Logger
 	runtimeCtx context.Context
+	s3Client   *s3client.Client
 
 	mu      sync.RWMutex
 	streams map[string]*activeStream
@@ -69,7 +86,8 @@ type activeStream struct {
 	startedAt     time.Time
 	chunkRing     *chunkring.ChunkRing
 	filterChain  *filter.Chain
-	autoFallback bool
+	autoProbe bool
+	keepAlive bool
 	listen       *listenSession
 
 	idleSince        time.Time
@@ -225,7 +243,7 @@ func (m *Manager) tryCommitListen(as *activeStream) {
 	}()
 }
 
-func (m *Manager) SetAutoFallback(streamID string, enabled bool) {
+func (m *Manager) SetAutoProbe(streamID string, enabled bool) {
 	m.mu.RLock()
 	as, ok := m.streams[streamID]
 	m.mu.RUnlock()
@@ -234,11 +252,79 @@ func (m *Manager) SetAutoFallback(streamID string, enabled bool) {
 	}
 
 	as.mu.Lock()
-	as.autoFallback = enabled
+	as.autoProbe = enabled
 	as.mu.Unlock()
 }
 
+func (m *Manager) SetKeepAlive(streamID string, enabled bool) {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	as.mu.Lock()
+	as.keepAlive = enabled
+	as.mu.Unlock()
+}
+
+func (m *Manager) SetS3Client(c *s3client.Client) {
+	m.s3Client = c
+}
+
+func (m *Manager) S3Available() bool {
+	return m.s3Client != nil
+}
+
+func (m *Manager) S3Client() *s3client.Client {
+	return m.s3Client
+}
+
+func (m *Manager) newS3Sink(streamID string) *chunkring.S3Sink {
+	sink := chunkring.NewS3Sink(m.s3Client, m.db, streamID)
+	sink.SetOnUpload(func(startedAt, endedAt time.Time, totalBytes int64) {
+		m.log.Wire(streamID, streamlog.LevelInfo, "offload.chunk", "wavetoy", "storage",
+			fmt.Sprintf("uploaded %d bytes (%s → %s)",
+				totalBytes,
+				startedAt.Format("15:04:05"),
+				endedAt.Format("15:04:05")))
+	})
+	return sink
+}
+
+func (m *Manager) StartChunkOffload(ctx context.Context, streamID string) error {
+	if m.s3Client == nil {
+		return fmt.Errorf("S3 not configured")
+	}
+
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrStreamNotActive
+	}
+
+	as.chunkRing.SetSink(m.newS3Sink(streamID))
+	m.log.Info(streamID, "offload.start", "chunk offloading to S3 enabled")
+	return nil
+}
+
+func (m *Manager) StopChunkOffload(ctx context.Context, streamID string) {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	as.chunkRing.SetSink(nil)
+	m.log.Info(streamID, "offload.stop", "chunk offloading to S3 disabled")
+}
+
 func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error {
+	m.syncStreamLogLevel(stream.ID, stream.LogLevel)
+
 	m.mu.RLock()
 	as, ok := m.streams[stream.ID]
 	m.mu.RUnlock()
@@ -442,6 +528,8 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 		bufMinutes = 5
 	}
 
+	m.syncStreamLogLevel(stream.ID, stream.LogLevel)
+
 	now := time.Now()
 	as := &activeStream{
 		id:              stream.ID,
@@ -457,7 +545,8 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 		filterChain:     filter.NewChain(stream.Filters, client.SampleRate()),
 		interp:          interpreter.New(normalizeInterpConfig(stream.Interpreter), client.SampleRate(), m.interpLogFunc(stream.ID)),
 		interpType:      stream.Interpreter.Type,
-		autoFallback:    stream.AutoFallback,
+		autoProbe:       stream.AutoProbe,
+		keepAlive:       stream.KeepAlive,
 		listen:          newListenSession(stream.SourceID),
 		tuneFreqKHz:     float32(stream.FrequencyKHz),
 		tunePassLo:      int16(stream.BandwidthLowHz),
@@ -493,6 +582,12 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	if wfClient != nil {
 		m.startWFPump(as, wfClient, as.generation)
 	}
+
+	if stream.OffloadChunks && m.s3Client != nil {
+		as.chunkRing.SetSink(m.newS3Sink(stream.ID))
+		m.log.Info(stream.ID, "offload.start", "chunk offloading to S3 resumed on stream start")
+	}
+
 	return nil
 }
 
@@ -732,7 +827,7 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 				m.logAudioMetrics(as, client, generation)
 
 				as.mu.RLock()
-				shouldIdleDisconnect := !as.autoFallback &&
+				shouldIdleDisconnect := !as.keepAlive &&
 					!as.idleSince.IsZero() &&
 					time.Since(as.idleSince) >= idleDisconnectTimeout &&
 					len(as.subscribers) == 0 && len(as.wfSubscribers) == 0
@@ -1078,7 +1173,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 
 			as.mu.RLock()
 			alreadyRunning := as.client != nil
-			idle := !as.autoFallback && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
+			idle := !as.keepAlive && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
 			as.mu.RUnlock()
 			if alreadyRunning {
 				m.log.Info(as.id, "reconnect.abandon", fmt.Sprintf("running=%v", alreadyRunning))
@@ -1095,7 +1190,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				m.setStreamStateInDBAndNotify(context.Background(), as.id, StateError)
 
 				as.mu.RLock()
-				shouldFallback := as.autoFallback
+				shouldFallback := as.autoProbe
 				as.mu.RUnlock()
 				if shouldFallback {
 					m.onDegradedMu.RLock()
@@ -1129,7 +1224,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				m.log.Warn(as.id, "reconnect.start", fmt.Sprintf("attempt=%d failed: %v", attempt, err))
 
 				as.mu.RLock()
-				shouldFallback := as.autoFallback && attempt >= maxReconnectBeforeFallback
+				shouldFallback := as.autoProbe && attempt >= maxReconnectBeforeFallback
 				as.mu.RUnlock()
 
 				if shouldFallback {
@@ -1156,7 +1251,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			}
 
 			as.mu.Lock()
-			idleExpired := !as.autoFallback && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
+			idleExpired := !as.keepAlive && !as.idleSince.IsZero() && time.Since(as.idleSince) >= idleDisconnectTimeout
 			alreadyRunning = as.client != nil
 			if alreadyRunning || idleExpired {
 				as.mu.Unlock()

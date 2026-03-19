@@ -20,9 +20,11 @@ import (
 	"github.com/sammy/sdr-radio/internal/db"
 	"github.com/sammy/sdr-radio/internal/fallback"
 	"github.com/sammy/sdr-radio/internal/interpreter"
+	s3client "github.com/sammy/sdr-radio/internal/s3"
+	"github.com/sammy/sdr-radio/internal/startup"
 	"github.com/sammy/sdr-radio/internal/streamlog"
-	wsperpool "github.com/sammy/sdr-radio/internal/whisper"
 	srcsync "github.com/sammy/sdr-radio/internal/sync"
+	wsperpool "github.com/sammy/sdr-radio/internal/whisper"
 )
 
 func main() {
@@ -112,11 +114,15 @@ func main() {
 		})
 	})
 	srv.StreamManager().SetOnChunkComplete(func(streamID string, meta chunkring.ChunkMeta) {
+		var endedAt int64
+		if meta.EndedAt != nil {
+			endedAt = meta.EndedAt.Unix()
+		}
 		srv.BroadcastToStream(streamID, map[string]any{
 			"type":        "chunk_complete",
 			"index":       meta.Index,
-			"started_at":  meta.StartedAt,
-			"ended_at":    meta.EndedAt,
+			"started_at":  meta.StartedAt.Unix(),
+			"ended_at":    endedAt,
 			"source_id":   meta.SourceID,
 			"wf_frames":   meta.WFFrames,
 			"audio_bytes": meta.AudioBytes,
@@ -134,15 +140,37 @@ func main() {
 		slog.Info("whisper not available (build with -tags whisper to enable voice interpreter)")
 	}
 
+	s3c := s3client.NewFromEnv()
+	if s3c != nil {
+		s3c.EnsureBucket(ctx)
+		srv.StreamManager().SetS3Client(s3c)
+		slog.Info("s3: configured", "bucket", s3c.Bucket(), "prefix", s3c.Prefix())
+	} else {
+		slog.Info("s3: not configured (chunk offloading unavailable)")
+	}
+
+	startup.Run(ctx, startup.Deps{
+		DB:          database,
+		StreamMgr:   srv.StreamManager(),
+		FallbackMgr: fallbackMgr,
+	})
+
 	go func() {
-		streams, err := database.ListStreamsByTenant(ctx, db.DefaultTenantID, 100, 0)
-		if err != nil {
-			slog.Error("fallback: list streams", "err", err)
-			return
-		}
-		for _, stream := range streams {
-			if stream.AutoFallback {
-				fallbackMgr.Enable(ctx, stream.ID)
+		retentionDays := 30
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			cutoff := time.Now().AddDate(0, 0, -retentionDays)
+			deleted, err := database.DeleteExpiredChunks(ctx, cutoff)
+			if err != nil {
+				slog.Error("retention: delete expired chunks", "err", err)
+			} else if deleted > 0 {
+				slog.Info("retention: cleaned expired chunk manifest rows", "deleted", deleted)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 			}
 		}
 	}()

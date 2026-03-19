@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BugIcon, BracesIcon } from "lucide-react";
-import { setStreamDebug, downloadStreamLogs } from "@/lib/api";
+import { type Stream, setStreamDebug, downloadStreamLogs } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
 
@@ -20,6 +20,8 @@ export type LogLine = LogEntry;
 interface LogsPanelProps {
   lines: LogEntry[];
   streamId?: string;
+  stream?: Stream | null;
+  onPatch?: (patch: Record<string, boolean>) => void;
 }
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -61,11 +63,11 @@ const LEVEL_SEVERITY: Record<string, number> = {
   error: 3,
 };
 
-export function LogsPanel({ lines, streamId }: LogsPanelProps) {
+export function LogsPanel({ lines, streamId, stream, onPatch }: LogsPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [filter, setFilter] = useState<FilterLevel>("all");
-  const [debug, setDebug] = useState(false);
+  const debug = stream?.log_level === "debug";
 
   const scrollToBottom = useCallback(() => {
     const el = containerRef.current;
@@ -95,8 +97,7 @@ export function LogsPanel({ lines, streamId }: LogsPanelProps) {
   const toggleDebug = useCallback(() => {
     if (!streamId) return;
     const next = !debug;
-    setDebug(next);
-    setStreamDebug(streamId, next ? "debug" : "info").catch(() => setDebug(!next));
+    setStreamDebug(streamId, next ? "debug" : "info").catch(() => {});
   }, [streamId, debug]);
 
   const downloadLogs = useCallback(() => {
@@ -154,3 +155,4 @@ export function LogsPanel({ lines, streamId }: LogsPanelProps) {
     </section>
   );
 }
+

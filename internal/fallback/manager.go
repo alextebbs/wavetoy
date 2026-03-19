@@ -136,7 +136,7 @@ func (m *Manager) Reprobe(ctx context.Context, streamID string) {
 		return
 	}
 
-	periodic := stream.AutoFallback
+	periodic := stream.AutoProbe
 
 	m.mu.Lock()
 	sessionCtx, cancel := context.WithCancel(context.Background())
@@ -211,13 +211,13 @@ func (m *Manager) OnStreamUpdated(stream models.Stream, sourceChanged bool) {
 	m.mu.RUnlock()
 
 	if !exists {
-		if stream.AutoFallback {
+		if stream.AutoProbe {
 			m.Enable(context.Background(), stream.ID)
 		}
 		return
 	}
 
-	if !stream.AutoFallback {
+	if !stream.AutoProbe {
 		m.Disable(context.Background(), stream.ID)
 		return
 	}

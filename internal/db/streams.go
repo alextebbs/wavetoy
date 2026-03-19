@@ -34,6 +34,7 @@ type CreateStreamParams struct {
 	AGCOn           bool
 	AGCGainDB       *float64
 	BufferMinutes   int
+	LogLevel        string
 }
 
 type UpdateStreamParams struct {
@@ -48,8 +49,13 @@ type UpdateStreamParams struct {
 	BufferMinutes    int
 	Filters          models.FilterConfig
 	Interpreter      interpreter.Config
-	AutoFallback     bool
+	AutoProbe        bool
+	QualityFallback  bool
+	OffloadChunks    bool
+	KeepAlive        bool
+	Locked           bool
 	ViewLocked       bool
+	LogLevel         string
 }
 
 func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.Stream, error) {
@@ -84,6 +90,11 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		return nil, ErrSourceAtCapacity
 	}
 
+	logLevel := p.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
 	now := time.Now()
 	stream := &models.Stream{
 		ID:                       ksuid.New().String(),
@@ -99,6 +110,7 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		BufferMinutes:            p.BufferMinutes,
 		State:                    "created",
 		Version:                  1,
+		LogLevel:                 logLevel,
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
@@ -107,16 +119,16 @@ func (db *DB) CreateStream(ctx context.Context, p CreateStreamParams) (*models.S
 		INSERT INTO streams (
 			id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 			mode, name, agc_on, agc_gain_db, buffer_minutes,
-			state, version, created_at, updated_at
+			state, version, log_level, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
-			$12, $13, $14, $15
+			$12, $13, $14, $15, $16
 		)
 	`,
 		stream.ID, stream.TenantID, stream.SourceID, stream.FrequencyKHz, stream.BandwidthLowHz, stream.BandwidthHighHz,
 		stream.Mode, stream.Name, stream.AGCOn, stream.AGCGainDB, stream.BufferMinutes,
-		stream.State, stream.Version, stream.CreatedAt, stream.UpdatedAt,
+		stream.State, stream.Version, stream.LogLevel, stream.CreatedAt, stream.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -164,6 +176,11 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 	}
 
 	var tag pgconn.CommandTag
+	logLevel := p.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
 	if baseVersion > 0 {
 		tag, err = db.Pool.Exec(ctx, `
 			UPDATE streams
@@ -178,12 +195,17 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    buffer_minutes = $9,
 			    filters = $10,
 			    interpreter = $11,
-			    auto_fallback = $12,
-			    view_locked = $13,
+			    auto_probe = $12,
+			    quality_fallback = $13,
+			    offload_chunks = $14,
+			    keep_alive = $15,
+			    locked = $16,
+			    view_locked = $17,
+			    log_level = $18,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $14 AND tenant_id = $15 AND version = $16
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoFallback, p.ViewLocked, streamID, tenantID, baseVersion)
+			WHERE id = $19 AND tenant_id = $20 AND version = $21
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoProbe, p.QualityFallback, p.OffloadChunks, p.KeepAlive, p.Locked, p.ViewLocked, logLevel, streamID, tenantID, baseVersion)
 	} else {
 		tag, err = db.Pool.Exec(ctx, `
 			UPDATE streams
@@ -198,12 +220,17 @@ func (db *DB) UpdateStream(ctx context.Context, streamID, tenantID string, p Upd
 			    buffer_minutes = $9,
 			    filters = $10,
 			    interpreter = $11,
-			    auto_fallback = $12,
-			    view_locked = $13,
+			    auto_probe = $12,
+			    quality_fallback = $13,
+			    offload_chunks = $14,
+			    keep_alive = $15,
+			    locked = $16,
+			    view_locked = $17,
+			    log_level = $18,
 			    version = version + 1,
 			    updated_at = now()
-			WHERE id = $14 AND tenant_id = $15
-		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoFallback, p.ViewLocked, streamID, tenantID)
+			WHERE id = $19 AND tenant_id = $20
+		`, p.SourceID, p.FrequencyKHz, p.BandwidthLowHz, p.BandwidthHighHz, p.Mode, p.Name, p.AGCOn, p.AGCGainDB, p.BufferMinutes, filtersJSON, interpreterJSON, p.AutoProbe, p.QualityFallback, p.OffloadChunks, p.KeepAlive, p.Locked, p.ViewLocked, logLevel, streamID, tenantID)
 	}
 	if err != nil {
 		return nil, err
@@ -229,16 +256,16 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes,
 		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
-		       auto_fallback, view_locked,
-		       created_at, updated_at
+		       auto_probe, quality_fallback, offload_chunks, keep_alive, locked, view_locked,
+		       log_level, created_at, updated_at
 		FROM streams
 		WHERE id = $1
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
 		&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
-		&stream.AutoFallback, &stream.ViewLocked,
-		&stream.CreatedAt, &stream.UpdatedAt,
+		&stream.AutoProbe, &stream.QualityFallback, &stream.OffloadChunks, &stream.KeepAlive, &stream.Locked, &stream.ViewLocked,
+		&stream.LogLevel, &stream.CreatedAt, &stream.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -257,8 +284,8 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes,
 		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
-		       auto_fallback, view_locked,
-		       created_at, updated_at
+		       auto_probe, quality_fallback, offload_chunks, keep_alive, locked, view_locked,
+		       log_level, created_at, updated_at
 		FROM streams
 		WHERE tenant_id = $1
 		ORDER BY updated_at DESC
@@ -276,14 +303,28 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
 			&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
-			&stream.AutoFallback, &stream.ViewLocked,
-			&stream.CreatedAt, &stream.UpdatedAt,
+			&stream.AutoProbe, &stream.QualityFallback, &stream.OffloadChunks, &stream.KeepAlive, &stream.Locked, &stream.ViewLocked,
+			&stream.LogLevel, &stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		streams = append(streams, stream)
 	}
 	return streams, rows.Err()
+}
+
+func (db *DB) UpdateStreamLogLevel(ctx context.Context, streamID, tenantID, logLevel string) error {
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	tag, err := db.Pool.Exec(ctx, `UPDATE streams SET log_level = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3`, logLevel, streamID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("stream %s not found", streamID)
+	}
+	return nil
 }
 
 func (db *DB) UpdateStreamState(ctx context.Context, streamID, state string) error {

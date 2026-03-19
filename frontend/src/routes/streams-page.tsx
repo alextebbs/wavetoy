@@ -22,6 +22,23 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+function streamChip(state: string): { label: string; color: "green" | "red" | "blue" | "grey" } {
+  switch (state) {
+    case "active":
+      return { label: "ACTIVE", color: "green" };
+    case "connecting":
+      return { label: "S/CON", color: "blue" };
+    case "reconnecting":
+      return { label: "S/RCN", color: "red" };
+    case "error":
+      return { label: "S/ERR", color: "red" };
+    case "idle":
+      return { label: "S/IDL", color: "grey" };
+    default:
+      return { label: state.toUpperCase(), color: "grey" };
+  }
+}
+
 export function StreamsPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -215,11 +232,27 @@ export function StreamsPage() {
                   to="/streams/$streamId"
                   params={{ streamId: stream.id }}
                 >
-                  <Card className="relative overflow-hidden p-0 transition-colors hover:ring-foreground/25" style={{ backgroundColor: "#000" }}>
+                  <Card className="relative overflow-hidden rounded-xl p-0 ring-border transition-colors hover:ring-border/60" style={{ backgroundColor: "#000" }}>
                     <SourceMiniMap
                       source={source}
                       className="h-[26rem] w-full"
                     />
+                    {(() => {
+                      const chip = streamChip(stream.state);
+                      return (
+                        <span className={`absolute right-3 top-3 z-20 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                          chip.color === "green"
+                            ? "bg-emerald-500/15 text-emerald-400"
+                            : chip.color === "red"
+                              ? "bg-destructive/15 text-destructive"
+                              : chip.color === "blue"
+                                ? "bg-primary/15 text-primary"
+                                : "bg-muted text-muted-foreground"
+                        }`}>
+                          {chip.label}
+                        </span>
+                      );
+                    })()}
                     <div className="relative z-10 -mt-80 px-3 pb-3">
                       <div
                         className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-gradient-to-t from-black to-transparent"

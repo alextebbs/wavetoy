@@ -113,8 +113,13 @@ export type Stream = {
   interpreter?: InterpreterConfig;
   wf_view_start_khz: number;
   wf_view_end_khz: number;
-  auto_fallback: boolean;
+  auto_probe: boolean;
+  quality_fallback: boolean;
+  offload_chunks: boolean;
+  keep_alive: boolean;
+  locked: boolean;
   view_locked: boolean;
+  log_level: string;
   created_at: string;
   updated_at: string;
 };
@@ -145,7 +150,7 @@ export type FallbackSuggestion = {
 
 export type FallbacksResponse = {
   stream_id: string;
-  auto_fallback: boolean;
+  auto_probe: boolean;
   suggestions: FallbackSuggestion[];
 };
 

@@ -14,7 +14,6 @@ import {
   Loader2Icon,
   RefreshCwIcon,
   RotateCwIcon,
-  ShieldCheckIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useScrollBackStore } from "@/lib/scroll-back-store";
@@ -22,7 +21,6 @@ import { useScrollBackStore } from "@/lib/scroll-back-store";
 interface FallbackSectionProps {
   stream: Stream | null;
   streamId: string;
-  onToggleFallback: (enabled: boolean) => void;
   wsRef: React.RefObject<WebSocket | null>;
   audioCtxRef: React.RefObject<AudioContext | null>;
   gainNodeRef: React.RefObject<GainNode | null>;
@@ -31,12 +29,11 @@ interface FallbackSectionProps {
 export function FallbackSection({
   stream,
   streamId,
-  onToggleFallback,
   wsRef,
   audioCtxRef,
   gainNodeRef,
 }: FallbackSectionProps) {
-  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
+  const shouldMuteUI = useScrollBackStore((s) => s.isInScrollBack || s.streamLocked);
   const [suggestions, setSuggestions] = useState<FallbackSuggestion[]>([]);
   const [probing, setProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState<{
@@ -44,7 +41,6 @@ export function FallbackSection({
     probed: number;
   } | null>(null);
   const [reprobing, setReprobing] = useState(false);
-  const autoFallback = stream?.auto_fallback ?? false;
 
   const loadFallbacks = useCallback(async () => {
     try {
@@ -159,29 +155,12 @@ export function FallbackSection({
                 variant="ghost"
                 size="icon"
                 className="size-6 shrink-0"
-                disabled={reprobing || isInScrollBack}
+                disabled={reprobing || shouldMuteUI}
                 onClick={() => void handleProbe()}
               >
                 <RefreshCwIcon
                   className={`size-3 ${reprobing ? "animate-spin" : ""}`}
                 />
-              </Button>
-            </Tooltip>
-            <Tooltip
-              content={
-                autoFallback
-                  ? "Keep alive & auto-fallback enabled"
-                  : "Enable keep alive & auto-fallback"
-              }
-            >
-              <Button
-                variant={autoFallback ? "outline" : "ghost"}
-                size="icon"
-                className="size-6 shrink-0"
-                disabled={isInScrollBack}
-                onClick={() => onToggleFallback(!autoFallback)}
-              >
-                <ShieldCheckIcon className="size-3" />
               </Button>
             </Tooltip>
           </div>
@@ -243,7 +222,7 @@ function SuggestionCard({
   audioCtxRef: React.RefObject<AudioContext | null>;
   gainNodeRef: React.RefObject<GainNode | null>;
 }) {
-  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
+  const shouldMuteUI = useScrollBackStore((s) => s.isInScrollBack || s.streamLocked);
   const scorePercent = Math.round(s.score * 100);
   const distLabel =
     s.distance_km < 1
@@ -291,7 +270,7 @@ function SuggestionCard({
             variant="ghost"
             size="sm"
             className="h-6 gap-1 px-2 text-[10px]"
-            disabled={isCurrentSource || isInScrollBack}
+            disabled={isCurrentSource || shouldMuteUI}
             onClick={() => onSwitch(s.source_id)}
           >
             {isCurrentSource ? "Current" : <><RotateCwIcon className="size-3" /> Swap</>}

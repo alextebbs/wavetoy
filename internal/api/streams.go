@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sammy/sdr-radio/internal/db"
@@ -39,11 +41,15 @@ type patchStreamRequest struct {
 	Name             *string              `json:"name"`
 	AGCOn            *bool                `json:"agc_on"`
 	AGCGainDB        *float64             `json:"agc_gain_db"`
-	BufferMinutes    *int                 `json:"buffer_minutes"`
 	Filters          *models.FilterConfig  `json:"filters"`
 	Interpreter      *interpreter.Config   `json:"interpreter"`
-	AutoFallback     *bool                 `json:"auto_fallback"`
-	ViewLocked       *bool                `json:"view_locked"`
+	AutoProbe        *bool                 `json:"auto_probe"`
+	QualityFallback  *bool                 `json:"quality_fallback"`
+	OffloadChunks    *bool                 `json:"offload_chunks"`
+	KeepAlive        *bool                 `json:"keep_alive"`
+	Locked           *bool                 `json:"locked"`
+	ViewLocked       *bool                 `json:"view_locked"`
+	LogLevel         *string               `json:"log_level"`
 }
 
 type patchStreamError struct {
@@ -80,9 +86,7 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 	if req.Name == "" {
 		req.Name = "SDR Stream"
 	}
-	if req.BufferMinutes <= 0 {
-		req.BufferMinutes = 15
-	}
+	req.BufferMinutes = 5
 
 	agcOn := true
 	if req.AGCOn != nil {
@@ -100,6 +104,7 @@ func (s *Server) createStream(w http.ResponseWriter, r *http.Request) {
 		AGCOn:           agcOn,
 		AGCGainDB:       req.AGCGainDB,
 		BufferMinutes:   req.BufferMinutes,
+		LogLevel:        "info",
 	})
 	if err != nil {
 		switch {
@@ -211,10 +216,84 @@ func (s *Server) deleteStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) purgeStreamChunks(w http.ResponseWriter, r *http.Request) {
+	streamID := chi.URLParam(r, "id")
+	if strings.TrimSpace(streamID) == "" {
+		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
+		return
+	}
+
+	fromTS, err := strconv.ParseInt(chi.URLParam(r, "from"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid 'from' timestamp — use unix seconds", "VALIDATION")
+		return
+	}
+	toTS, err := strconv.ParseInt(chi.URLParam(r, "to"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid 'to' timestamp — use unix seconds", "VALIDATION")
+		return
+	}
+	if toTS <= fromTS {
+		writeError(w, http.StatusBadRequest, "'to' must be after 'from'", "VALIDATION")
+		return
+	}
+
+	existing, err := s.db.GetStreamByID(r.Context(), streamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+		return
+	}
+	if existing == nil || existing.TenantID != TenantID(r.Context()) {
+		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
+		return
+	}
+
+	fromTime := time.Unix(fromTS, 0)
+	toTime := time.Unix(toTS, 0)
+
+	chunks, err := s.db.ListOffloadedChunks(r.Context(), streamID, fromTime, toTime)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list chunks", "INTERNAL_ERROR")
+		return
+	}
+
+	rowsDeleted, err := s.db.DeleteStreamChunksInRange(r.Context(), streamID, fromTime, toTime)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete chunk records", "INTERNAL_ERROR")
+		return
+	}
+
+	var s3Deleted int
+	if s3c := s.streamManager.S3Client(); s3c != nil {
+		for _, c := range chunks {
+			key := fmt.Sprintf("%s/streams/%s/%d/", s3c.Prefix(), streamID, c.StartedAt.Unix())
+			if err := s3c.DeletePrefix(r.Context(), key); err != nil {
+				slog.Warn("purge: s3 delete failed", "stream", streamID, "key", key, "err", err)
+			} else {
+				s3Deleted++
+			}
+		}
+	}
+
+	s.streamLog.Info(streamID, "chunks.purged", fmt.Sprintf("range=%d-%d rows=%d s3=%d", fromTS, toTS, rowsDeleted, s3Deleted))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stream_id":    streamID,
+		"from":         fromTS,
+		"to":           toTS,
+		"rows_deleted": rowsDeleted,
+		"s3_deleted":   s3Deleted,
+	})
+}
+
 func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, req patchStreamRequest, baseVersion int64, patchBy ...string) (*models.Stream, *patchStreamError) {
 	by := ""
 	if len(patchBy) > 0 {
 		by = patchBy[0]
+	}
+	logLevel := existing.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
 	}
 	updated := db.UpdateStreamParams{
 		SourceID:         existing.SourceID,
@@ -228,8 +307,21 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		BufferMinutes:    existing.BufferMinutes,
 		Filters:          existing.Filters,
 		Interpreter:      existing.Interpreter,
-		AutoFallback:     existing.AutoFallback,
+		AutoProbe:        existing.AutoProbe,
+		QualityFallback:  existing.QualityFallback,
+		OffloadChunks:    existing.OffloadChunks,
+		KeepAlive:        existing.KeepAlive,
+		Locked:           existing.Locked,
 		ViewLocked:       existing.ViewLocked,
+		LogLevel:         logLevel,
+	}
+
+	// If the stream is locked, only allow unlocking it — reject all other changes.
+	if existing.Locked {
+		onlyUnlocking := req.Locked != nil && !*req.Locked
+		if !onlyUnlocking {
+			return nil, &patchStreamError{Status: http.StatusConflict, Error: "stream is locked — unlock it before changing settings", Code: "STREAM_LOCKED"}
+		}
 	}
 
 	changed := false
@@ -280,13 +372,7 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		updated.AGCGainDB = req.AGCGainDB
 		changed = true
 	}
-	if req.BufferMinutes != nil {
-		if *req.BufferMinutes <= 0 {
-			return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "buffer_minutes must be > 0", Code: "VALIDATION"}
-		}
-		updated.BufferMinutes = *req.BufferMinutes
-		changed = true
-	}
+	// buffer_minutes is fixed at 5; patch requests are ignored
 	if req.Filters != nil {
 		updated.Filters = *req.Filters
 		changed = true
@@ -295,12 +381,36 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		updated.Interpreter = *req.Interpreter
 		changed = true
 	}
-	if req.AutoFallback != nil {
-		updated.AutoFallback = *req.AutoFallback
+	if req.AutoProbe != nil {
+		updated.AutoProbe = *req.AutoProbe
+		changed = true
+	}
+	if req.QualityFallback != nil {
+		updated.QualityFallback = *req.QualityFallback
+		changed = true
+	}
+	if req.OffloadChunks != nil {
+		updated.OffloadChunks = *req.OffloadChunks
+		changed = true
+	}
+	if req.KeepAlive != nil {
+		updated.KeepAlive = *req.KeepAlive
+		changed = true
+	}
+	if req.Locked != nil {
+		updated.Locked = *req.Locked
 		changed = true
 	}
 	if req.ViewLocked != nil {
 		updated.ViewLocked = *req.ViewLocked
+		changed = true
+	}
+	if req.LogLevel != nil {
+		lvl := strings.ToLower(strings.TrimSpace(*req.LogLevel))
+		if lvl != "debug" && lvl != "info" && lvl != "warn" && lvl != "error" {
+			return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "log_level must be one of: debug, info, warn, error", Code: "VALIDATION"}
+		}
+		updated.LogLevel = lvl
 		changed = true
 	}
 
@@ -332,9 +442,26 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 	}
 
 	if s.fallbackManager != nil {
-		s.streamManager.SetAutoFallback(stream.ID, stream.AutoFallback)
+		s.streamManager.SetAutoProbe(stream.ID, stream.AutoProbe)
 		sourceChanged := existing.SourceID != stream.SourceID
 		s.fallbackManager.OnStreamUpdated(*stream, sourceChanged)
+	}
+
+	if existing.KeepAlive != stream.KeepAlive {
+		s.streamManager.SetKeepAlive(stream.ID, stream.KeepAlive)
+	}
+
+	if existing.OffloadChunks != stream.OffloadChunks {
+		if stream.OffloadChunks {
+			if !s.streamManager.S3Available() {
+				return nil, &patchStreamError{Status: http.StatusNotImplemented, Error: "S3 storage is not configured", Code: "S3_UNAVAILABLE"}
+			}
+			if err := s.streamManager.StartChunkOffload(ctx, stream.ID); err != nil {
+				return nil, &patchStreamError{Status: http.StatusInternalServerError, Error: "failed to start chunk offloading", Code: "INTERNAL_ERROR"}
+			}
+		} else {
+			s.streamManager.StopChunkOffload(ctx, stream.ID)
+		}
 	}
 
 	s.logPatchChanges(existing, stream, by)
@@ -377,9 +504,25 @@ func (s *Server) logPatchChanges(before *models.Stream, after *models.Stream, by
 		s.streamLog.Wire(sid, streamlog.LevelInfo, "interpreter", "client", "wavetoy",
 			fmt.Sprintf("type=%s enabled=%v%s", after.Interpreter.Type, after.Interpreter.Enabled, byTag))
 	}
-	if before.AutoFallback != after.AutoFallback {
-		s.streamLog.Wire(sid, streamlog.LevelInfo, "auto_fallback", "client", "wavetoy",
-			fmt.Sprintf("%v→%v%s", before.AutoFallback, after.AutoFallback, byTag))
+	if before.AutoProbe != after.AutoProbe {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "auto_probe", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.AutoProbe, after.AutoProbe, byTag))
+	}
+	if before.QualityFallback != after.QualityFallback {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "quality_fallback", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.QualityFallback, after.QualityFallback, byTag))
+	}
+	if before.Locked != after.Locked {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "locked", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.Locked, after.Locked, byTag))
+	}
+	if before.OffloadChunks != after.OffloadChunks {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "offload_chunks", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.OffloadChunks, after.OffloadChunks, byTag))
+	}
+	if before.KeepAlive != after.KeepAlive {
+		s.streamLog.Wire(sid, streamlog.LevelInfo, "keep_alive", "client", "wavetoy",
+			fmt.Sprintf("%v→%v%s", before.KeepAlive, after.KeepAlive, byTag))
 	}
 	if before.ViewLocked != after.ViewLocked {
 		s.streamLog.Wire(sid, streamlog.LevelInfo, "view_locked", "client", "wavetoy",
@@ -593,6 +736,20 @@ func (s *Server) getStreamLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync streamlog level from DB (source of truth)
+	if stream, err := s.db.GetStreamByID(r.Context(), streamID); err == nil && stream != nil && stream.LogLevel != "" {
+		switch stream.LogLevel {
+		case "debug":
+			s.streamLog.SetLevel(streamID, streamlog.LevelDebug)
+		case "warn":
+			s.streamLog.SetLevel(streamID, streamlog.LevelWarn)
+		case "error":
+			s.streamLog.SetLevel(streamID, streamlog.LevelError)
+		default:
+			s.streamLog.SetLevel(streamID, streamlog.LevelInfo)
+		}
+	}
+
 	levelStr := r.URL.Query().Get("level")
 	minLevel := streamlog.LevelInfo
 	switch levelStr {
@@ -627,7 +784,21 @@ func (s *Server) downloadStreamLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	level := s.streamLog.GetLevel(streamID)
+	// Sync streamlog level from DB (source of truth)
+	level := streamlog.LevelInfo
+	if stream, err := s.db.GetStreamByID(r.Context(), streamID); err == nil && stream != nil && stream.LogLevel != "" {
+		switch stream.LogLevel {
+		case "debug":
+			level = streamlog.LevelDebug
+		case "warn":
+			level = streamlog.LevelWarn
+		case "error":
+			level = streamlog.LevelError
+		}
+		s.streamLog.SetLevel(streamID, level)
+	} else {
+		level = s.streamLog.GetLevel(streamID)
+	}
 	entries := s.streamLog.Snapshot(streamID, level, streamlog.DefaultBufferSize)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -655,27 +826,42 @@ func (s *Server) setStreamDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var level streamlog.LogLevel
-	switch req.Level {
-	case "debug":
-		level = streamlog.LevelDebug
-	case "info":
-		level = streamlog.LevelInfo
-	case "warn":
-		level = streamlog.LevelWarn
-	case "error":
-		level = streamlog.LevelError
-	default:
+	levelStr := strings.ToLower(strings.TrimSpace(req.Level))
+	if levelStr != "debug" && levelStr != "info" && levelStr != "warn" && levelStr != "error" {
 		writeError(w, http.StatusBadRequest, "level must be one of: debug, info, warn, error", "VALIDATION")
 		return
 	}
 
-	s.streamLog.SetLevel(streamID, level)
-	s.streamLog.Info(streamID, "debug.level", fmt.Sprintf("log level set to %s", level))
+	existing, err := s.db.GetStreamByID(r.Context(), streamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+		return
+	}
+	if existing == nil || existing.TenantID != TenantID(r.Context()) {
+		writeError(w, http.StatusNotFound, "stream not found", "NOT_FOUND")
+		return
+	}
+
+	if err := s.db.UpdateStreamLogLevel(r.Context(), streamID, existing.TenantID, levelStr); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+		return
+	}
+
+	s.streamLog.SetLevel(streamID, streamlog.LogLevel(levelStr))
+	s.streamLog.Info(streamID, "debug.level", fmt.Sprintf("log level set to %s", levelStr))
+
+	final, _ := s.db.GetStreamByID(r.Context(), streamID)
+	if final != nil {
+		s.broadcastStreamEvent(streamID, map[string]any{
+			"type":        "stream_updated",
+			"stream":      final,
+			"sample_rate": s.streamManager.SampleRate(streamID),
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stream_id": streamID,
-		"level":     level,
+		"level":     levelStr,
 	})
 }
 
@@ -698,9 +884,9 @@ func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
 
 	if s.fallbackManager == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"stream_id":     streamID,
-			"auto_fallback": stream.AutoFallback,
-			"suggestions":   []any{},
+			"stream_id":   streamID,
+			"auto_probe":  stream.AutoProbe,
+			"suggestions": []any{},
 		})
 		return
 	}
@@ -715,9 +901,9 @@ func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stream_id":     streamID,
-		"auto_fallback": stream.AutoFallback,
-		"suggestions":   suggestions,
+		"stream_id":   streamID,
+		"auto_probe":  stream.AutoProbe,
+		"suggestions": suggestions,
 	})
 }
 

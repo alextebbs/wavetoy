@@ -103,6 +103,9 @@ export const WaterfallDisplay = forwardRef<
       cssToRows(px: number) {
         return rendererRef.current?.cssToRows(px) ?? 0;
       },
+      requestRepaint() {
+        rendererRef.current?.requestRepaint();
+      },
     }),
     []
   );
