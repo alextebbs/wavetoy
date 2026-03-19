@@ -23,6 +23,8 @@ type streamLog struct {
 	cap   int
 	level LogLevel
 
+	onEmit func(Entry)
+
 	subMu       sync.RWMutex
 	subscribers map[chan Entry]struct{}
 }
@@ -119,6 +121,13 @@ func (l *Logger) emit(streamID string, level LogLevel, action, from, to, msg str
 
 	sl.append(entry)
 	sl.broadcast(entry)
+
+	sl.mu.RLock()
+	fn := sl.onEmit
+	sl.mu.RUnlock()
+	if fn != nil {
+		fn(entry)
+	}
 }
 
 func (l *Logger) Subscribe(streamID string) (<-chan Entry, func(), error) {
@@ -165,6 +174,15 @@ func (l *Logger) GetLevel(streamID string) LogLevel {
 		return LevelInfo
 	}
 	return sl.getLevel()
+}
+
+// SetOnEmit registers a callback invoked for every emitted entry on the given stream.
+// Used by streammgr to forward log entries into the ChunkRing.
+func (l *Logger) SetOnEmit(streamID string, fn func(Entry)) {
+	sl := l.getOrCreate(streamID)
+	sl.mu.Lock()
+	sl.onEmit = fn
+	sl.mu.Unlock()
 }
 
 // MakeLogFunc returns a log function suitable for the kiwi client callback.

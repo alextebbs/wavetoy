@@ -468,6 +468,10 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	as.chunkRing.SetOnRotate(func(meta chunkring.ChunkMeta) {
 		m.notifyChunkComplete(stream.ID, meta)
 	})
+	m.log.SetOnEmit(stream.ID, func(entry streamlog.Entry) {
+		data, _ := json.Marshal(entry)
+		as.chunkRing.WriteEvent(entry.Time, "log", data)
+	})
 
 	m.mu.Lock()
 	if _, exists := m.streams[stream.ID]; exists {
