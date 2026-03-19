@@ -19,12 +19,7 @@ type FilterConfig struct {
 	NoiseGate     *NoiseGateConfig     `json:"noise_gate,omitempty"`
 	SoftClipper   *SoftClipperConfig   `json:"soft_clipper,omitempty"`
 	NoiseReducer  *NoiseReducerConfig  `json:"noise_reducer,omitempty"`
-	PitchShifter  *PitchShifterConfig  `json:"pitch_shifter,omitempty"`
 	RingModulator *RingModulatorConfig `json:"ring_modulator,omitempty"`
-	Wobble        *WobbleConfig        `json:"wobble,omitempty"`
-	Bitcrusher    *BitcrusherConfig    `json:"bitcrusher,omitempty"`
-	TapeSaturator *TapeSaturatorConfig `json:"tape_saturator,omitempty"`
-	Phaser        *PhaserConfig        `json:"phaser,omitempty"`
 	Echo          *EchoConfig          `json:"echo,omitempty"`
 	Reverb        *ReverbConfig        `json:"reverb,omitempty"`
 }
@@ -91,13 +86,6 @@ type AutonotchConfig struct {
 
 func (c AutonotchConfig) IsEnabled() bool { return c.Enabled }
 
-type PitchShifterConfig struct {
-	Enabled   bool    `json:"enabled"`
-	Semitones float64 `json:"semitones"`
-}
-
-func (c PitchShifterConfig) IsEnabled() bool { return c.Enabled }
-
 type RingModulatorConfig struct {
 	Enabled   bool    `json:"enabled"`
 	CarrierHz float64 `json:"carrier_hz"`
@@ -105,42 +93,6 @@ type RingModulatorConfig struct {
 }
 
 func (c RingModulatorConfig) IsEnabled() bool { return c.Enabled }
-
-type WobbleConfig struct {
-	Enabled   bool    `json:"enabled"`
-	Rate      float64 `json:"rate"`
-	Range     float64 `json:"range"`
-	Resonance float64 `json:"resonance"`
-	BaseHz    float64 `json:"base_hz"`
-}
-
-func (c WobbleConfig) IsEnabled() bool { return c.Enabled }
-
-type BitcrusherConfig struct {
-	Enabled   bool    `json:"enabled"`
-	Bits      int     `json:"bits"`
-	CrushRate float64 `json:"crush_rate"`
-}
-
-func (c BitcrusherConfig) IsEnabled() bool { return c.Enabled }
-
-type TapeSaturatorConfig struct {
-	Enabled    bool    `json:"enabled"`
-	Drive      float64 `json:"drive"`
-	WowFlutter float64 `json:"wow_flutter"`
-}
-
-func (c TapeSaturatorConfig) IsEnabled() bool { return c.Enabled }
-
-type PhaserConfig struct {
-	Enabled bool    `json:"enabled"`
-	Rate    float64 `json:"rate"`
-	Depth   float64 `json:"depth"`
-	Stages  int     `json:"stages"`
-	Mix     float64 `json:"mix"`
-}
-
-func (c PhaserConfig) IsEnabled() bool { return c.Enabled }
 
 type EchoConfig struct {
 	Enabled  bool    `json:"enabled"`

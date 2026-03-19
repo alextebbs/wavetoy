@@ -21,6 +21,7 @@ export interface ChunkMeta {
 export interface RewindResponse {
   stream_id: string;
   sample_rate: number;
+  chunk_duration_s: number;
   chunks: ChunkMeta[];
 }
 

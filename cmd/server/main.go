@@ -113,11 +113,13 @@ func main() {
 	})
 	srv.StreamManager().SetOnChunkComplete(func(streamID string, meta chunkring.ChunkMeta) {
 		srv.BroadcastToStream(streamID, map[string]any{
-			"type":       "chunk_complete",
-			"index":      meta.Index,
-			"started_at": meta.StartedAt,
-			"ended_at":   meta.EndedAt,
-			"source_id":  meta.SourceID,
+			"type":        "chunk_complete",
+			"index":       meta.Index,
+			"started_at":  meta.StartedAt,
+			"ended_at":    meta.EndedAt,
+			"source_id":   meta.SourceID,
+			"wf_frames":   meta.WFFrames,
+			"audio_bytes": meta.AudioBytes,
 		})
 	})
 

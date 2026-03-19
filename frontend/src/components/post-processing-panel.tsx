@@ -1,10 +1,13 @@
 import { AutonotchMeter } from "@/components/autonotch-meter";
 import { ClipperCurve } from "@/components/clipper-curve";
+import { EchoTrail } from "@/components/echo-trail";
 import { NoiseBlankerMeter } from "@/components/noise-blanker-meter";
 import { NoiseGateMeter } from "@/components/noise-gate-meter";
 import { NoiseReducerSpectrum } from "@/components/noise-reducer-spectrum";
 import { NotchSpectrum } from "@/components/notch-spectrum";
 import { PassFilterSpectrum } from "@/components/pass-filter-spectrum";
+import { ReverbDecay } from "@/components/reverb-decay";
+import { RingModScope } from "@/components/ring-mod-scope";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -37,6 +40,9 @@ const DEFAULTS: Required<FilterConfig> = {
   },
   soft_clipper: { enabled: false, drive_db: 6, ceiling_db: -3 },
   noise_reducer: { enabled: false, strength: 0.5, floor_db: -20 },
+  ring_modulator: { enabled: false, carrier_hz: 300, mix: 0.7 },
+  echo: { enabled: false, delay_ms: 250, feedback: 0.3, mix: 0.4 },
+  reverb: { enabled: false, room_size: 0.5, damping: 0.5, mix: 0.3 },
 };
 
 function merge(filters: FilterConfig): Required<FilterConfig> {
@@ -50,6 +56,9 @@ function merge(filters: FilterConfig): Required<FilterConfig> {
     noise_gate: { ...DEFAULTS.noise_gate, ...filters.noise_gate },
     soft_clipper: { ...DEFAULTS.soft_clipper, ...filters.soft_clipper },
     noise_reducer: { ...DEFAULTS.noise_reducer, ...filters.noise_reducer },
+    ring_modulator: { ...DEFAULTS.ring_modulator, ...filters.ring_modulator },
+    echo: { ...DEFAULTS.echo, ...filters.echo },
+    reverb: { ...DEFAULTS.reverb, ...filters.reverb },
   };
 }
 
@@ -69,18 +78,19 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
     emitDebounced(next);
   };
 
+  type FilterKeys = Exclude<keyof Required<FilterConfig>, "bypassed">;
+  const updateFilter = <K extends FilterKeys>(
+    key: K,
+    patch: Partial<Required<FilterConfig>[K]>,
+  ) => push({ ...local, [key]: { ...local[key], ...patch } });
+
   return (
     <div className={disabled ? "border-t border-border/60 opacity-40 pointer-events-none select-none" : "border-t border-border/60"}>
       {/* ── Noise Blanker ── */}
       <FilterSection
         label="Noise Blanker"
         enabled={local.noise_blanker.enabled}
-        onToggle={(on) =>
-          push({
-            ...local,
-            noise_blanker: { ...local.noise_blanker, enabled: on },
-          })
-        }
+        onToggle={(on) => updateFilter("noise_blanker", { enabled: on })}
         tip={
           <FilterTip
             what="Suppresses impulse noise — clicks, pops, static crashes, and ignition interference."
@@ -102,12 +112,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={95}
           step={5}
           unit=""
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_blanker: { ...local.noise_blanker, threshold: v },
-            })
-          }
+          onChange={(v) => updateFilter("noise_blanker", { threshold: v })}
         />
       </FilterSection>
 
@@ -115,9 +120,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="High-Pass"
         enabled={local.high_pass.enabled}
-        onToggle={(on) =>
-          push({ ...local, high_pass: { ...local.high_pass, enabled: on } })
-        }
+        onToggle={(on) => updateFilter("high_pass", { enabled: on })}
         tip={
           <FilterTip
             what="Removes low-frequency content below the cutoff frequency."
@@ -132,12 +135,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           cutoffHz={local.high_pass.cutoff_hz}
           height={72}
           className="rounded border border-border/40"
-          onCutoffChange={(hz) =>
-            push({
-              ...local,
-              high_pass: { ...local.high_pass, cutoff_hz: hz },
-            })
-          }
+          onCutoffChange={(hz) => updateFilter("high_pass", { cutoff_hz: hz })}
         />
         <SliderRow
           label="Cutoff"
@@ -146,12 +144,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={1000}
           step={10}
           unit="Hz"
-          onChange={(v) =>
-            push({
-              ...local,
-              high_pass: { ...local.high_pass, cutoff_hz: v },
-            })
-          }
+          onChange={(v) => updateFilter("high_pass", { cutoff_hz: v })}
         />
       </FilterSection>
 
@@ -159,9 +152,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Notch Filter"
         enabled={local.notch.enabled}
-        onToggle={(on) =>
-          push({ ...local, notch: { ...local.notch, enabled: on } })
-        }
+        onToggle={(on) => updateFilter("notch", { enabled: on })}
         tip={
           <FilterTip
             what="Removes a narrow frequency band while passing everything else."
@@ -176,12 +167,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           q={local.notch.q}
           height={72}
           className="rounded border border-border/40"
-          onCenterChange={(hz) =>
-            push({
-              ...local,
-              notch: { ...local.notch, center_hz: hz },
-            })
-          }
+          onCenterChange={(hz) => updateFilter("notch", { center_hz: hz })}
         />
         <SliderRow
           label="Frequency"
@@ -190,12 +176,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={5900}
           step={10}
           unit="Hz"
-          onChange={(v) =>
-            push({
-              ...local,
-              notch: { ...local.notch, center_hz: v },
-            })
-          }
+          onChange={(v) => updateFilter("notch", { center_hz: v })}
         />
         <SliderRow
           label="Q (sharpness)"
@@ -204,12 +185,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={50}
           step={0.5}
           unit=""
-          onChange={(v) =>
-            push({
-              ...local,
-              notch: { ...local.notch, q: v },
-            })
-          }
+          onChange={(v) => updateFilter("notch", { q: v })}
         />
       </FilterSection>
 
@@ -217,12 +193,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Autonotch"
         enabled={local.autonotch.enabled}
-        onToggle={(on) =>
-          push({
-            ...local,
-            autonotch: { ...local.autonotch, enabled: on },
-          })
-        }
+        onToggle={(on) => updateFilter("autonotch", { enabled: on })}
         tip={
           <FilterTip
             what="Automatically finds and removes tonal interference without you needing to know the frequency."
@@ -244,12 +215,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={100}
           step={5}
           unit="%"
-          onChange={(v) =>
-            push({
-              ...local,
-              autonotch: { ...local.autonotch, strength: v / 100 },
-            })
-          }
+          onChange={(v) => updateFilter("autonotch", { strength: v / 100 })}
         />
       </FilterSection>
 
@@ -257,12 +223,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Noise Reduction"
         enabled={local.noise_reducer.enabled}
-        onToggle={(on) =>
-          push({
-            ...local,
-            noise_reducer: { ...local.noise_reducer, enabled: on },
-          })
-        }
+        onToggle={(on) => updateFilter("noise_reducer", { enabled: on })}
         tip={
           <FilterTip
             what="Reduces broadband background noise (hiss, static) while preserving the signal."
@@ -285,12 +246,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={100}
           step={5}
           unit="%"
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_reducer: { ...local.noise_reducer, strength: v / 100 },
-            })
-          }
+          onChange={(v) => updateFilter("noise_reducer", { strength: v / 100 })}
         />
         <SliderRow
           label="Floor"
@@ -299,12 +255,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={0}
           step={1}
           unit="dB"
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_reducer: { ...local.noise_reducer, floor_db: v },
-            })
-          }
+          onChange={(v) => updateFilter("noise_reducer", { floor_db: v })}
         />
       </FilterSection>
 
@@ -312,9 +263,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Low-Pass"
         enabled={local.low_pass.enabled}
-        onToggle={(on) =>
-          push({ ...local, low_pass: { ...local.low_pass, enabled: on } })
-        }
+        onToggle={(on) => updateFilter("low_pass", { enabled: on })}
         tip={
           <FilterTip
             what="Removes high-frequency content above the cutoff frequency."
@@ -329,12 +278,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           cutoffHz={local.low_pass.cutoff_hz}
           height={72}
           className="rounded border border-border/40"
-          onCutoffChange={(hz) =>
-            push({
-              ...local,
-              low_pass: { ...local.low_pass, cutoff_hz: hz },
-            })
-          }
+          onCutoffChange={(hz) => updateFilter("low_pass", { cutoff_hz: hz })}
         />
         <SliderRow
           label="Cutoff"
@@ -343,12 +287,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={5500}
           step={50}
           unit="Hz"
-          onChange={(v) =>
-            push({
-              ...local,
-              low_pass: { ...local.low_pass, cutoff_hz: v },
-            })
-          }
+          onChange={(v) => updateFilter("low_pass", { cutoff_hz: v })}
         />
       </FilterSection>
 
@@ -356,12 +295,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Noise Gate"
         enabled={local.noise_gate.enabled}
-        onToggle={(on) =>
-          push({
-            ...local,
-            noise_gate: { ...local.noise_gate, enabled: on },
-          })
-        }
+        onToggle={(on) => updateFilter("noise_gate", { enabled: on })}
         tip={
           <FilterTip
             what="Silences the output when signal level drops below a threshold, producing clean silence between transmissions."
@@ -383,12 +317,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={0}
           step={1}
           unit="dB"
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_gate: { ...local.noise_gate, threshold_db: v },
-            })
-          }
+          onChange={(v) => updateFilter("noise_gate", { threshold_db: v })}
         />
         <SliderRow
           label="Hold"
@@ -397,12 +326,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={2000}
           step={10}
           unit="ms"
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_gate: { ...local.noise_gate, hold_ms: v },
-            })
-          }
+          onChange={(v) => updateFilter("noise_gate", { hold_ms: v })}
         />
         <SliderRow
           label="Release"
@@ -411,12 +335,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={1000}
           step={5}
           unit="ms"
-          onChange={(v) =>
-            push({
-              ...local,
-              noise_gate: { ...local.noise_gate, release_ms: v },
-            })
-          }
+          onChange={(v) => updateFilter("noise_gate", { release_ms: v })}
         />
       </FilterSection>
 
@@ -424,12 +343,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
       <FilterSection
         label="Soft Clipper"
         enabled={local.soft_clipper.enabled}
-        onToggle={(on) =>
-          push({
-            ...local,
-            soft_clipper: { ...local.soft_clipper, enabled: on },
-          })
-        }
+        onToggle={(on) => updateFilter("soft_clipper", { enabled: on })}
         tip={
           <FilterTip
             what="Smoothly compresses loud peaks instead of hard-clipping them, taming sudden volume spikes."
@@ -451,12 +365,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={36}
           step={1}
           unit="dB"
-          onChange={(v) =>
-            push({
-              ...local,
-              soft_clipper: { ...local.soft_clipper, drive_db: v },
-            })
-          }
+          onChange={(v) => updateFilter("soft_clipper", { drive_db: v })}
         />
         <SliderRow
           label="Ceiling"
@@ -465,12 +374,144 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
           max={0}
           step={1}
           unit="dB"
-          onChange={(v) =>
-            push({
-              ...local,
-              soft_clipper: { ...local.soft_clipper, ceiling_db: v },
-            })
-          }
+          onChange={(v) => updateFilter("soft_clipper", { ceiling_db: v })}
+        />
+      </FilterSection>
+
+      {/* ── Ring Modulator ── */}
+      <FilterSection
+        label="Ring Modulator"
+        enabled={local.ring_modulator.enabled}
+        onToggle={(on) => updateFilter("ring_modulator", { enabled: on })}
+        tip={
+          <FilterTip
+            what="Multiplies the audio by a sine wave carrier, producing metallic, robotic, or alien-sounding output."
+            when="Use for the classic 'Dalek' or 'robot voice' effect. Low carrier frequencies create a tremolo feel; mid frequencies produce the iconic robotic voice; high frequencies get alien and metallic."
+            how="Per-sample multiplication of the input by sin(2π·f·t). This is DSB-SC (double-sideband suppressed-carrier) modulation — it shifts every frequency in the input by ±carrierHz, destroying the harmonic relationships that make voice sound human."
+          />
+        }
+      >
+        <RingModScope
+          carrierHz={local.ring_modulator.carrier_hz}
+          mix={local.ring_modulator.mix}
+          height={72}
+          className="rounded border border-border/40"
+        />
+        <SliderRow
+          label="Carrier"
+          value={local.ring_modulator.carrier_hz}
+          min={10}
+          max={2000}
+          step={10}
+          unit="Hz"
+          onChange={(v) => updateFilter("ring_modulator", { carrier_hz: v })}
+        />
+        <SliderRow
+          label="Mix"
+          value={Math.round(local.ring_modulator.mix * 100)}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("ring_modulator", { mix: v / 100 })}
+        />
+      </FilterSection>
+
+      {/* ── Echo ── */}
+      <FilterSection
+        label="Echo"
+        enabled={local.echo.enabled}
+        onToggle={(on) => updateFilter("echo", { enabled: on })}
+        tip={
+          <FilterTip
+            what="Adds repeating delayed copies of the audio, creating an echo effect with adjustable decay."
+            when="Use to add atmosphere or space to any signal. Subtle settings (short delay, low feedback) add room-like ambience. High feedback creates long, ambient reverb tails from radio noise."
+            how="Circular delay buffer with feedback. Each sample is mixed with a delayed copy of itself, and the result is written back into the buffer for subsequent repeats. Feedback controls decay rate; mix controls dry/wet balance."
+          />
+        }
+      >
+        <EchoTrail
+          delayMs={local.echo.delay_ms}
+          feedback={local.echo.feedback}
+          mix={local.echo.mix}
+          height={72}
+          className="rounded border border-border/40"
+        />
+        <SliderRow
+          label="Delay"
+          value={local.echo.delay_ms}
+          min={50}
+          max={1000}
+          step={10}
+          unit="ms"
+          onChange={(v) => updateFilter("echo", { delay_ms: v })}
+        />
+        <SliderRow
+          label="Feedback"
+          value={Math.round(local.echo.feedback * 100)}
+          min={0}
+          max={90}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("echo", { feedback: v / 100 })}
+        />
+        <SliderRow
+          label="Mix"
+          value={Math.round(local.echo.mix * 100)}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("echo", { mix: v / 100 })}
+        />
+      </FilterSection>
+
+      {/* ── Reverb ── */}
+      <FilterSection
+        label="Reverb"
+        enabled={local.reverb.enabled}
+        onToggle={(on) => updateFilter("reverb", { enabled: on })}
+        tip={
+          <FilterTip
+            what="Adds artificial room ambience, simulating the sound of the signal echoing in a physical space."
+            when="Use to add spatial depth and atmosphere. Small room sizes create a tight, boxy sound. Large sizes create cavernous, cathedral-like reverb. Great for ambient shortwave listening."
+            how="Schroeder/Freeverb architecture: four parallel comb filters with one-pole damping feed into two cascaded allpass diffusors. Delay lengths are mutually prime to prevent metallic coloring. Damping simulates high-frequency absorption in room surfaces."
+          />
+        }
+      >
+        <ReverbDecay
+          roomSize={local.reverb.room_size}
+          damping={local.reverb.damping}
+          mix={local.reverb.mix}
+          height={72}
+          className="rounded border border-border/40"
+        />
+        <SliderRow
+          label="Room Size"
+          value={Math.round(local.reverb.room_size * 100)}
+          min={10}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("reverb", { room_size: v / 100 })}
+        />
+        <SliderRow
+          label="Damping"
+          value={Math.round(local.reverb.damping * 100)}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("reverb", { damping: v / 100 })}
+        />
+        <SliderRow
+          label="Mix"
+          value={Math.round(local.reverb.mix * 100)}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          onChange={(v) => updateFilter("reverb", { mix: v / 100 })}
         />
       </FilterSection>
     </div>

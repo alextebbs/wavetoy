@@ -18,10 +18,11 @@ function formatFreq(v: number): string {
 
 interface FrequencyInputProps {
   value: number;
+  optimistic?: boolean;
   onSubmit: (kHz: number) => void;
 }
 
-export function FrequencyInput({ value, onSubmit }: FrequencyInputProps) {
+export function FrequencyInput({ value, optimistic, onSubmit }: FrequencyInputProps) {
   const [editing, setEditing] = useState(false);
   const [draftVal, setDraftVal] = useState("");
   const maskedRef = useRef<HTMLInputElement>(null);
@@ -157,8 +158,8 @@ export function FrequencyInput({ value, onSubmit }: FrequencyInputProps) {
           <button
             type="button"
             onClick={startEditing}
-            className={`${inputClasses} cursor-pointer text-foreground transition-colors hover:text-primary`}
-            style={{ width: "8.5ch" }}
+            className={`${inputClasses} cursor-pointer text-foreground transition-[color,opacity] hover:text-primary`}
+            style={{ width: "8.5ch", opacity: optimistic ? 0.5 : 1 }}
           >
             {formatFreq(value)}
           </button>

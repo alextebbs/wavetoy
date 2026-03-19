@@ -19,19 +19,33 @@ export interface WaterfallHandle {
   setLevels(min: number, max: number): void;
   setMaxBandwidth(maxKHz: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
-  insertHistoricalTile(
-    startRow: number,
-    rawBins: Uint8Array[],
-    dataStartKHz: number,
-    dataEndKHz: number,
-  ): void;
-  setHistoryExtent(lowestRow: number): void;
-  removeTilesInRange(startRow: number, endRow: number): void;
-  addMarker(marker: import("./waterfall-overlay").WaterfallMarker): void;
-  removeMarker(id: string): void;
+  setChunkSource(source: import("@/lib/chunk-loader").ChunkSource): void;
+  loadManifest(
+    chunks: import("@/lib/chunk-loader").ChunkMeta[],
+    streamInfo?: { sampleRate: number; chunkDurationS: number },
+  ): Promise<number>;
+  onChunkComplete(msg: {
+    started_at: string;
+    ended_at?: string;
+    source_id?: string;
+    wf_frames?: number;
+    audio_bytes?: number;
+  }): void;
+  resetLiveFrameCount(): void;
   rowCount(): number;
+  getScrollOffset(): number;
+  chunkManifest(): ReadonlyArray<{
+    startedAt: string;
+    startRow: number;
+    frameCount: number;
+    complete: boolean;
+    audioBytes: number;
+  }>;
   setScrollOffset(offset: number): void;
   scrollToLive(): void;
+  setPlaybackHead(row: number | null): void;
+  visibleRows(): number;
+  cssToRows(px: number): number;
 }
 
 export const WF_BINS = 1024;

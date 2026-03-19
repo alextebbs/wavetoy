@@ -95,3 +95,78 @@ class StreamLogger {
 }
 
 export const streamLog = new StreamLogger();
+
+const PERF_FLUSH_INTERVAL_MS = 5_000;
+
+/**
+ * Accumulates high-frequency timing samples and periodically flushes a
+ * summary via streamLog.debug.  Designed for hot paths (RAF loops, WS
+ * handlers) where per-call logging would be too noisy.
+ */
+export class PerfBucket {
+  private count = 0;
+  private totalMs = 0;
+  private maxMs = 0;
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(private readonly action: string) {}
+
+  record(ms: number): void {
+    this.count++;
+    this.totalMs += ms;
+    if (ms > this.maxMs) this.maxMs = ms;
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.flush(), PERF_FLUSH_INTERVAL_MS);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.flush();
+  }
+
+  private flush(): void {
+    if (this.count === 0) return;
+    const avg = this.totalMs / this.count;
+    streamLog.debug(
+      this.action,
+      `calls=${this.count} avg=${avg.toFixed(2)}ms max=${this.maxMs.toFixed(2)}ms total=${this.totalMs.toFixed(1)}ms`,
+    );
+    this.count = 0;
+    this.totalMs = 0;
+    this.maxMs = 0;
+  }
+}
+
+export class ResourceMonitor {
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  start(): void {
+    if (this.timer) return;
+    this.flush();
+    this.timer = setInterval(() => this.flush(), PERF_FLUSH_INTERVAL_MS);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private flush(): void {
+    const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+    const heapMB = mem ? (mem.usedJSHeapSize / (1024 * 1024)).toFixed(1) : "?";
+    const canvases = document.querySelectorAll("canvas").length;
+    const domNodes = document.querySelectorAll("*").length;
+    streamLog.debug(
+      "perf.resources",
+      `heap=${heapMB}MB canvases=${canvases} dom=${domNodes}`,
+    );
+  }
+}

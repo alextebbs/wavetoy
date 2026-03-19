@@ -33,9 +33,10 @@ func (s *Server) streamRewind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stream_id":   streamID,
-		"sample_rate": sr,
-		"chunks":      avail,
+		"stream_id":        streamID,
+		"sample_rate":      sr,
+		"chunk_duration_s": int(cr.ChunkDuration().Seconds()),
+		"chunks":           avail,
 	})
 }
 

@@ -87,14 +87,9 @@ func (c *Chain) Reconfigure(filters []Filter) {
 //	 6. Noise Gate       (gate on cleaned signal)
 //	 7. Low-Pass         (shape frequency response)
 //	 8. Soft Clipper     (tame peaks)
-//	 9. Pitch Shifter    (shift pitch before spatial effects)
-//	10. Ring Modulator   (modulate the pitch-shifted signal)
-//	11. Wobble           (LFO filter sweep)
-//	12. Bitcrusher       (quantize after tonal processing)
-//	13. Tape Saturator   (warm saturation + wow/flutter)
-//	14. Phaser           (sweep notches through saturated signal)
-//	15. Echo             (delay-based repeats)
-//	16. Reverb           (spatial, applied last)
+//	 9. Ring Modulator   (modulate the cleaned signal)
+//	10. Echo             (delay-based repeats)
+//	11. Reverb           (spatial, applied last)
 func BuildFilters(cfg models.FilterConfig, sampleRate int) []Filter {
 	if cfg.Bypassed {
 		return nil
@@ -132,23 +127,8 @@ func BuildFilters(cfg models.FilterConfig, sampleRate int) []Filter {
 	if cfg.SoftClipper != nil && cfg.SoftClipper.Enabled {
 		filters = append(filters, NewSoftClipper(cfg.SoftClipper.DriveDB, cfg.SoftClipper.CeilingDB))
 	}
-	if cfg.PitchShifter != nil && cfg.PitchShifter.Enabled {
-		filters = append(filters, NewPitchShifter(cfg.PitchShifter.Semitones, sampleRate))
-	}
 	if cfg.RingModulator != nil && cfg.RingModulator.Enabled {
 		filters = append(filters, NewRingModulator(cfg.RingModulator.CarrierHz, cfg.RingModulator.Mix, sampleRate))
-	}
-	if cfg.Wobble != nil && cfg.Wobble.Enabled {
-		filters = append(filters, NewWobble(cfg.Wobble.Rate, cfg.Wobble.Range, cfg.Wobble.Resonance, cfg.Wobble.BaseHz, sampleRate))
-	}
-	if cfg.Bitcrusher != nil && cfg.Bitcrusher.Enabled {
-		filters = append(filters, NewBitcrusher(cfg.Bitcrusher.Bits, cfg.Bitcrusher.CrushRate, sampleRate))
-	}
-	if cfg.TapeSaturator != nil && cfg.TapeSaturator.Enabled {
-		filters = append(filters, NewTapeSaturator(cfg.TapeSaturator.Drive, cfg.TapeSaturator.WowFlutter, sampleRate))
-	}
-	if cfg.Phaser != nil && cfg.Phaser.Enabled {
-		filters = append(filters, NewPhaser(cfg.Phaser.Rate, cfg.Phaser.Depth, cfg.Phaser.Stages, cfg.Phaser.Mix, sampleRate))
 	}
 	if cfg.Echo != nil && cfg.Echo.Enabled {
 		filters = append(filters, NewEcho(cfg.Echo.DelayMs, cfg.Echo.Feedback, cfg.Echo.Mix, sampleRate))

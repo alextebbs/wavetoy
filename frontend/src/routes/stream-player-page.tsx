@@ -5,7 +5,7 @@ import { FiltersSection } from "@/components/filters-section";
 import { FrequencyInput } from "@/components/frequency-input";
 import { LogsPanel } from "@/components/logs-panel";
 import { ProbeStatusBox } from "@/components/probe-status-box";
-import { SourceMapPicker, type SourceMapPickerHandle } from "@/components/source-map-picker";
+import { SourceMapPicker } from "@/components/source-map-picker";
 import { SourceSearchPanel } from "@/components/source-search-panel";
 import { SourceSection } from "@/components/source-section";
 import { SourceOverlay } from "@/components/ui/bottom-drawer";
@@ -25,28 +25,20 @@ import {
   type FilterConfig,
   type InterpreterConfig,
   type InterpreterOutput,
-  type MapSourceCounts,
   type Peer,
-  type ProbeResult,
   type RecentSource,
   type Source,
   type Stream,
-  addFavorite,
   deleteStream,
-  getMapSources,
   getSessionColor,
   getSessionId,
   getSource,
   getStream,
-  listFavorites,
-  listFavoriteSources,
   listRecentSources,
-  listSourceNotes,
   PEER_COLORS,
-  probeSource,
-  removeFavorite,
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
+import { useSourcePicker } from "@/hooks/use-source-picker";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
 import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RotateCwIcon, ScissorsIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
@@ -54,9 +46,10 @@ import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
-import { streamLog } from "@/lib/stream-logger";
-import { ChunkTileManager } from "@/lib/chunk-tile-manager";
+import { streamLog, PerfBucket, ResourceMonitor } from "@/lib/stream-logger";
 import { RingBufferSource } from "@/lib/chunk-loader";
+import { HistoricalAudioPlayer } from "@/lib/historical-audio-player";
+import { parseWFChunk } from "@/lib/chunk-parser";
 
 const AUDIO_TYPE = 0x02;
 const WATERFALL_TYPE = 0x01;
@@ -151,28 +144,14 @@ export function StreamPlayerPage() {
   const [logLines, setLogLines] = useState<LogEntry[]>([]);
   const [sourceId, setSourceId] = useState("");
   const [frequency, setFrequency] = useState(10000);
+  const confirmedFreqRef = useRef(10000);
   const viewLocked = stream?.view_locked ?? false;
 
   const [mode, setMode] = useState("am");
   const [lo, setLo] = useState(-4900);
   const [hi, setHi] = useState(4900);
-  const [mapSources, setMapSources] = useState<Source[]>([]);
-  const [mapCounts, setMapCounts] = useState<MapSourceCounts>({
-    total: 0,
-    included: 0,
-    omitted: 0,
-  });
-  const [mapLoading, setMapLoading] = useState(false);
   const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
-  const [pendingSourceId, setPendingSourceId] = useState("");
-  const [hoveredSource, setHoveredSource] = useState<Source | null>(null);
-  const [probeStatus, setProbeStatus] = useState<"idle" | "probing" | "done">("idle");
-  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
-  const probeGenRef = useRef(0);
-  const mapPickerRef = useRef<SourceMapPickerHandle>(null);
-  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
-  const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
-  const [notesBySourceId, setNotesBySourceId] = useState<Map<string, string>>(new Map());
+  const picker = useSourcePicker(streamId);
   const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [morseText, setMorseText] = useState("");
@@ -183,22 +162,6 @@ export function StreamPlayerPage() {
   const [freqAnimating, setFreqAnimating] = useState(false);
   const freqAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const refreshFavoriteSources = useCallback(() => {
-    void listFavoriteSources()
-      .then((sources) => setFavoriteSources(sources))
-      .catch(() => {});
-  }, []);
-
-  const refreshNotes = useCallback(() => {
-    void listSourceNotes()
-      .then((notes) => {
-        const m = new Map<string, string>();
-        for (const n of notes) m.set(n.source_id, n.content);
-        setNotesBySourceId(m);
-      })
-      .catch(() => {});
-  }, []);
-
   const refreshRecentSources = useCallback(() => {
     void listRecentSources(streamId)
       .then((rs) => setRecentSources(rs))
@@ -206,28 +169,6 @@ export function StreamPlayerPage() {
   }, [streamId]);
   const refreshRecentSourcesRef = useRef(refreshRecentSources);
   refreshRecentSourcesRef.current = refreshRecentSources;
-
-  const toggleFavorite = useCallback(async (sourceId: string) => {
-    const isFav = favoriteIds.has(sourceId);
-    setFavoriteIds((prev) => {
-      const next = new Set(prev);
-      if (isFav) next.delete(sourceId);
-      else next.add(sourceId);
-      return next;
-    });
-    try {
-      if (isFav) await removeFavorite(sourceId);
-      else await addFavorite(sourceId);
-      refreshFavoriteSources();
-    } catch {
-      setFavoriteIds((prev) => {
-        const next = new Set(prev);
-        if (isFav) next.add(sourceId);
-        else next.delete(sourceId);
-        return next;
-      });
-    }
-  }, [favoriteIds, refreshFavoriteSources]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
@@ -302,7 +243,22 @@ export function StreamPlayerPage() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const liveGainRef = useRef<GainNode | null>(null);
+  const histGainRef = useRef<GainNode | null>(null);
+  const histPlayerRef = useRef<HistoricalAudioPlayer | null>(null);
   const [muted, setMuted] = useState(false);
+  const [isPlayingHistory, setIsPlayingHistory] = useState(false);
+  const isPlayingHistoryRef = useRef(false);
+  const isSyncingScrollRef = useRef(false);
+  const tailScrollRafRef = useRef(0);
+  const tailScrollOffsetRef = useRef(0);
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const histWFCacheRef = useRef<{
+    startedAt: string;
+    frames: import("@/lib/chunk-parser").WFChunkFrame[];
+    loading: boolean;
+  } | null>(null);
+  const histWFSourceRef = useRef<RingBufferSource | null>(null);
   const streamRateRef = useRef(12000);
   const audioMetricsRef = useRef<AudioMetrics>({
     startedAt: performance.now(),
@@ -318,8 +274,6 @@ export function StreamPlayerPage() {
   const lastPacketAtRef = useRef(0);
   const prefillDoneRef = useRef(false);
   const prefillAbortRef = useRef<AbortController | null>(null);
-  const liveWFCountRef = useRef(0);
-  const tileManagerRef = useRef<ChunkTileManager | null>(null);
   const lastAutoPatchRef = useRef("");
   const resamplerRef = useRef<ResamplerState>({
     carryPos: 0,
@@ -333,6 +287,9 @@ export function StreamPlayerPage() {
   const tabHiddenAtRef = useRef(0);
   const droppingStaleRef = useRef(false);
   const lastRemoteUpdateAtRef = useRef(0);
+  const perfAudioRef = useRef(new PerfBucket("perf.audio"));
+  const perfResampleRef = useRef(new PerfBucket("perf.resample"));
+  const resourceMonRef = useRef(new ResourceMonitor());
 
   const appendLogEntry = useCallback((entry: Omit<LogEntry, "id">) => {
     setLogLines((prev) => [
@@ -419,11 +376,22 @@ export function StreamPlayerPage() {
       const node = new AudioWorkletNode(ctx, "sdr-audio-processor");
       const gain = ctx.createGain();
       gain.gain.value = 1;
-      node.connect(gain);
+
+      const liveGain = ctx.createGain();
+      liveGain.gain.value = 1;
+      node.connect(liveGain);
+      liveGain.connect(gain);
+
+      const histGain = ctx.createGain();
+      histGain.gain.value = 0;
+      histGain.connect(gain);
+
       gain.connect(ctx.destination);
       audioCtxRef.current = ctx;
       workletRef.current = node;
       gainNodeRef.current = gain;
+      liveGainRef.current = liveGain;
+      histGainRef.current = histGain;
       streamLog.debug("audio.pipeline", `created, state=${ctx.state}`);
       ctx.onstatechange = () => {
         streamLog.debug("audio.state", ctx.state);
@@ -477,7 +445,7 @@ export function StreamPlayerPage() {
       const upLen = input.length * factor;
       const up = new Float32Array(upLen);
       for (let i = 0; i < input.length; i++) {
-        up[i * factor] = (input[i] + 0.5) / 32768;
+        up[i * factor] = input[i] / 32768;
       }
       const work = new Float32Array(tail.length + up.length);
       work.set(tail, 0);
@@ -507,7 +475,7 @@ export function StreamPlayerPage() {
       if (inRate === outRate) {
         const passthrough = new Float32Array(input.length);
         for (let i = 0; i < input.length; i++) {
-          passthrough[i] = (input[i] + 0.5) / 32768;
+          passthrough[i] = input[i] / 32768;
         }
         return passthrough;
       }
@@ -532,7 +500,7 @@ export function StreamPlayerPage() {
         const frac = pos - idx;
         const s0 = src[idx];
         const s1 = src[idx + 1];
-        out.push((s0 + (s1 - s0) * frac + 0.5) / 32768);
+        out.push((s0 + (s1 - s0) * frac) / 32768);
         pos += step;
       }
       state.lastSample = src[src.length - 1];
@@ -549,6 +517,147 @@ export function StreamPlayerPage() {
     },
     [upsampleByIntegerFIR],
   );
+
+  const FADE_TIME = 0.05;
+
+  const stopHistoricalPlayback = useCallback(() => {
+    const player = histPlayerRef.current;
+    if (player?.playing) player.stopPlayback();
+    setIsPlayingHistory(false);
+    isPlayingHistoryRef.current = false;
+    histWFCacheRef.current = null;
+    histWFSourceRef.current = null;
+    waterfallRef.current?.setPlaybackHead(null);
+    if (tailScrollRafRef.current) {
+      cancelAnimationFrame(tailScrollRafRef.current);
+      tailScrollRafRef.current = 0;
+    }
+    if (scrubTimerRef.current) {
+      clearTimeout(scrubTimerRef.current);
+      scrubTimerRef.current = null;
+    }
+
+    const ctx = audioCtxRef.current;
+    if (ctx) {
+      const now = ctx.currentTime;
+      liveGainRef.current?.gain.setTargetAtTime(1, now, FADE_TIME);
+      histGainRef.current?.gain.setTargetAtTime(0, now, FADE_TIME);
+    }
+  }, []);
+
+  const pushSpectrumForRow = useCallback((row: number) => {
+    const wf = waterfallRef.current;
+    if (!wf) return;
+    const m = wf.chunkManifest();
+    let chunk: (typeof m)[number] | undefined;
+    for (const c of m) {
+      if (c.frameCount > 0 && row >= c.startRow && row < c.startRow + c.frameCount) {
+        chunk = c;
+        break;
+      }
+    }
+    if (!chunk) return;
+
+    const cache = histWFCacheRef.current;
+    if (cache && cache.startedAt === chunk.startedAt && !cache.loading) {
+      if (cache.frames.length > 0) {
+        const progress = (row - chunk.startRow) / chunk.frameCount;
+        const idx = Math.min(
+          cache.frames.length - 1,
+          Math.max(0, Math.floor(progress * cache.frames.length)),
+        );
+        const f = cache.frames[idx];
+        spectrumRef.current?.pushFrame(f.bins, f.xBin, f.zoom);
+        spectrumRef.current?.setPassband(f.freqKHz, f.passbandLo, f.passbandHi);
+      }
+    } else if (!cache || cache.startedAt !== chunk.startedAt) {
+      const startedAt = chunk.startedAt;
+      const wfSource = histWFSourceRef.current;
+      if (!wfSource) return;
+      histWFCacheRef.current = { startedAt, frames: [], loading: true };
+      wfSource.fetchWF(startedAt).then((buf) => {
+        const c = histWFCacheRef.current;
+        if (c && c.startedAt === startedAt) {
+          c.frames = parseWFChunk(buf);
+          c.loading = false;
+        }
+      }).catch(() => {
+        const c = histWFCacheRef.current;
+        if (c && c.startedAt === startedAt) c.loading = false;
+      });
+    }
+  }, []);
+
+  const startHistoricalPlayback = useCallback(async () => {
+    const wf = waterfallRef.current;
+    const ctx = audioCtxRef.current;
+    const histGain = histGainRef.current;
+    if (!wf || !ctx || !histGain) return;
+
+    const manifest = wf.chunkManifest();
+    if (manifest.length === 0) return;
+
+    const totalRows = wf.rowCount();
+    const scrollOffset = wf.getScrollOffset();
+    const targetRow = totalRows - scrollOffset;
+
+    if (!histPlayerRef.current) {
+      const source = new RingBufferSource(streamId);
+      histPlayerRef.current = new HistoricalAudioPlayer(ctx, histGain, source);
+    }
+
+    const player = histPlayerRef.current;
+
+    const wfSource = new RingBufferSource(streamId);
+    histWFSourceRef.current = wfSource;
+    histWFCacheRef.current = null;
+
+    player.onRowChange = (row) => {
+      isSyncingScrollRef.current = true;
+      const total = wf.rowCount();
+      const offset = total - row;
+      wf.setScrollOffset(offset);
+      wf.setPlaybackHead(row);
+      isSyncingScrollRef.current = false;
+
+      pushSpectrumForRow(row);
+    };
+
+    player.onReachLive = () => {
+      stopHistoricalPlayback();
+      wf.scrollToLive();
+    };
+
+    player.onTailing = () => {
+      isPlayingHistoryRef.current = false;
+      tailScrollOffsetRef.current = wf.getScrollOffset();
+      const tick = () => {
+        if (!histPlayerRef.current?.tailing) return;
+        isSyncingScrollRef.current = true;
+        wf.setScrollOffset(tailScrollOffsetRef.current);
+        isSyncingScrollRef.current = false;
+        tailScrollRafRef.current = requestAnimationFrame(tick);
+      };
+      tailScrollRafRef.current = requestAnimationFrame(tick);
+    };
+
+    const now = ctx.currentTime;
+    liveGainRef.current?.gain.setTargetAtTime(0, now, FADE_TIME);
+    histGainRef.current?.gain.setTargetAtTime(1, now, FADE_TIME);
+
+    setIsPlayingHistory(true);
+    isPlayingHistoryRef.current = true;
+
+    try {
+      await player.startPlayback({
+        chunks: [...manifest],
+        targetRow,
+      });
+    } catch (err) {
+      console.warn("[hist-audio] startPlayback failed:", err);
+      stopHistoricalPlayback();
+    }
+  }, [streamId, stopHistoricalPlayback]);
 
   const connect = useCallback(async () => {
     ensureAudio().catch(() => {});
@@ -587,6 +696,9 @@ export function StreamPlayerPage() {
       setStatus("connected");
       intentionalCloseRef.current = false;
       lastWsDataAtRef.current = performance.now();
+      perfAudioRef.current.start();
+      perfResampleRef.current.start();
+      resourceMonRef.current.start();
       setNoAudio(false);
       setNoWaterfall(false);
       const wasReconnect = reconnectAttemptRef.current > 0;
@@ -626,6 +738,9 @@ export function StreamPlayerPage() {
       }, 5_000);
     };
     ws.onclose = (ev) => {
+      perfAudioRef.current.stop();
+      perfResampleRef.current.stop();
+      resourceMonRef.current.stop();
       if (silenceWatchdogRef.current) {
         clearInterval(silenceWatchdogRef.current);
         silenceWatchdogRef.current = null;
@@ -679,6 +794,7 @@ export function StreamPlayerPage() {
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
+              confirmedFreqRef.current = s.frequency_khz;
               setMode(s.mode);
               setLo(s.bandwidth_low_hz);
               setHi(s.bandwidth_high_hz);
@@ -686,31 +802,25 @@ export function StreamPlayerPage() {
 
             if (!prefillDoneRef.current && waterfallRef.current) {
               prefillDoneRef.current = true;
-              liveWFCountRef.current = 0;
               prefillAbortRef.current?.abort();
               const ac = new AbortController();
               prefillAbortRef.current = ac;
-              const maxBw = msg.max_freq_khz || 30000;
 
+              const wf = waterfallRef.current;
+              wf.resetLiveFrameCount();
               const source = new RingBufferSource(streamId);
-              const mgr = new ChunkTileManager(
-                source,
-                waterfallRef.current,
-                maxBw,
-                liveWFCountRef,
-              );
-              tileManagerRef.current = mgr;
+              wf.setChunkSource(source);
 
               source.fetchRewind().then((rewind) => {
                 if (ac.signal.aborted) return;
-                console.log("[tile-mgr] rewind metadata:", rewind.chunks.length, "chunks", rewind.chunks);
-                mgr.buildManifest(rewind.chunks).then((n) => {
-                  console.log("[tile-mgr] buildManifest done, totalFrames:", n);
-                }).catch((err) => {
-                  console.error("[tile-mgr] buildManifest error:", err);
+                wf.loadManifest(rewind.chunks, {
+                  sampleRate: rewind.sample_rate,
+                  chunkDurationS: rewind.chunk_duration_s,
+                }).then(() => {}).catch((err) => {
+                  console.error("[wf] loadManifest error:", err);
                 });
               }).catch((err) => {
-                console.error("[tile-mgr] fetchRewind error:", err);
+                console.error("[wf] fetchRewind error:", err);
               });
             }
           } else if (msg.type === "stream_updated" && msg.stream) {
@@ -728,6 +838,7 @@ export function StreamPlayerPage() {
             setStream(s);
             setSourceId(s.source_id);
             setFrequency(s.frequency_khz);
+            confirmedFreqRef.current = s.frequency_khz;
             setMode(s.mode);
             setLo(s.bandwidth_low_hz);
             setHi(s.bandwidth_high_hz);
@@ -760,6 +871,7 @@ export function StreamPlayerPage() {
               setStream(s);
               setSourceId(s.source_id);
               setFrequency(s.frequency_khz);
+              confirmedFreqRef.current = s.frequency_khz;
               setMode(s.mode);
               setLo(s.bandwidth_low_hz);
               setHi(s.bandwidth_high_hz);
@@ -789,10 +901,12 @@ export function StreamPlayerPage() {
           } else if (msg.type === "stream_state_changed" && typeof msg.state === "string") {
             setStream((prev) => prev ? { ...prev, state: msg.state as string } : prev);
           } else if (msg.type === "chunk_complete") {
-            tileManagerRef.current?.onChunkComplete({
+            waterfallRef.current?.onChunkComplete({
               started_at: msg.started_at,
               ended_at: msg.ended_at,
               source_id: msg.source_id,
+              wf_frames: msg.wf_frames,
+              audio_bytes: msg.audio_bytes,
             });
           } else if (msg.type === "stream_data_stale") {
             const stale = msg.stale === true;
@@ -845,16 +959,18 @@ export function StreamPlayerPage() {
         const xBin = dv.getUint32(0, true);
         const zoom = dv.getUint16(4, true);
         const bins = new Uint8Array(ev.data, 9);
-        liveWFCountRef.current++;
         waterfallRef.current?.pushFrame(bins, xBin, zoom);
-        spectrumRef.current?.pushFrame(bins, xBin, zoom);
+        if (!isPlayingHistoryRef.current) {
+          spectrumRef.current?.pushFrame(bins, xBin, zoom);
+        }
         return;
       }
 
       if (packet[0] !== AUDIO_TYPE || packet.length < 3) return;
       if (droppingStaleRef.current) return;
+      const t0 = performance.now();
       const pcmBytes = packet.subarray(1);
-      const now = performance.now();
+      const now = t0;
       if (lastPacketAtRef.current > 0) {
         audioMetricsRef.current.maxPacketGapMs = Math.max(
           audioMetricsRef.current.maxPacketGapMs,
@@ -880,7 +996,9 @@ export function StreamPlayerPage() {
       }
       waveformSamplesRef.current = wfBuf;
       const outRate = audioCtxRef.current?.sampleRate ?? 48000;
+      const rt0 = performance.now();
       const resampled = resamplePCM(pcm, streamRateRef.current, outRate);
+      perfResampleRef.current.record(performance.now() - rt0);
       if (resampled.length > 0) {
         let sumSquares = 0;
         let peak = 0;
@@ -902,6 +1020,10 @@ export function StreamPlayerPage() {
         );
       }
       workletRef.current?.port.postMessage(resampled);
+      if (histPlayerRef.current?.playing) {
+        histPlayerRef.current.pushLiveSamples(resampled);
+      }
+      perfAudioRef.current.record(performance.now() - t0);
     };
   }, [ensureAudio, appendLogEntry, appendLogEntries, resamplePCM, streamId]);
 
@@ -998,34 +1120,6 @@ export function StreamPlayerPage() {
     sendPatch({ source_id: nextSourceID });
   };
 
-  const onMapHoverSource = useCallback((source: Source | null) => {
-    setHoveredSource(source);
-  }, []);
-
-  const onMapSelectSource = useCallback((source: Source) => {
-    setPendingSourceId(source.id);
-    setProbeStatus("probing");
-    setProbeResult(null);
-    const gen = ++probeGenRef.current;
-    probeSource(source.id, streamId)
-      .then((result) => {
-        if (gen !== probeGenRef.current) return;
-        setProbeStatus("done");
-        setProbeResult(result);
-      })
-      .catch(() => {
-        if (gen !== probeGenRef.current) return;
-        setProbeStatus("done");
-        setProbeResult({
-          source_id: source.id,
-          connected: false,
-          snd_ok: false,
-          wf_ok: false,
-          latency_ms: 0,
-          error: "Probe request failed",
-        });
-      });
-  }, [streamId]);
 
   const onDeleteStream = async () => {
     setDeleting(true);
@@ -1064,29 +1158,14 @@ export function StreamPlayerPage() {
     setCropModalOpen(true);
   };
 
-  const refreshMapSources = useCallback(async () => {
-    setMapLoading(true);
-    try {
-      const payload = await getMapSources();
-      setMapSources(payload.included_sources);
-      setMapCounts(payload.counts);
-    } catch {
-      // map source load failed
-    } finally {
-      setMapLoading(false);
-    }
-  }, []);
 
   const currentSource =
-    mapSources.find((s) => s.id === sourceId) ?? null;
-  const selectedSource =
-    mapSources.find((s) => s.id === pendingSourceId) ?? null;
-  const displayedSource = hoveredSource ?? selectedSource ?? currentSource;
+    picker.mapSources.find((s) => s.id === sourceId) ?? null;
 
   useEffect(() => {
     if (!sourceId || currentSource) return;
     getSource(sourceId)
-      .then((s) => setMapSources((prev) => [...prev, s]))
+      .then((s) => picker.appendSources([s]))
       .catch(() => {});
   }, [sourceId, currentSource]);
 
@@ -1113,6 +1192,10 @@ export function StreamPlayerPage() {
     if (performance.now() - lastRemoteUpdateAtRef.current < 150) return;
     throttledAutoPatch(sourceId, frequency, mode, lo, hi);
   }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch]);
+
+  useEffect(() => {
+    spectrumRef.current?.setPassband(frequency, lo, hi);
+  }, [frequency, lo, hi]);
 
   // Sync overflow permission with view lock state
   useEffect(() => {
@@ -1160,18 +1243,16 @@ export function StreamPlayerPage() {
         );
         setStream(s);
         setSourceId(s.source_id);
-        setPendingSourceId(s.source_id);
+        picker.setSelectedSourceId(s.source_id);
         setFrequency(s.frequency_khz);
+        confirmedFreqRef.current = s.frequency_khz;
         setMode(s.mode);
         setLo(s.bandwidth_low_hz);
         setHi(s.bandwidth_high_hz);
       })
       .catch(() => { setNotFound(true); });
 
-    void refreshMapSources();
-    void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
-    refreshFavoriteSources();
-    refreshNotes();
+    picker.loadAll();
     refreshRecentSources();
     void connect();
     return () => {
@@ -1186,9 +1267,10 @@ export function StreamPlayerPage() {
       intentionalCloseRef.current = true;
       wsRef.current?.close();
       prefillAbortRef.current?.abort();
-      tileManagerRef.current = null;
+      histPlayerRef.current?.destroy();
+      histPlayerRef.current = null;
     };
-  }, [connect, refreshMapSources, streamId]);
+  }, [connect, streamId]);
 
   const sidebarTabs: InfoPanelTab[] = useMemo(() => [
     {
@@ -1201,9 +1283,9 @@ export function StreamPlayerPage() {
             <SourceSection
               source={currentSource}
               sourceId={sourceId}
-              isFavorite={currentSource ? favoriteIds.has(currentSource.id) : false}
-              onToggleFavorite={toggleFavorite}
-              onNotesChanged={refreshNotes}
+              isFavorite={currentSource ? picker.favoriteIds.has(currentSource.id) : false}
+              onToggleFavorite={picker.toggleFavorite}
+              onNotesChanged={picker.refreshNotes}
               action={
                 <Tooltip content="Swap source">
                   <Button
@@ -1211,14 +1293,11 @@ export function StreamPlayerPage() {
                     size="icon-sm"
                     aria-label="Swap source"
                     onClick={() => {
-                      setPendingSourceId(sourceId);
-                      setHoveredSource(null);
-                      setProbeStatus("idle");
-                      setProbeResult(null);
+                      picker.setSelectedSourceId(sourceId);
+                      picker.setHoveredSource(null);
+                      picker.skipProbe();
                       setSourceDrawerOpen(true);
-                      if (mapSources.length === 0 && !mapLoading) {
-                        void refreshMapSources();
-                      }
+                      picker.ensureMapSources();
                     }}
                   >
                     <RotateCwIcon className="size-3.5" />
@@ -1329,12 +1408,46 @@ export function StreamPlayerPage() {
       label: "Logs",
       content: <LogsPanel lines={logLines} streamId={streamId} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, mapSources.length, mapLoading, favoriteIds, toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress]);
+  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress]);
 
   if (notFound) return <ErrorPage code="404" />;
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {/* ── Timeline bar (full height) ── */}
+      <WaterfallTimeline
+        ref={timelineRef}
+        spectrumHeight={spectrumHeight}
+        onScrollOffset={(offset) => {
+          waterfallRef.current?.setScrollOffset(offset);
+          if (isPlayingHistory && !isSyncingScrollRef.current) {
+            const wf = waterfallRef.current;
+            if (wf) {
+              const headRow = wf.rowCount() - offset;
+              wf.setPlaybackHead(headRow);
+              pushSpectrumForRow(headRow);
+            }
+            const player = histPlayerRef.current;
+            if (!player?.playing) return;
+            player.scrubPause();
+            if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
+            scrubTimerRef.current = setTimeout(() => {
+              scrubTimerRef.current = null;
+              if (!wf || !player.playing) return;
+              const so = wf.getScrollOffset();
+              const targetRow = wf.rowCount() - so;
+              player.seek(targetRow);
+            }, 250);
+          }
+        }}
+        onSnapToLive={() => {
+          if (isPlayingHistory) stopHistoricalPlayback();
+          waterfallRef.current?.scrollToLive();
+        }}
+        onPlay={startHistoricalPlayback}
+        onStop={stopHistoricalPlayback}
+        isPlaying={isPlayingHistory}
+      />
       {/* ── Left: top bar + waterfall area ── */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── Top bar (waterfall area only) ── */}
@@ -1405,6 +1518,7 @@ export function StreamPlayerPage() {
           <div className="flex h-full items-center gap-5 justify-self-center" dir="ltr">
             <FrequencyInput
               value={frequency}
+              optimistic={frequency !== confirmedFreqRef.current}
               onSubmit={(kHz) => setFrequency(Math.min(kHz, 30000))}
             />
             <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
@@ -1479,64 +1593,56 @@ export function StreamPlayerPage() {
           </div>
         </header>
 
-        {/* Timeline + Spectrum + freq scale + waterfall */}
-        <div className="flex min-w-0 flex-1">
-          <WaterfallTimeline
-            ref={timelineRef}
-            onScrollOffset={(offset) => waterfallRef.current?.setScrollOffset(offset)}
-            onSnapToLive={() => waterfallRef.current?.scrollToLive()}
+        {/* Spectrum + freq scale + waterfall */}
+        <BandViewport
+          className="min-w-0 flex-1"
+          zoomToCenter={viewLocked}
+          onClickFrequency={(freqKHz) => {
+            setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
+          }}
+          onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
+            const ws = wsRef.current;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "wf_config",
+                  zoom,
+                  center_khz: centerKHz,
+                  start_khz: viewStartKHz,
+                  end_khz: viewEndKHz,
+                })
+              );
+            }
+          }}
+          onDataCoverageChange={() => {
+            // Both waterfall and spectrum handle their own coverage
+            // transitions via pushFrame() using actual frame metadata
+          }}
+        >
+          <TuningOverlay
+            centerFreqKHz={frequency}
+            passbandLowHz={lo}
+            passbandHighHz={hi}
+            centerLocked={viewLocked}
+            animate={freqAnimating}
+            onFrequencyChange={viewLocked ? undefined : setFrequency}
+            onBandwidthChange={(newLo, newHi) => {
+              setLo(newLo);
+              setHi(newHi);
+            }}
           />
-          <BandViewport
-            className="min-w-0 flex-1"
-            zoomToCenter={viewLocked}
-            onClickFrequency={(freqKHz) => {
-              setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
-            }}
-            onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
-              const ws = wsRef.current;
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "wf_config",
-                    zoom,
-                    center_khz: centerKHz,
-                    start_khz: viewStartKHz,
-                    end_khz: viewEndKHz,
-                  })
-                );
-              }
-            }}
-            onDataCoverageChange={() => {
-              // Both waterfall and spectrum handle their own coverage
-              // transitions via pushFrame() using actual frame metadata
-            }}
-          >
-            <TuningOverlay
-              centerFreqKHz={frequency}
-              passbandLowHz={lo}
-              passbandHighHz={hi}
-              centerLocked={viewLocked}
-              animate={freqAnimating}
-              onFrequencyChange={viewLocked ? undefined : setFrequency}
-              onBandwidthChange={(newLo, newHi) => {
-                setLo(newLo);
-                setHi(newHi);
-              }}
-            />
-            <SpectrumDisplay
-              ref={spectrumRef}
-              className="w-full shrink-0"
-              style={{ height: spectrumHeight }}
-            />
-            <FrequencyScale onResizeStart={onSpectrumResizeStart} />
-            <WaterfallDisplay
-              ref={waterfallRef}
-              timelineRef={timelineRef}
-              className="min-h-0 flex-1"
-              onOverlayUpdate={(state) => tileManagerRef.current?.checkViewport(state)}
-            />
-          </BandViewport>
-        </div>
+          <SpectrumDisplay
+            ref={spectrumRef}
+            className="w-full shrink-0"
+            style={{ height: spectrumHeight }}
+          />
+          <FrequencyScale onResizeStart={onSpectrumResizeStart} />
+          <WaterfallDisplay
+            ref={waterfallRef}
+            timelineRef={timelineRef}
+            className="min-h-0 flex-1"
+          />
+        </BandViewport>
       </div>
 
       {/* Right: info panel (full height, animated) */}
@@ -1652,42 +1758,39 @@ export function StreamPlayerPage() {
         onClose={() => setSourceDrawerOpen(false)}
         leftPanel={
           <SourceSearchPanel
-            sources={mapSources}
-            favoriteSources={favoriteSources}
-            favoriteIds={favoriteIds}
-            counts={mapCounts}
-            selectedSourceId={pendingSourceId}
-            notesBySourceId={notesBySourceId}
-            onSelectSource={(source) => {
-              onMapSelectSource(source);
-            }}
+            sources={picker.mapSources}
+            favoriteSources={picker.favoriteSources}
+            favoriteIds={picker.favoriteIds}
+            counts={picker.mapCounts}
+            selectedSourceId={picker.selectedSourceId}
+            notesBySourceId={picker.notesBySourceId}
+            onSelectSource={picker.selectAndProbe}
             onFlyTo={(source) => {
               if (source.latitude != null && source.longitude != null) {
-                mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
+                picker.mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
               }
             }}
           />
         }
         globe={
-          mapLoading ? (
+          picker.mapLoading ? (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               Loading map sources...
             </div>
           ) : (
             <SourceMapPicker
-              ref={mapPickerRef}
-              sources={mapSources}
-              counts={mapCounts}
-              selectedSourceId={pendingSourceId}
-              favoriteIds={favoriteIds}
+              ref={picker.mapPickerRef}
+              sources={picker.mapSources}
+              counts={picker.mapCounts}
+              selectedSourceId={picker.selectedSourceId}
+              favoriteIds={picker.favoriteIds}
               showCounts={false}
               className="h-full"
-              onHoverSource={onMapHoverSource}
-              onSelectSource={onMapSelectSource}
+              onHoverSource={picker.setHoveredSource}
+              onSelectSource={picker.selectAndProbe}
               onDeselectSource={() => {
-                setPendingSourceId(sourceId);
-                setProbeStatus("idle");
-                setProbeResult(null);
+                picker.setSelectedSourceId(sourceId);
+                picker.skipProbe();
               }}
             />
           )
@@ -1695,13 +1798,13 @@ export function StreamPlayerPage() {
         sidebar={
           <>
             <div className="min-h-0 flex-1 overflow-auto">
-              {displayedSource ? (
+              {(picker.displayedSource ?? currentSource) ? (
                 <SourceSection
-                  source={displayedSource}
-                  sourceId={pendingSourceId}
-                  isFavorite={favoriteIds.has(displayedSource.id)}
-                  onToggleFavorite={toggleFavorite}
-                  onNotesChanged={refreshNotes}
+                  source={(picker.displayedSource ?? currentSource)!}
+                  sourceId={picker.selectedSourceId}
+                  isFavorite={picker.favoriteIds.has((picker.displayedSource ?? currentSource)!.id)}
+                  onToggleFavorite={picker.toggleFavorite}
+                  onNotesChanged={picker.refreshNotes}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">
@@ -1709,23 +1812,18 @@ export function StreamPlayerPage() {
                 </div>
               )}
             </div>
-            {pendingSourceId && pendingSourceId !== sourceId && (
+            {picker.selectedSourceId && picker.selectedSourceId !== sourceId && (
               <div className="shrink-0 border-t border-border/80 p-3">
                 <ProbeStatusBox
-                  status={probeStatus}
-                  result={probeResult}
+                  status={picker.probeStatus}
+                  result={picker.probeResult}
                   actionLabel={<><RotateCwIcon className="size-3" /> Swap</>}
                   onAction={() => {
-                    patchSource(pendingSourceId);
+                    patchSource(picker.selectedSourceId);
                     setSourceDrawerOpen(false);
-                    setProbeStatus("idle");
-                    setProbeResult(null);
+                    picker.clearSelection();
                   }}
-                  onSkip={() => {
-                    probeGenRef.current++;
-                    setProbeStatus("idle");
-                    setProbeResult(null);
-                  }}
+                  onSkip={picker.skipProbe}
                 />
               </div>
             )}

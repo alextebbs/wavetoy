@@ -1,4 +1,5 @@
 import { useThemeStore } from "@/lib/theme";
+import { PerfBucket } from "@/lib/stream-logger";
 
 function getDisplay() {
   return useThemeStore.getState().theme.display;
@@ -49,6 +50,7 @@ export class SpectrumRenderer {
   private dirty = false;
   private rafId: number | null = null;
   private themeUnsub: (() => void) | null = null;
+  private perfRender = new PerfBucket("perf.spectrum.render");
 
   constructor(canvas: HTMLCanvasElement, options: SpectrumRendererOptions = {}) {
     this.canvas = canvas;
@@ -171,6 +173,7 @@ export class SpectrumRenderer {
 
   startRenderLoop(): void {
     if (this.rafId !== null) return;
+    this.perfRender.start();
     const tick = () => {
       this.rafId = requestAnimationFrame(tick);
 
@@ -179,8 +182,10 @@ export class SpectrumRenderer {
       }
 
       if (this.dirty) {
+        const t0 = performance.now();
         this.render();
         this.dirty = false;
+        this.perfRender.record(performance.now() - t0);
       }
     };
     this.rafId = requestAnimationFrame(tick);
@@ -191,6 +196,7 @@ export class SpectrumRenderer {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    this.perfRender.stop();
   }
 
   destroy(): void {
@@ -244,6 +250,7 @@ export class SpectrumRenderer {
 
     if (!this.displayBins) return;
 
+    this.drawPassband(width, height);
     this.drawSpectrum(this.displayBins, width, height);
   }
 

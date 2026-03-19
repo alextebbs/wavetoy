@@ -44,42 +44,9 @@ export type AutonotchConfig = {
   strength: number;
 };
 
-export type PitchShifterConfig = {
-  enabled: boolean;
-  semitones: number;
-};
-
 export type RingModulatorConfig = {
   enabled: boolean;
   carrier_hz: number;
-  mix: number;
-};
-
-export type WobbleConfig = {
-  enabled: boolean;
-  rate: number;
-  range: number;
-  resonance: number;
-  base_hz: number;
-};
-
-export type BitcrusherConfig = {
-  enabled: boolean;
-  bits: number;
-  crush_rate: number;
-};
-
-export type TapeSaturatorConfig = {
-  enabled: boolean;
-  drive: number;
-  wow_flutter: number;
-};
-
-export type PhaserConfig = {
-  enabled: boolean;
-  rate: number;
-  depth: number;
-  stages: number;
   mix: number;
 };
 
@@ -107,12 +74,7 @@ export type FilterConfig = {
   noise_gate?: NoiseGateConfig;
   soft_clipper?: SoftClipperConfig;
   noise_reducer?: NoiseReducerConfig;
-  pitch_shifter?: PitchShifterConfig;
   ring_modulator?: RingModulatorConfig;
-  wobble?: WobbleConfig;
-  bitcrusher?: BitcrusherConfig;
-  tape_saturator?: TapeSaturatorConfig;
-  phaser?: PhaserConfig;
   echo?: EchoConfig;
   reverb?: ReverbConfig;
 };

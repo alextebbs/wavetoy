@@ -137,6 +137,11 @@ func New(streamID string, chunkDur time.Duration, ringSize int, sampleRate int) 
 	return cr
 }
 
+// ChunkDuration returns the configured rotation interval.
+func (cr *ChunkRing) ChunkDuration() time.Duration {
+	return cr.chunkDur
+}
+
 // SetSourceID updates the source ID stamped onto new chunks.
 func (cr *ChunkRing) SetSourceID(id string) {
 	cr.mu.Lock()

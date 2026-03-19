@@ -2,30 +2,22 @@ import { ProbeStatusBox } from "@/components/probe-status-box";
 import { SourceSearchPanel } from "@/components/source-search-panel";
 import { SourceSection } from "@/components/source-section";
 import { WavetoyLogo } from "@/components/wavetoy-logo";
-import { SourceMapPicker, type SourceMapPickerHandle } from "@/components/source-map-picker";
+import { SourceMapPicker } from "@/components/source-map-picker";
 import { SourceMiniMap } from "@/components/source-mini-map";
 import { SourceOverlay } from "@/components/ui/bottom-drawer";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
-  type MapSourceCounts,
-  type ProbeResult,
   type Source,
   type Stream,
-  addFavorite,
   createStream,
-  getMapSources,
   getSessionColor,
   getSessionId,
   getSource,
-  listFavorites,
-  listFavoriteSources,
-  listSourceNotes,
   listStreams,
-  probeSource,
-  removeFavorite,
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
+import { useSourcePicker } from "@/hooks/use-source-picker";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -41,61 +33,9 @@ export function StreamsPage() {
   }, []);
 
   const [creating, setCreating] = useState(false);
-  const [mapLoading, setMapLoading] = useState(false);
   const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
-  const [mapSources, setMapSources] = useState<Source[]>([]);
-  const [mapCounts, setMapCounts] = useState<MapSourceCounts>({
-    total: 0,
-    included: 0,
-    omitted: 0,
-  });
-  const [selectedSource, setSelectedSource] = useState<Source | null>(null);
-  const [hoveredSource, setHoveredSource] = useState<Source | null>(null);
-  const [probeStatus, setProbeStatus] = useState<"idle" | "probing" | "done">("idle");
-  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
-  const probeGenRef = useRef(0);
-  const mapPickerRef = useRef<SourceMapPickerHandle>(null);
-  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
-  const [favoriteSources, setFavoriteSources] = useState<Source[]>([]);
-  const [notesBySourceId, setNotesBySourceId] = useState<Map<string, string>>(new Map());
 
-  const refreshFavoriteSources = useCallback(() => {
-    void listFavoriteSources()
-      .then((sources) => setFavoriteSources(sources))
-      .catch(() => {});
-  }, []);
-
-  const refreshNotes = useCallback(() => {
-    void listSourceNotes()
-      .then((notes) => {
-        const m = new Map<string, string>();
-        for (const n of notes) m.set(n.source_id, n.content);
-        setNotesBySourceId(m);
-      })
-      .catch(() => {});
-  }, []);
-
-  const toggleFavorite = useCallback(async (sourceId: string) => {
-    const isFav = favoriteIds.has(sourceId);
-    setFavoriteIds((prev) => {
-      const next = new Set(prev);
-      if (isFav) next.delete(sourceId);
-      else next.add(sourceId);
-      return next;
-    });
-    try {
-      if (isFav) await removeFavorite(sourceId);
-      else await addFavorite(sourceId);
-      refreshFavoriteSources();
-    } catch {
-      setFavoriteIds((prev) => {
-        const next = new Set(prev);
-        if (isFav) next.add(sourceId);
-        else next.delete(sourceId);
-        return next;
-      });
-    }
-  }, [favoriteIds, refreshFavoriteSources]);
+  const picker = useSourcePicker();
 
   const refreshStreams = useCallback(async () => {
     setLoading(true);
@@ -106,20 +46,6 @@ export function StreamsPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
-    }
-  }, []);
-
-  const refreshMapSources = useCallback(async () => {
-    setMapLoading(true);
-    setError("");
-    try {
-      const payload = await getMapSources();
-      setMapSources(payload.included_sources);
-      setMapCounts(payload.counts);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMapLoading(false);
     }
   }, []);
 
@@ -202,10 +128,7 @@ export function StreamsPage() {
 
   useEffect(() => {
     void refreshStreams();
-    void refreshMapSources();
-    void listFavorites().then((ids) => setFavoriteIds(new Set(ids))).catch(() => {});
-    refreshFavoriteSources();
-    refreshNotes();
+    picker.loadAll();
     connectWS();
     return () => {
       if (reconnectTimerRef.current) {
@@ -215,40 +138,38 @@ export function StreamsPage() {
       intentionalCloseRef.current = true;
       wsRef.current?.close();
     };
-  }, [refreshStreams, refreshMapSources, refreshFavoriteSources, connectWS]);
+  }, [refreshStreams, connectWS]);
 
   useEffect(() => {
-    if (streams.length === 0 || mapSources.length === 0) return;
+    if (streams.length === 0 || picker.mapSources.length === 0) return;
     const missing = streams
       .map((s) => s.source_id)
-      .filter((id) => !mapSources.some((ms) => ms.id === id));
+      .filter((id) => !picker.mapSources.some((ms) => ms.id === id));
     const unique = [...new Set(missing)];
     if (unique.length === 0) return;
     Promise.all(unique.map((id) => getSource(id).catch(() => null)))
       .then((results) => {
         const found = results.filter((s): s is Source => s !== null);
         if (found.length > 0) {
-          setMapSources((prev) => [...prev, ...found]);
+          picker.appendSources(found);
         }
       });
-  }, [streams, mapSources.length]);
+  }, [streams, picker.mapSources.length]);
 
   const openCreateDrawer = () => {
-    setSelectedSource(null);
-    setHoveredSource(null);
+    picker.clearSelection();
+    picker.setHoveredSource(null);
     setCreateDrawerOpen(true);
-    if (mapSources.length === 0 && !mapLoading) {
-      void refreshMapSources();
-    }
+    picker.ensureMapSources();
   };
 
   const onCreate = async () => {
-    if (!selectedSource) return;
+    if (!picker.selectedSource) return;
     setCreating(true);
     setError("");
     try {
       const created = await createStream({
-        source_id: selectedSource.id,
+        source_id: picker.selectedSource.id,
         frequency_khz: 10000,
         mode: "am",
         name: "untitled",
@@ -265,8 +186,6 @@ export function StreamsPage() {
       setCreating(false);
     }
   };
-
-  const displayedSource = hoveredSource ?? selectedSource;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
@@ -289,7 +208,7 @@ export function StreamsPage() {
         ) : (
           <div className="grid gap-4">
             {streams.map((stream) => {
-              const source = mapSources.find((s) => s.id === stream.source_id) ?? null;
+              const source = picker.mapSources.find((s) => s.id === stream.source_id) ?? null;
               return (
                 <Link
                   key={stream.id}
@@ -342,100 +261,50 @@ export function StreamsPage() {
         showSidebar
         leftPanel={
           <SourceSearchPanel
-            sources={mapSources}
-            favoriteSources={favoriteSources}
-            favoriteIds={favoriteIds}
-            counts={mapCounts}
-            selectedSourceId={selectedSource?.id}
-            notesBySourceId={notesBySourceId}
-            onSelectSource={(source) => {
-              setSelectedSource(source);
-              setProbeStatus("probing");
-              setProbeResult(null);
-              const gen = ++probeGenRef.current;
-              probeSource(source.id, "")
-                .then((result) => {
-                  if (gen !== probeGenRef.current) return;
-                  setProbeStatus("done");
-                  setProbeResult(result);
-                })
-                .catch(() => {
-                  if (gen !== probeGenRef.current) return;
-                  setProbeStatus("done");
-                  setProbeResult({
-                    source_id: source.id,
-                    connected: false,
-                    snd_ok: false,
-                    wf_ok: false,
-                    latency_ms: 0,
-                    error: "Probe request failed",
-                  });
-                });
-            }}
+            sources={picker.mapSources}
+            favoriteSources={picker.favoriteSources}
+            favoriteIds={picker.favoriteIds}
+            counts={picker.mapCounts}
+            selectedSourceId={picker.selectedSourceId || undefined}
+            notesBySourceId={picker.notesBySourceId}
+            onSelectSource={picker.selectAndProbe}
             onFlyTo={(source) => {
               if (source.latitude != null && source.longitude != null) {
-                mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
+                picker.mapPickerRef.current?.flyTo(source.latitude, source.longitude, 6);
               }
             }}
           />
         }
         globe={
-          mapLoading ? (
+          picker.mapLoading ? (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               Loading map sources...
             </div>
           ) : (
             <SourceMapPicker
-              ref={mapPickerRef}
-              sources={mapSources}
-              counts={mapCounts}
-              selectedSourceId={selectedSource?.id}
-              favoriteIds={favoriteIds}
+              ref={picker.mapPickerRef}
+              sources={picker.mapSources}
+              counts={picker.mapCounts}
+              selectedSourceId={picker.selectedSourceId || undefined}
+              favoriteIds={picker.favoriteIds}
               showCounts={false}
               className="h-full"
-              onHoverSource={setHoveredSource}
-              onDeselectSource={() => {
-                setSelectedSource(null);
-                setProbeStatus("idle");
-                setProbeResult(null);
-              }}
-              onSelectSource={(source) => {
-                setSelectedSource(source);
-                setProbeStatus("probing");
-                setProbeResult(null);
-                const gen = ++probeGenRef.current;
-                probeSource(source.id, "")
-                  .then((result) => {
-                    if (gen !== probeGenRef.current) return;
-                    setProbeStatus("done");
-                    setProbeResult(result);
-                  })
-                  .catch(() => {
-                    if (gen !== probeGenRef.current) return;
-                    setProbeStatus("done");
-                    setProbeResult({
-                      source_id: source.id,
-                      connected: false,
-                      snd_ok: false,
-                      wf_ok: false,
-                      latency_ms: 0,
-                      error: "Probe request failed",
-                    });
-                  });
-              }}
+              onHoverSource={picker.setHoveredSource}
+              onDeselectSource={picker.clearSelection}
+              onSelectSource={picker.selectAndProbe}
             />
           )
         }
         sidebar={
           <>
             <div className="min-h-0 flex-1 overflow-auto">
-              {displayedSource ? (
+              {picker.displayedSource ? (
                 <SourceSection
-                  source={displayedSource}
-                  sourceId={selectedSource?.id ?? ""}
-                  isFavorite={favoriteIds.has(displayedSource.id)}
-                  onToggleFavorite={toggleFavorite}
-                  onNotesChanged={refreshNotes}
+                  source={picker.displayedSource}
+                  sourceId={picker.selectedSourceId}
+                  isFavorite={picker.favoriteIds.has(picker.displayedSource.id)}
+                  onToggleFavorite={picker.toggleFavorite}
+                  onNotesChanged={picker.refreshNotes}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">
@@ -443,19 +312,15 @@ export function StreamsPage() {
                 </div>
               )}
             </div>
-            {selectedSource && (
+            {picker.selectedSource && (
               <div className="shrink-0 border-t border-border/80 p-3">
                 <ProbeStatusBox
-                  status={probeStatus}
-                  result={probeResult}
+                  status={picker.probeStatus}
+                  result={picker.probeResult}
                   actionLabel={creating ? "Creating..." : "Create"}
                   disabled={creating}
                   onAction={() => void onCreate()}
-                  onSkip={() => {
-                    probeGenRef.current++;
-                    setProbeStatus("idle");
-                    setProbeResult(null);
-                  }}
+                  onSkip={picker.skipProbe}
                 />
               </div>
             )}

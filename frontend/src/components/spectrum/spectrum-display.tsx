@@ -13,6 +13,7 @@ export interface SpectrumHandle {
   pushFrame(bins: Uint8Array, xBin: number, zoom: number): void;
   setMaxBandwidth(maxKHz: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
+  setPassband(centerKHz: number, lowHz: number, highHz: number): void;
 }
 
 interface SpectrumDisplayProps {
@@ -49,6 +50,9 @@ export const SpectrumDisplay = forwardRef<SpectrumHandle, SpectrumDisplayProps>(
         },
         setDataCoverage(startKHz: number, endKHz: number) {
           rendererRef.current?.setDataCoverage(startKHz, endKHz);
+        },
+        setPassband(centerKHz: number, lowHz: number, highHz: number) {
+          rendererRef.current?.setPassband(centerKHz, lowHz, highHz);
         },
       }),
       []
