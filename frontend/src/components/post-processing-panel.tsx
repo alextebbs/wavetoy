@@ -13,6 +13,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { FilterConfig } from "@/lib/api";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
 import { useDebounce, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { InfoIcon } from "lucide-react";
 import { type RefObject, useEffect, useState } from "react";
@@ -63,6 +64,7 @@ function merge(filters: FilterConfig): Required<FilterConfig> {
 }
 
 export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disabled }: Props) {
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const [local, setLocal] = useState(() => merge(filters));
 
   useEffect(() => {
@@ -85,7 +87,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
   ) => push({ ...local, [key]: { ...local[key], ...patch } });
 
   return (
-    <div className={disabled ? "border-t border-border/60 opacity-40 pointer-events-none select-none" : "border-t border-border/60"}>
+    <div className={`border-t border-border/60 transition-opacity duration-200${disabled ? " opacity-40 pointer-events-none select-none" : ""}${isInScrollBack && !disabled ? " opacity-40 pointer-events-none select-none" : ""}`}>
       {/* ── Noise Blanker ── */}
       <FilterSection
         label="Noise Blanker"
@@ -251,7 +253,7 @@ export function PostProcessingPanel({ filters, onFiltersChange, samplesRef, disa
         <SliderRow
           label="Floor"
           value={local.noise_reducer.floor_db}
-          min={-60}
+          min={-80}
           max={0}
           step={1}
           unit="dB"

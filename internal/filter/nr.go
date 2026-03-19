@@ -8,7 +8,7 @@ const (
 	nrBins    = nrFFTSize/2 + 1
 
 	nrSNRPrioMinDB = -30.0
-	nrGainLimit    = 0.001
+	nrGainLimit    = 0.00001
 	nrSmoothWidth  = 4
 )
 
@@ -63,6 +63,7 @@ type NoiseReducer struct {
 	xih1r    float64 // 1/(1+xih1) - 1
 	pfac     float64 // (1/pspri - 1) * (1 + xih1)
 	gainFloor float64 // minimum gain (linear, from floorDB)
+	gainExp   float64 // exponent applied to gain curve (from strength)
 }
 
 func NewNoiseReducer(strength, floorDB float64) *NoiseReducer {
@@ -86,9 +87,8 @@ func (nr *NoiseReducer) computeDerived(sampleRate float64) {
 	nr.ax = math.Exp(-tinc / tax)
 	nr.ap = math.Exp(-tinc / tap)
 
-	// Map strength (0–1) to alpha (0.70–0.99). Higher alpha = more smoothing = less
-	// aggressive but fewer artifacts. Lower alpha = more aggressive.
-	nr.alpha = 0.70 + (1.0-nr.strength)*0.29
+	// Map strength (0–1) to alpha (0.01–0.99).
+	nr.alpha = 0.01 + (1.0-nr.strength)*0.98
 
 	asnr := math.Pow(10, 30.0/10.0) // 30 dB active SNR
 	nr.xih1 = asnr
@@ -98,6 +98,7 @@ func (nr *NoiseReducer) computeDerived(sampleRate float64) {
 	nr.pfac = (1.0/pspri - 1.0) * (1.0 + nr.xih1)
 
 	nr.gainFloor = math.Pow(10, nr.floorDB/20.0)
+	nr.gainExp = 1.0 + nr.strength*nr.strength*0.6
 }
 
 func (nr *NoiseReducer) Reset() {
@@ -243,11 +244,21 @@ func (nr *NoiseReducer) processBlock() {
 			if g < nrGainLimit {
 				g = nrGainLimit
 			}
+
+			// Track with the un-exaggerated gain so the E-M estimator stays stable
+			nr.hkOld[k] = nr.snrPost[k] * g * g
+
+			// Exaggerate the gain curve: raises gain to a power (1–6) based on
+			// strength. Low gains get crushed, high gains survive. This is what
+			// makes high-strength settings sound increasingly "underwater."
+			if nr.gainExp > 1.0 {
+				g = math.Pow(g, nr.gainExp)
+			}
+
 			if g < nr.gainFloor {
 				g = nr.gainFloor
 			}
 			nr.gainBuf[k] = g
-			nr.hkOld[k] = nr.snrPost[k] * g * g
 		}
 
 		// Dynamic frequency averaging to reduce musical noise

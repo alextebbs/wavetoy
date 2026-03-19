@@ -14,6 +14,8 @@ interface TuningOverlayProps {
   animate?: boolean;
   onFrequencyChange?: (freqKHz: number) => void;
   onBandwidthChange?: (lo: number, hi: number) => void;
+  /** When true, use blue playback colors for the passband */
+  playbackMode?: boolean;
 }
 
 type DragKind = "left" | "right" | "center";
@@ -28,6 +30,7 @@ export function TuningOverlay({
   animate,
   onFrequencyChange,
   onBandwidthChange,
+  playbackMode,
 }: TuningOverlayProps) {
   const startKHz = useBandViewStore((s) => s.startKHz);
   const endKHz = useBandViewStore((s) => s.endKHz);
@@ -165,16 +168,21 @@ export function TuningOverlay({
     centerPct = ((effectiveFreq - startKHz) / span) * 100;
   }
 
-  const tuning = useThemeStore((s) => s.theme.tuning);
+  const theme = useThemeStore((s) => s.theme);
+  const tuning = theme.tuning;
+  const d = theme.display;
+  const passbandFill = playbackMode ? d.displayScrollbackAccentSoft : tuning.passbandFill;
+  const passbandBorder = playbackMode ? d.displayStatusPlaybackLine : tuning.passbandBorder;
+  const centerLine = playbackMode ? d.displayStatusPlaybackLine : tuning.centerLine;
 
   const visible = rightPct > 0 && leftPct < 100;
   if (!visible) return null;
 
   return (
     <div ref={containerRef} className="absolute inset-0 z-30 pointer-events-none">
-      {/* Passband group: fill + edge handles */}
+      {/* Passband group: fill + edge handles — only interactive when not in playback */}
       <div
-        className={`absolute inset-y-0 ${onFrequencyChange ? "pointer-events-auto" : ""}`}
+        className={`absolute inset-y-0 ${!playbackMode && onFrequencyChange ? "pointer-events-auto" : "pointer-events-none"}`}
         style={{
           left: `${Math.max(0, leftPct)}%`,
           right: `${Math.max(0, 100 - rightPct)}%`,
@@ -185,9 +193,9 @@ export function TuningOverlay({
         <div
           className={`absolute inset-0 transition-[border-width] duration-150 ${onFrequencyChange ? "cursor-grab active:cursor-grabbing" : ""}`}
           style={{
-            backgroundColor: tuning.passbandFill,
-            borderLeft: `${leftThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
-            borderRight: `${rightThick ? 3 : 1}px solid ${tuning.passbandBorder}`,
+            backgroundColor: passbandFill,
+            borderLeft: `${leftThick ? 3 : 1}px solid ${passbandBorder}`,
+            borderRight: `${rightThick ? 3 : 1}px solid ${passbandBorder}`,
           }}
           onMouseEnter={() => onFrequencyChange && setHoveredElement("center")}
           onMouseLeave={() => onFrequencyChange && setHoveredElement(null)}
@@ -237,7 +245,7 @@ export function TuningOverlay({
               left: `${centerPct}%`,
               width: thickElement === "center" ? 3 : 1,
               transform: "translateX(-50%)",
-              backgroundColor: tuning.centerLine,
+              backgroundColor: centerLine,
               transition: animate && !isDragging
                 ? "left 200ms ease-out, width 150ms"
                 : "width 150ms",

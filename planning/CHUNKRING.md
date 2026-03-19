@@ -78,15 +78,19 @@ This is true for a pure-replay system where old frames must render at the new zo
 
 ### Chunk model
 
-Data is accumulated into fixed-duration **chunks**. Each chunk contains audio, waterfall, and events for a 1-minute window:
+Data is accumulated into fixed-duration **chunks**. Each chunk represents a 1-minute **wall-clock window** — it starts and ends on the rotation ticker regardless of how much data actually arrived. A chunk may contain less than a full minute of audio or fewer than ~480 WF frames if data was sparse or interrupted. The chunk's `StartedAt`/`EndedAt` timestamps define the window; the actual data within may have gaps.
+
+During rewind playback, gaps within a chunk are rendered faithfully: missing WF rows appear as black space, missing audio is silence. The UI may show chunk boundaries as subtle markers on the timeline.
+
+Typical chunk contents (full data):
 
 ```
-Chunk (1 minute)
+Chunk (1-minute wall-clock window)
 ├── AudioPCM      []byte         ~1.44 MB   (PCM16, 12 kHz, mono)
 ├── WFFrames      []WFFrame      ~480 KB    (~8 fps × 1 KB/frame)
 └── Events        []Event        ~few KB    (interpreter output + logs)
 
-Total per chunk: ~2 MB
+Total per chunk: ~2 MB (typical), less if data was sparse
 ```
 
 ### Ring behavior
@@ -186,9 +190,10 @@ Monitored stream:
 
     chunkRing.WriteAudio() ──→ accumulate ──→ rotate ──→ ring (keep last 5)
     chunkRing.WriteWF()                                    ├── evict oldest
-                                                           └── sink.OnChunkComplete()
-                                                                └── S3 PutObject
-                                                                └── UPDATE monitor_sessions
+                                                           └── sinkCh <- chunk (non-blocking)
+                                                                └── sink worker goroutine
+                                                                     └── S3 PutObject
+                                                                     └── UPDATE monitor_sessions
 ```
 
 The MONITOR.md recorder (`AudioChunkWriter`, `WFChunkWriter`, `EventChunkWriter`, `SessionUpdater`) collapses into a single `S3Sink` implementation. All accumulation, chunking, rotation, and serialization logic lives in ChunkRing and is shared with the rewind feature.
@@ -304,6 +309,10 @@ type ChunkRing struct {
     current   *Chunk           // in-progress, accumulating
 
     sink      ChunkSink        // nil for regular streams, S3Sink for monitoring
+    sinkCh    chan *Chunk       // buffered channel for async sink delivery (cap 3)
+
+    ticker    *time.Ticker     // fires every chunkDur for wall-clock rotation
+    done      chan struct{}     // signals the rotation goroutine to stop
 
     // Stats
     totalChunks   int64
@@ -315,27 +324,42 @@ type ChunkRing struct {
 
 | Method | Purpose |
 |---|---|
-| `New(streamID string, chunkDur time.Duration, ringSize int, sampleRate int) *ChunkRing` | Create a ring with configured chunk duration and capacity |
-| `WriteAudio(ts time.Time, pcm []byte)` | Append PCM16 to the current chunk. Trigger rotation if chunk duration exceeded. |
+| `New(streamID string, chunkDur time.Duration, ringSize int, sampleRate int) *ChunkRing` | Create a ring and start the background rotation ticker. Caller must call `Close()` when done. |
+| `WriteAudio(ts time.Time, pcm []byte)` | Append PCM16 to the current chunk. |
 | `WriteWF(ts time.Time, bins []byte, xBin uint32, zoom uint16)` | Append a waterfall frame to the current chunk. |
 | `WriteEvent(ts time.Time, typ string, data json.RawMessage)` | Append an event (interpreter output, log entry, source switch). |
-| `SetSink(sink ChunkSink)` | Attach/detach an S3 sink. Passing nil detaches. |
+| `SetSink(sink ChunkSink)` | Attach/detach an S3 sink. When a non-nil sink is set, starts the sink worker goroutine. |
 | `GetChunk(index int) *Chunk` | Get a completed chunk by index. Returns nil if evicted. |
 | `GetCurrent() *Chunk` | Get the in-progress chunk (snapshot under read lock). |
 | `Available() []ChunkMeta` | Metadata for all available chunks (completed + in-progress). |
 | `SnapshotAudio() []byte` | Concatenate all audio from the ring into a contiguous PCM buffer (for capture compatibility). |
 | `Reset()` | Clear all chunks. |
+| `Close()` | Stop the rotation ticker, close the sink channel, wait for the sink worker to drain. Must be called when the stream stops. |
 
 #### Rotation
 
-`WriteAudio` checks whether the current chunk has reached `chunkDur` on every call. If so:
+Chunks represent fixed 1-minute wall-clock windows. Rotation is driven by a background `time.Ticker`, not by data arrival. This guarantees chunks are finalized on schedule even if audio or waterfall data stalls or stops entirely. A chunk that received no data during its window is still finalized (as an empty chunk) and pushed into the ring.
+
+`New()` starts a background goroutine that owns the ticker:
 
 ```go
-func (cr *ChunkRing) maybeRotate(now time.Time) {
-    if cr.current == nil || now.Sub(cr.current.StartedAt) < cr.chunkDur {
-        return
+func (cr *ChunkRing) runRotation() {
+    for {
+        select {
+        case <-cr.ticker.C:
+            cr.rotate()
+        case <-cr.done:
+            cr.ticker.Stop()
+            return
+        }
     }
+}
 
+func (cr *ChunkRing) rotate() {
+    cr.mu.Lock()
+    defer cr.mu.Unlock()
+
+    now := time.Now()
     cr.current.EndedAt = now
     cr.current.Complete = true
 
@@ -347,23 +371,41 @@ func (cr *ChunkRing) maybeRotate(now time.Time) {
     }
     cr.totalChunks++
 
-    // Notify sink (monitoring S3 upload)
+    // Deliver to sink via buffered channel (non-blocking — drop if full)
     if cr.sink != nil {
-        // Hand off to sink asynchronously — don't block the pump
-        chunk := cr.current
-        go cr.sink.OnChunkComplete(chunk)
+        select {
+        case cr.sinkCh <- cr.current:
+        default:
+            // Sink is backed up — drop chunk. S3Sink logs the drop.
+        }
     }
 
-    // Start new chunk
+    // Start new chunk with pre-allocated buffers
     cr.current = &Chunk{
         Index:      int(cr.totalChunks),
         StartedAt:  now,
         SampleRate: cr.sampleRate,
+        AudioPCM:   make([]byte, 0, cr.sampleRate*2*60),
+        WFFrames:   make([]WFFrame, 0, 512),
     }
 }
 ```
 
-Rotation is called from within `WriteAudio` under the existing write lock. The S3 upload is asynchronous (`go sink.OnChunkComplete(chunk)`) — it must never block the audio pump.
+The sink channel is consumed by a dedicated worker goroutine (started on `SetSink` when a non-nil sink is provided):
+
+```go
+func (cr *ChunkRing) runSinkWorker() {
+    for chunk := range cr.sinkCh {
+        if err := cr.sink.OnChunkComplete(chunk); err != nil {
+            if err := cr.sink.OnChunkComplete(chunk); err != nil {
+                // Log and discard — matches MONITOR.md's failure policy
+            }
+        }
+    }
+}
+```
+
+This bounds S3 upload concurrency to 1, provides natural backpressure, and drops chunks cleanly when the sink can't keep up. `Close()` closes the `done` channel (stopping the ticker goroutine) and closes `sinkCh` (draining the sink worker).
 
 ### `serialize.go` — chunk serialization
 
@@ -813,11 +855,11 @@ Virtual waterfall (all available history):
 
 **Core concepts:**
 
-- **Virtual row space.** Every waterfall frame ever received (within the ring buffer window) has a row index. Row 0 is the oldest available. The live edge is the highest row index, growing over time.
-- **Tiles.** The virtual space is divided into fixed-height tiles (e.g., 256 rows). Each tile is an offscreen canvas (1024 × 256 pixels) plus a `rawBins` array for re-rendering when levels change. Tiles are rendered once from their source data (raw bins from live frames or parsed from chunk binary data), then cached.
-- **Viewport.** The visible area is defined by a scroll offset (measured in rows from the live edge). Offset 0 = LIVE. Offset 500 = showing data from ~60 seconds ago (at ~8 fps). The viewport height in rows = `visibleCanvas.height / rowScale`.
-- **Tile loading.** Only tiles that overlap the viewport (plus ±1 tile buffer zone) are rendered. When the viewport moves (scroll or live advance), newly visible tiles are rendered and off-screen tiles are evicted. For historical tiles, the raw bins come from parsed WF chunk data fetched from the backend.
-- **Live tile.** The bottommost tile receives new frames via `pushFrame()`. Unlike the old renderer, new frames are appended at incrementing row positions within the tile — no canvas self-copy shift. When the tile fills up (256 rows), it becomes a completed tile and a new live tile starts.
+- **Virtual row space.** The virtual space is time-based: each row corresponds to a fixed time increment (125ms, matching the ~8fps nominal frame rate). Row positions are derived from timestamps, not from frame arrival order. A chunk's 1-minute wall-clock window maps to a fixed 480 rows regardless of how many frames actually arrived. Rows with no corresponding frame data render as black. Row 0 is the oldest available time. The live edge is the highest row index, advancing with wall-clock time. Chunk boundaries fall on predictable row positions (every 480 rows), and the UI may render them as subtle horizontal markers.
+- **Tiles.** The virtual space is divided into fixed-height tiles (e.g., 256 rows). Each tile is an offscreen canvas (1024 × 256 pixels) plus a `rawBins` array for re-rendering when levels change. Tiles are rendered once from their source data (raw bins from live frames or parsed from chunk binary data), then cached. Rows within a tile that have no frame data are left black.
+- **Viewport.** The visible area is defined by a scroll offset (measured in rows from the live edge). Offset 0 = LIVE. Offset 480 = showing data from ~60 seconds ago (at the nominal 8fps row rate). The viewport height in rows = `visibleCanvas.height / rowScale`.
+- **Tile loading.** Only tiles that overlap the viewport (plus ±1 tile buffer zone) are rendered. When the viewport moves (scroll or live advance), newly visible tiles are rendered and off-screen tiles are evicted. For historical tiles, the raw bins come from parsed WF chunk data fetched from the backend. Each frame carries a timestamp, and the tile renderer places it at the correct row position within the tile using `(frame.timestampMs - tileStartMs) / 125`.
+- **Live tile.** The bottommost tile receives new frames via `pushFrame()`. Unlike the old renderer, new frames are appended at their timestamp-derived row position within the tile — no canvas self-copy shift. When the tile fills up (256 rows of wall-clock time = 32 seconds), it becomes a completed tile and a new live tile starts.
 
 **Key differences from current renderer:**
 
@@ -1089,10 +1131,10 @@ For monitoring, the vertical timeline becomes a minimap of the full recording hi
 
 | Operation | Target | Notes |
 |---|---|---|
-| `WriteAudio` (per frame) | < 5 μs | Append ~1 KB to a byte slice, check rotation timer |
+| `WriteAudio` (per frame) | < 5 μs | Append ~1 KB to a pre-allocated byte slice |
 | `WriteWF` (per frame) | < 5 μs | Append `WFFrame` to slice |
 | `WriteEvent` (per event) | < 5 μs | Append `Event` to slice |
-| Chunk rotation | < 100 μs | Push into ring, start new chunk. S3 upload is async. |
+| Chunk rotation | < 100 μs | Push into ring, allocate pre-sized new chunk. S3 delivery via buffered channel (non-blocking). |
 | Serialize audio (1-min chunk) | < 5 ms | WAV header + 1.44 MB copy |
 | Serialize WF (1-min chunk) | < 5 ms | Binary encode ~480 frames |
 | Serve chunk via HTTP | < 10 ms | Serialize + write to response |

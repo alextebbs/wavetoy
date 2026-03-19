@@ -307,7 +307,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 		}); err != nil {
 			return err
 		}
-		existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, m.SampleRate(stream.ID)))
+		existing.filterChain.Reconfigure(stream.Filters, m.SampleRate(stream.ID))
 		m.reconfigureInterpreter(existing, stream)
 		existing.mu.Lock()
 		existing.tuneFreqKHz = float32(stream.FrequencyKHz)
@@ -337,7 +337,7 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 
 	m.setStreamStateInDBAndNotify(ctx, stream.ID, StateActive)
 	existing.chunkRing.SetSourceID(stream.SourceID)
-	existing.filterChain.Reconfigure(filter.BuildFilters(stream.Filters, client.SampleRate()))
+	existing.filterChain.Reconfigure(stream.Filters, client.SampleRate())
 	m.reconfigureInterpreter(existing, stream)
 	m.startPump(existing, client, gen)
 	if wfClient != nil {

@@ -14,6 +14,7 @@ export interface SpectrumHandle {
   setMaxBandwidth(maxKHz: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
   setPassband(centerKHz: number, lowHz: number, highHz: number): void;
+  setHistoricalMode(enabled: boolean): void;
 }
 
 interface SpectrumDisplayProps {
@@ -53,6 +54,9 @@ export const SpectrumDisplay = forwardRef<SpectrumHandle, SpectrumDisplayProps>(
         },
         setPassband(centerKHz: number, lowHz: number, highHz: number) {
           rendererRef.current?.setPassband(centerKHz, lowHz, highHz);
+        },
+        setHistoricalMode(enabled: boolean) {
+          rendererRef.current?.setHistoricalMode(enabled);
         },
       }),
       []

@@ -2,38 +2,40 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
+  useState,
 } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
-import { colorMapToFilterTables, getColorMap } from "@/lib/display-colors";
 import { useThemeStore } from "@/lib/theme";
-import { WaterfallRenderer } from "./waterfall-renderer";
+import { WaterfallRendererGL } from "./waterfall-renderer-gl";
 import { WaterfallOverlayLayer, type WaterfallOverlayHandle } from "./waterfall-overlay";
+import { PlaybackHead } from "./playback-head";
+import type { OverlayState } from "./waterfall-renderer";
 import type { WaterfallTimelineHandle } from "./waterfall-timeline";
 import type { WaterfallHandle } from "./types";
 
-interface WaterfallDisplayProps {
+interface WaterfallDisplayGLProps {
   className?: string;
   timelineRef?: React.RefObject<WaterfallTimelineHandle | null>;
+  onPlay?: () => void;
+  onStop?: () => void;
+  isPlaying?: boolean;
+  showTuningTrace?: boolean;
+  onOverlayState?: (state: OverlayState) => void;
 }
 
-const FILTER_ID = "wf-colormap";
-
-export const WaterfallDisplay = forwardRef<
+export const WaterfallDisplayGL = forwardRef<
   WaterfallHandle,
-  WaterfallDisplayProps
->(function WaterfallDisplay({ className, timelineRef }, ref) {
+  WaterfallDisplayGLProps
+>(function WaterfallDisplayGL({ className, timelineRef, onPlay, onStop, isPlaying, showTuningTrace = true, onOverlayState }, ref) {
   const colorMapName = useThemeStore((s) => s.theme.display.defaultColorMap);
   const containerRef = useRef<HTMLDivElement>(null);
+  const onOverlayStateRef = useRef(onOverlayState);
+  onOverlayStateRef.current = onOverlayState;
+  const [playbackHeadState, setPlaybackHeadState] = useState({ visible: false, isPlaying: false });
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rendererRef = useRef<WaterfallRenderer | null>(null);
+  const rendererRef = useRef<WaterfallRendererGL | null>(null);
   const overlayRef = useRef<WaterfallOverlayHandle>(null);
-
-  const filterTables = useMemo(
-    () => colorMapToFilterTables(getColorMap(colorMapName)),
-    [colorMapName],
-  );
 
   useEffect(
     () =>
@@ -42,6 +44,10 @@ export const WaterfallDisplay = forwardRef<
       }),
     []
   );
+
+  useEffect(() => {
+    rendererRef.current?.setColorMap(colorMapName);
+  }, [colorMapName]);
 
   useImperativeHandle(
     ref,
@@ -112,7 +118,7 @@ export const WaterfallDisplay = forwardRef<
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const renderer = new WaterfallRenderer(canvas);
+    const renderer = new WaterfallRendererGL(canvas);
     rendererRef.current = renderer;
 
     const s = useBandViewStore.getState();
@@ -125,6 +131,7 @@ export const WaterfallDisplay = forwardRef<
     renderer.onOverlayUpdate = (state, markers) => {
       overlayRef.current?.update(state);
       timelineRef?.current?.update(state, markers);
+      onOverlayStateRef.current?.(state);
     };
     renderer.onTuningTrace = (points) => {
       overlayRef.current?.updateTuningTrace(points);
@@ -159,21 +166,21 @@ export const WaterfallDisplay = forwardRef<
       ref={containerRef}
       className={`relative flex flex-col bg-black overflow-hidden ${className ?? ""}`}
     >
-      <svg width="0" height="0" style={{ position: "absolute" }}>
-        <filter id={FILTER_ID} colorInterpolationFilters="sRGB">
-          <feComponentTransfer>
-            <feFuncR type="table" tableValues={filterTables.r} />
-            <feFuncG type="table" tableValues={filterTables.g} />
-            <feFuncB type="table" tableValues={filterTables.b} />
-          </feComponentTransfer>
-        </filter>
-      </svg>
       <canvas
         ref={canvasRef}
         className="block min-h-0 flex-1 pointer-events-none"
-        style={{ filter: `url(#${FILTER_ID})` }}
       />
-      <WaterfallOverlayLayer ref={overlayRef} />
+      <WaterfallOverlayLayer
+        ref={overlayRef}
+        isPlaying={isPlaying}
+        showTuningTrace={showTuningTrace}
+        onPlaybackHeadState={setPlaybackHeadState}
+      />
+      <PlaybackHead
+        visible={playbackHeadState.visible}
+        isPlaying={playbackHeadState.isPlaying}
+        onPlayPause={() => (isPlaying ? onStop?.() : onPlay?.())}
+      />
     </div>
   );
 });

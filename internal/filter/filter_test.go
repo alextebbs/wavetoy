@@ -726,9 +726,9 @@ func TestReconfigure(t *testing.T) {
 		t.Error("empty chain should not modify signal")
 	}
 
-	chain.Reconfigure(BuildFilters(models.FilterConfig{
+	chain.Reconfigure(models.FilterConfig{
 		LowPass: &models.LowPassConfig{Enabled: true, CutoffHz: 1000},
-	}, sampleRate))
+	}, sampleRate)
 
 	pcm2 := generateSine(5000, sampleRate, 0.5)
 	before2 := measureRMS(pcm2)

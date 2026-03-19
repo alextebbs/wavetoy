@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"reflect"
 	"sync"
 
 	"github.com/sammy/sdr-radio/internal/models"
@@ -20,10 +21,17 @@ type Chain struct {
 	mu      sync.RWMutex
 	filters []Filter
 	buf     []float64
+
+	cfg        models.FilterConfig
+	sampleRate int
 }
 
 func NewChain(cfg models.FilterConfig, sampleRate int) *Chain {
-	return &Chain{filters: BuildFilters(cfg, sampleRate)}
+	return &Chain{
+		filters:    BuildFilters(cfg, sampleRate),
+		cfg:        cfg,
+		sampleRate: sampleRate,
+	}
 }
 
 // Process applies all filters to a PCM16 little-endian frame.
@@ -68,11 +76,18 @@ func (c *Chain) Process(pcm []byte) []byte {
 	return pcm
 }
 
-// Reconfigure swaps the active filter list. Safe to call while
-// Process is running on another goroutine.
-func (c *Chain) Reconfigure(filters []Filter) {
+// Reconfigure rebuilds the filter list only when the config or sample rate
+// actually changed. This preserves internal state (e.g. noise estimates in
+// the noise reducer) across unrelated reconfiguration events like retuning.
+func (c *Chain) Reconfigure(cfg models.FilterConfig, sampleRate int) {
 	c.mu.Lock()
-	c.filters = filters
+	if sampleRate == c.sampleRate && reflect.DeepEqual(cfg, c.cfg) {
+		c.mu.Unlock()
+		return
+	}
+	c.filters = BuildFilters(cfg, sampleRate)
+	c.cfg = cfg
+	c.sampleRate = sampleRate
 	c.mu.Unlock()
 }
 

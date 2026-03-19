@@ -228,6 +228,12 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 		if err := s.streamManager.ReconfigureWaterfall(streamID, zoom, centerKHz, speed); err != nil {
 			s.streamLog.Warn(streamID, "wf.config.fail", fmt.Sprintf("err=%v", err))
 		}
+		// Log pan/zoom for stream logs panel (client→wavetoy)
+		msgParts := []string{fmt.Sprintf("zoom=%d center=%.0f speed=%d", zoom, centerKHz, speed)}
+		if msg.ViewStartKHz != nil && msg.ViewEndKHz != nil {
+			msgParts = append(msgParts, fmt.Sprintf("view=%.0f-%.0f", *msg.ViewStartKHz, *msg.ViewEndKHz))
+		}
+		s.streamLog.Wire(streamID, streamlog.LevelInfo, "ws.wf_config", "client", "wavetoy", strings.Join(msgParts, " "))
 		if msg.ViewStartKHz != nil && msg.ViewEndKHz != nil {
 			if err := s.db.UpdateStreamView(r.Context(), streamID, *msg.ViewStartKHz, *msg.ViewEndKHz); err != nil {
 				s.streamLog.Warn(streamID, "wf.view.persist_fail", fmt.Sprintf("err=%v", err))

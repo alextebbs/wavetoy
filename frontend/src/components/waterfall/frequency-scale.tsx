@@ -45,10 +45,10 @@ function formatFreq(kHz: number): string {
   return kHz.toFixed(1);
 }
 
-const BAND_ROW_PX = 3;
-const HIT_EXTEND_PX = 8;
-const SCALE_PX = 36;
-const TOTAL_HEIGHT = BAND_ROW_PX + SCALE_PX + BAND_ROW_PX;
+export const FREQ_SCALE_HEIGHT = 36;
+const BAND_ROW_H = 3;
+const TICK_MAJOR_H = 10;
+const TICK_MINOR_H = 6;
 
 interface VisibleBand extends FrequencyBand {
   leftPct: number;
@@ -76,24 +76,15 @@ function BandSegment({
   label,
   color,
   hoverColor,
-  side,
 }: {
   band: VisibleBand;
   label: string;
   color: string;
   hoverColor: string;
-  side: "top" | "bottom";
 }) {
   const [hover, setHover] = useState(false);
   const [mouseX, setMouseX] = useState(0);
   const barRef = useRef<HTMLDivElement>(null);
-
-  const tooltipY = () => {
-    const rect = barRef.current?.getBoundingClientRect();
-    if (!rect) return 0;
-    const centerY = rect.top + rect.height / 2;
-    return side === "top" ? centerY - 26 : centerY + 10;
-  };
 
   return (
     <>
@@ -113,8 +104,8 @@ function BandSegment({
         style={{
           left: `${band.leftPct}%`,
           width: `${band.widthPct}%`,
-          top: side === "top" ? 0 : -(HIT_EXTEND_PX - BAND_ROW_PX),
-          height: HIT_EXTEND_PX,
+          top: -2,
+          bottom: -2,
         }}
         onMouseEnter={(e) => {
           setHover(true);
@@ -129,7 +120,7 @@ function BandSegment({
             className="fixed z-[200] pointer-events-none whitespace-nowrap rounded bg-popover px-2 py-1 text-[11px] uppercase tracking-wide text-popover-foreground shadow-md border border-border"
             style={{
               left: mouseX + 12,
-              top: tooltipY(),
+              top: (barRef.current?.getBoundingClientRect().top ?? 0) - 28,
             }}
           >
             {label}
@@ -143,12 +134,14 @@ function BandSegment({
 interface FrequencyScaleProps {
   className?: string;
   onResizeStart?: (e: React.MouseEvent) => void;
+  hideTopBorder?: boolean;
 }
 
-export function FrequencyScale({ className, onResizeStart }: FrequencyScaleProps) {
+export function FrequencyScale({ className, onResizeStart, hideTopBorder }: FrequencyScaleProps) {
   const startKHz = useBandViewStore((s) => s.startKHz);
   const endKHz = useBandViewStore((s) => s.endKHz);
   const d = useThemeStore((s) => s.theme.display);
+  const [hovered, setHovered] = useState(false);
 
   const ticks = useMemo(() => {
     const span = endKHz - startKHz;
@@ -184,70 +177,90 @@ export function FrequencyScale({ className, onResizeStart }: FrequencyScaleProps
 
   return (
     <div
-      className={`relative flex select-none flex-col overflow-visible border-y border-foreground/25 ${className ?? ""}`}
-      style={{ height: TOTAL_HEIGHT, backgroundColor: d.freqScaleBg }}
+      className={`relative select-none overflow-visible ${hideTopBorder ? "border-b" : "border-y"} border-foreground/25 ${className ?? ""}`}
+      style={{ height: FREQ_SCALE_HEIGHT, backgroundColor: d.freqScaleBg }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      {/* Amateur bands — top row */}
-      <div className="relative z-40 shrink-0 overflow-visible" style={{ height: BAND_ROW_PX }}>
-        {amateurVisible.map((b) => (
-          <BandSegment
-            key={b.name}
-            band={b}
-            label={`${b.name} amateur — ${formatFreq(b.startKHz)}–${formatFreq(b.endKHz)} kHz`}
-            color="rgba(34,197,94,0.5)"
-            hoverColor="rgba(34,197,94,0.9)"
-            side="top"
-          />
-        ))}
-      </div>
-
-      {/* Scale area */}
-      <div className="relative flex-1">
-        {ticks.map((tick) => (
-          <div
-            key={tick.freqKHz}
-            className="absolute top-0"
-            style={{ left: `${tick.xPercent}%` }}
-          >
-            <div
-              className="w-px"
-              style={{
-                height: tick.major ? 12 : 8,
-                backgroundColor: tick.major
-                  ? d.freqScaleTickMajor
-                  : d.freqScaleTickMinor,
-              }}
-            />
-            {tick.label && (
-              <span
-                className="absolute left-1/2 top-3.5 -translate-x-1/2 whitespace-nowrap text-[10px] leading-none"
-                style={{ color: d.freqScaleLabel }}
-              >
-                {tick.label}
-              </span>
-            )}
-          </div>
-        ))}
-        <span
-          className="absolute right-1.5 top-3.5 text-[9px] leading-none"
-          style={{ color: d.freqScaleUnitLabel }}
+      {/* Ticks and labels */}
+      {ticks.map((tick) => (
+        <div
+          key={tick.freqKHz}
+          className="absolute inset-y-0"
+          style={{ left: `${tick.xPercent}%` }}
         >
-          kHz
-        </span>
-      </div>
-
-      {/* Broadcast bands — bottom row */}
-      <div className="relative z-40 shrink-0 overflow-visible" style={{ height: BAND_ROW_PX }}>
-        {broadcastVisible.map((b) => (
-          <BandSegment
-            key={b.name}
-            band={b}
-            label={`${b.name} broadcast — ${formatFreq(b.startKHz)}–${formatFreq(b.endKHz)} kHz`}
-            color="rgba(245,158,11,0.5)"
-            hoverColor="rgba(245,158,11,0.9)"
-            side="bottom"
+          {/* Top tick */}
+          <div
+            className="absolute top-0 w-px"
+            style={{
+              height: tick.major ? TICK_MAJOR_H : TICK_MINOR_H,
+              backgroundColor: tick.major
+                ? d.freqScaleTickMajor
+                : d.freqScaleTickMinor,
+            }}
           />
-        ))}
+          {/* Bottom tick */}
+          <div
+            className="absolute bottom-0 w-px"
+            style={{
+              height: tick.major ? TICK_MAJOR_H : TICK_MINOR_H,
+              backgroundColor: tick.major
+                ? d.freqScaleTickMajor
+                : d.freqScaleTickMinor,
+            }}
+          />
+          {/* Centered label */}
+          {tick.label && (
+            <span
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-[10px] leading-none"
+              style={{ color: d.freqScaleLabel }}
+            >
+              {tick.label}
+            </span>
+          )}
+        </div>
+      ))}
+
+      <span
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[9px] leading-none"
+        style={{ color: d.freqScaleUnitLabel }}
+      >
+        kHz
+      </span>
+
+      {/* Band indicators — centered, visible on hover */}
+      <div
+        className="absolute inset-x-0 z-40 overflow-visible transition-opacity duration-150"
+        style={{
+          top: "50%",
+          transform: "translateY(-50%)",
+          opacity: hovered ? 1 : 0,
+          pointerEvents: hovered ? "auto" : "none",
+        }}
+      >
+        <div className="relative overflow-visible" style={{ height: BAND_ROW_H }}>
+          {amateurVisible.map((b) => (
+            <BandSegment
+              key={b.name}
+              band={b}
+              label={`${b.name} amateur — ${formatFreq(b.startKHz)}–${formatFreq(b.endKHz)} kHz`}
+              color="rgba(34,197,94,0.5)"
+              hoverColor="rgba(34,197,94,0.9)"
+            />
+          ))}
+        </div>
+        <div style={{ height: 1 }} />
+        <div className="relative overflow-visible" style={{ height: BAND_ROW_H }}>
+          {broadcastVisible.map((b) => (
+            <BandSegment
+              key={b.name}
+              band={b}
+              label={`${b.name} broadcast — ${formatFreq(b.startKHz)}–${formatFreq(b.endKHz)} kHz`}
+              color="rgba(245,158,11,0.5)"
+              hoverColor="rgba(245,158,11,0.9)"
+            />
+          ))}
+        </div>
       </div>
 
       {onResizeStart && (

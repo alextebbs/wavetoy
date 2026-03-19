@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IMaskInput } from "react-imask";
+import { useThemeStore } from "@/lib/theme";
 import { Tooltip } from "@/components/ui/tooltip";
 
 const MAX_KHZ = 30000;
@@ -20,9 +21,13 @@ interface FrequencyInputProps {
   value: number;
   optimistic?: boolean;
   onSubmit: (kHz: number) => void;
+  dimmed?: boolean;
+  /** When true, use blue playback color to indicate historical playback */
+  playbackMode?: boolean;
 }
 
-export function FrequencyInput({ value, optimistic, onSubmit }: FrequencyInputProps) {
+export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMode }: FrequencyInputProps) {
+  const playbackColor = useThemeStore((s) => s.theme.display.displayStatusPlaybackHead);
   const [editing, setEditing] = useState(false);
   const [draftVal, setDraftVal] = useState("");
   const maskedRef = useRef<HTMLInputElement>(null);
@@ -117,14 +122,21 @@ export function FrequencyInput({ value, optimistic, onSubmit }: FrequencyInputPr
     "font-xanh-mono bg-transparent p-0 text-left text-3xl leading-none font-normal tracking-wide outline-none md:text-4xl";
 
   return (
-    <div ref={wrapperRef} className="relative flex h-full items-center gap-5">
+    <div
+      ref={wrapperRef}
+      className="relative flex h-full items-center gap-5"
+      style={dimmed ? { pointerEvents: "none" } : undefined}
+    >
       <Tooltip content="Hold shift for fine tuning">
         <button
           ref={knobRef}
           type="button"
           onPointerDown={onKnobPointerDown}
           className="flex size-8 cursor-ew-resize items-center justify-center rounded-full border-2 border-border bg-background text-muted-foreground transition-colors hover:border-primary/60 hover:text-foreground active:border-primary"
-          style={{ transform: `rotate(${knobAngle}deg)` }}
+          style={{
+            transform: `rotate(${knobAngle}deg)`,
+            opacity: dimmed ? 0.35 : 1,
+          }}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="1.5" r="1.5" fill="currentColor" />
@@ -132,7 +144,7 @@ export function FrequencyInput({ value, optimistic, onSubmit }: FrequencyInputPr
         </button>
       </Tooltip>
 
-      <div className="relative flex h-full items-center border-x border-border px-6" style={{ zIndex: editing ? 50 : undefined }}>
+      <div className="relative flex self-stretch items-center border-x border-border px-6" style={{ zIndex: editing ? 50 : undefined }}>
         {editing && (
           <div className="absolute -inset-x-3 -inset-y-2 rounded-md border border-border bg-popover shadow-lg" />
         )}
@@ -151,15 +163,23 @@ export function FrequencyInput({ value, optimistic, onSubmit }: FrequencyInputPr
               if (e.key === "Enter") { e.preventDefault(); submit(); }
               if (e.key === "Escape") { e.preventDefault(); setEditing(false); }
             }}
-            className={`relative ${inputClasses} text-foreground caret-primary`}
-            style={{ width: "8.5ch" }}
+            className={`relative ${inputClasses} caret-primary`}
+            style={{
+              width: "8.5ch",
+              opacity: dimmed ? 0.35 : 1,
+              color: playbackMode ? playbackColor : "hsl(var(--foreground))",
+            }}
           />
         ) : (
           <button
             type="button"
             onClick={startEditing}
             className={`${inputClasses} cursor-pointer text-foreground transition-[color,opacity] hover:text-primary`}
-            style={{ width: "8.5ch", opacity: optimistic ? 0.5 : 1 }}
+            style={{
+              width: "8.5ch",
+              opacity: dimmed ? 0.35 : optimistic ? 0.5 : 1,
+              ...(playbackMode ? { color: playbackColor } : {}),
+            }}
           >
             {formatFreq(value)}
           </button>

@@ -4,28 +4,26 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
-  useState,
 } from "react";
-import { PauseIcon, PlayIcon, RadioIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ArrowUpIcon } from "lucide-react";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
+import { useThemeStore } from "@/lib/theme";
 import { Tooltip } from "@/components/ui/tooltip";
+import { FREQ_SCALE_HEIGHT } from "./frequency-scale";
 import type { OverlayState } from "./waterfall-renderer";
 import type { WaterfallMarker } from "./waterfall-overlay";
 
-const HEADER_HEIGHT = 54;
-const BAR_WIDTH = HEADER_HEIGHT;
-const FREQ_SCALE_HEIGHT = 42;
-const ICON_BTN_HEIGHT = 28;
+const BAR_WIDTH = 54;
 const TRACK_PADDING = 4;
 const MIN_THUMB_HEIGHT = 12;
 
 interface WaterfallTimelineProps {
   spectrumHeight: number;
+  isPlayingHistory?: boolean;
   onScrollOffset: (offset: number) => void;
   onSnapToLive: () => void;
-  onPlay?: () => void;
-  onStop?: () => void;
-  isPlaying?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
 }
 
 export interface WaterfallTimelineHandle {
@@ -36,7 +34,7 @@ export const WaterfallTimeline = forwardRef<
   WaterfallTimelineHandle,
   WaterfallTimelineProps
 >(function WaterfallTimeline(
-  { spectrumHeight, onScrollOffset, onSnapToLive, onPlay, onStop, isPlaying = false },
+  { spectrumHeight, isPlayingHistory = false, onScrollOffset, onSnapToLive, onDragStart, onDragEnd },
   ref,
 ) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -45,18 +43,20 @@ export const WaterfallTimeline = forwardRef<
 
   const stateRef = useRef<OverlayState | null>(null);
   const markersRef = useRef<WaterfallMarker[]>([]);
-  const [isLive, setIsLive] = useState(true);
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const isDraggingRef = useRef(false);
+  const wheelVelocityRef = useRef(0);
+  const wheelMomentumRafRef = useRef<number | null>(null);
 
   const computeThumbLayout = useCallback(
     (state: OverlayState, trackHeight: number) => {
-      const { maxScrollOffset, logicalScrollOffset, height, rowScale } = state;
+      const { maxScrollOffset, scrollOffset, height, rowScale } = state;
       if (maxScrollOffset <= 0) return { thumbTop: 0, thumbHeight: trackHeight, totalRange: 1 };
 
       const visibleRows = Math.ceil(height / rowScale);
       const totalRange = maxScrollOffset + visibleRows;
       const thumbHeight = Math.max(MIN_THUMB_HEIGHT, (visibleRows / totalRange) * trackHeight);
-      const thumbTop = Math.max(0, (logicalScrollOffset / totalRange) * trackHeight);
+      const thumbTop = (scrollOffset / totalRange) * trackHeight;
       return { thumbTop, thumbHeight, totalRange };
     },
     []
@@ -115,7 +115,6 @@ export const WaterfallTimeline = forwardRef<
       update(state: OverlayState, markers: WaterfallMarker[]) {
         stateRef.current = state;
         markersRef.current = markers;
-        setIsLive(state.isLive);
         updateVisuals();
       },
     }),
@@ -133,19 +132,59 @@ export const WaterfallTimeline = forwardRef<
   useEffect(() => {
     const track = trackRef.current;
     if (!track) return;
+
+    // macOS-like: 1:1 delta response, time-based decay
+    const DECAY_PER_16MS = 0.92;
+    const MIN_VELOCITY = 0.3;
+    const MAX_VELOCITY = 40;
+
+    let lastT = 0;
+    const runMomentum = (now: number) => {
+      const state = stateRef.current;
+      if (!state || state.maxScrollOffset <= 0) {
+        wheelVelocityRef.current = 0;
+        wheelMomentumRafRef.current = null;
+        return;
+      }
+      let vel = wheelVelocityRef.current;
+      if (Math.abs(vel) < MIN_VELOCITY) {
+        wheelVelocityRef.current = 0;
+        wheelMomentumRafRef.current = null;
+        return;
+      }
+      const dt = lastT > 0 ? now - lastT : 16;
+      lastT = now;
+      const current = state.scrollOffset;
+      const next = Math.max(0, Math.min(current + Math.round(vel), state.maxScrollOffset));
+      if (next !== current) onScrollOffset(next);
+      wheelVelocityRef.current = vel * Math.pow(DECAY_PER_16MS, dt / 16);
+      wheelMomentumRafRef.current = requestAnimationFrame(runMomentum);
+    };
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const state = stateRef.current;
       if (!state || state.maxScrollOffset <= 0) return;
       let dy = e.deltaY;
       if (e.deltaMode === 1) dy *= 30;
-      const step = Math.round(dy * 1.5);
-      const current = state.logicalScrollOffset;
-      const next = Math.max(0, Math.min(current + step, state.maxScrollOffset));
-      if (next !== current) onScrollOffset(next);
+      wheelVelocityRef.current = Math.max(
+        -MAX_VELOCITY,
+        Math.min(MAX_VELOCITY, wheelVelocityRef.current + dy)
+      );
+      if (wheelMomentumRafRef.current === null) {
+        lastT = performance.now();
+        wheelMomentumRafRef.current = requestAnimationFrame(runMomentum);
+      }
     };
+
     track.addEventListener("wheel", onWheel, { passive: false });
-    return () => track.removeEventListener("wheel", onWheel);
+    return () => {
+      track.removeEventListener("wheel", onWheel);
+      if (wheelMomentumRafRef.current !== null) {
+        cancelAnimationFrame(wheelMomentumRafRef.current);
+        wheelMomentumRafRef.current = null;
+      }
+    };
   }, [onScrollOffset]);
 
   const offsetFromTrackY = useCallback(
@@ -181,6 +220,7 @@ export const WaterfallTimeline = forwardRef<
       e.preventDefault();
       isDraggingRef.current = true;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      onDragStart?.();
 
       const track = trackRef.current;
       const thumb = thumbRef.current;
@@ -204,60 +244,69 @@ export const WaterfallTimeline = forwardRef<
         isDraggingRef.current = false;
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        onDragEnd?.();
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
     },
-    [computeThumbLayout, onScrollOffset]
+    [computeThumbLayout, onScrollOffset, onDragStart, onDragEnd]
   );
 
-  const spacerHeight = spectrumHeight + FREQ_SCALE_HEIGHT - ICON_BTN_HEIGHT;
+  const d = useThemeStore((s) => s.theme.display);
+  const isLive = !isInScrollBack && !isPlayingHistory;
+
+  const statusColor = isPlayingHistory
+    ? { backgroundColor: d.displayStatusPlayback, color: "black" }
+    : isInScrollBack
+      ? { backgroundColor: d.displayScrollbackAccentSoft, color: d.displayScrollbackAccent }
+      : { backgroundColor: "black", color: d.displayStatusLive };
 
   return (
     <div
       className="flex flex-col shrink-0 select-none border-r bg-background"
       style={{ width: BAR_WIDTH }}
     >
-      {/* LIVE icon button — aligned with header */}
-      <div
-        className="flex shrink-0 items-center justify-center border-b"
-        style={{ height: HEADER_HEIGHT }}
-      >
-        <Tooltip content="Snap to live">
-          <Button
-            variant={isLive ? "outline" : "ghost"}
-            size="icon"
-            onClick={onSnapToLive}
-            className={isLive ? "text-green-400 border-green-400/40 bg-green-400/10" : ""}
-          >
-            <RadioIcon className="size-4" />
-          </Button>
-        </Tooltip>
-      </div>
+      {/* Status indicator — aligned with spectrum area */}
+      {spectrumHeight > 0 && (
+        <div
+          className="flex shrink-0 items-center justify-center overflow-hidden font-semibold text-[10px] uppercase tracking-[0.2em]"
+          style={{
+            height: spectrumHeight,
+            writingMode: "vertical-rl",
+            textOrientation: "mixed",
+            transform: "rotate(180deg)",
+            ...statusColor,
+          }}
+        >
+          {isPlayingHistory ? "playback" : isInScrollBack ? "scrollback" : "Live"}
+        </div>
+      )}
 
-      {/* Play/Stop icon button */}
+      {/* Snap-to-live / spacer — aligned with frequency scale */}
       <div
         className="flex shrink-0 items-center justify-center"
         style={{
-          height: ICON_BTN_HEIGHT,
-          opacity: isLive ? 0 : 1,
-          pointerEvents: isLive ? "none" : "auto",
+          height: FREQ_SCALE_HEIGHT - 1,
+          ...(isLive ? statusColor : { backgroundColor: `${d.displayStatusLive}18`, color: d.displayStatusLive }),
         }}
       >
-        <Tooltip content={isPlaying ? "Stop playback" : "Play historical audio"}>
-          <Button
-            variant={isPlaying ? "outline" : "ghost"}
-            size="icon-sm"
-            onClick={() => isPlaying ? onStop?.() : onPlay?.()}
-            className={isPlaying ? "text-blue-400 border-blue-400/40 bg-blue-400/10" : ""}
-          >
-            {isPlaying ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
-          </Button>
-        </Tooltip>
+        {isLive ? (
+          <span
+            className="size-2 rounded-full animate-pulse"
+            style={{ backgroundColor: d.displayStatusLive }}
+          />
+        ) : (
+          <Tooltip content="Snap to live">
+            <button
+              type="button"
+              onClick={onSnapToLive}
+              className="flex h-full w-full items-center justify-center transition-opacity hover:opacity-70"
+            >
+              <ArrowUpIcon className="size-3.5" strokeWidth={2.5} />
+            </button>
+          </Tooltip>
+        )}
       </div>
-
-      {/* Spacer — covers spectrum + freq scale area */}
-      <div className="shrink-0" style={{ height: Math.max(0, spacerHeight) }} />
 
       {/* Scrollbar track — aligned with waterfall */}
       <div
@@ -278,13 +327,14 @@ export const WaterfallTimeline = forwardRef<
         {/* Thumb */}
         <div
           ref={thumbRef}
-          className="absolute cursor-grab border border-border bg-primary/25 active:cursor-grabbing"
+          className="absolute cursor-grab active:cursor-grabbing"
           style={{
             left: 3,
             right: 3,
             borderRadius: 3,
             minHeight: MIN_THUMB_HEIGHT,
             display: "none",
+            backgroundColor: d.displayScrollbackAccentSoft,
           }}
           onPointerDown={handleThumbPointerDown}
         />

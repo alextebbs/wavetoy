@@ -40,6 +40,27 @@ interface DisplayColors {
   freqScaleTickMinor: string;
   freqScaleLabel: string;
   freqScaleUnitLabel: string;
+  /** Teal accent for overlay elements (playback head, tuning trace, markers) */
+  displayAccent: string;
+  displayAccentLine: string;
+  displayAccentMuted: string;
+  displayAccentSoft: string;
+  displayAccentBorder: string;
+  displayAccentEdge: string;
+  /** Timeline status bar: Live (green), Playback (blue), Scrollback (dark blue) */
+  displayStatusLive: string;
+  displayStatusPlayback: string;
+  displayStatusPlaybackMuted: string;
+  displayStatusPlaybackLine: string;
+  /** Brighter blue for playback head (same hue, higher lightness) */
+  displayStatusPlaybackHead: string;
+  /** Scrollback indicator: slightly more blue than displayAccent */
+  displayScrollbackAccent: string;
+  displayScrollbackAccentSoft: string;
+  /** Marker pill colors: ok (teal), warn (red), pending (gray) */
+  displayMarkerOk: string;
+  displayMarkerWarn: string;
+  displayMarkerPending: string;
 }
 
 interface MapColors {
@@ -120,6 +141,22 @@ const defaultTheme: SDRTheme = {
     freqScaleTickMinor: "#1a4a42",
     freqScaleLabel: "#3cb8a0",
     freqScaleUnitLabel: "#1a4a42",
+    displayAccent: "#5eead4",
+    displayAccentLine: "rgba(94, 234, 212, 0.8)",
+    displayAccentMuted: "#3cb8a0",
+    displayAccentSoft: "rgba(94, 234, 212, 0.12)",
+    displayAccentBorder: "rgba(94, 234, 212, 0.5)",
+    displayAccentEdge: "rgba(94, 234, 212, 0.3)",
+    displayStatusLive: "#22c55e",
+    displayStatusPlayback: "#3b82f6",
+    displayStatusPlaybackMuted: "rgba(96, 165, 250, 0.5)",
+    displayStatusPlaybackLine: "rgba(59, 130, 246, 0.8)",
+    displayStatusPlaybackHead: "#93c5fd",
+    displayScrollbackAccent: "#3b82f6",
+    displayScrollbackAccentSoft: "rgba(59, 130, 246, 0.2)",
+    displayMarkerOk: "rgba(94, 234, 212, 0.85)",
+    displayMarkerWarn: "rgba(239, 68, 68, 0.9)",
+    displayMarkerPending: "rgba(160, 160, 160, 0.7)",
   },
   map: {
     background: "#060a12",
@@ -188,6 +225,22 @@ const defaultV2: SDRTheme = {
     freqScaleTickMinor: "#1a4a42",
     freqScaleLabel: "#3cb8a0",
     freqScaleUnitLabel: "#1a4a42",
+    displayAccent: "#fde68a",
+    displayAccentLine: "rgba(253, 230, 138, 0.8)",
+    displayAccentMuted: "#f5c040",
+    displayAccentSoft: "rgba(253, 230, 138, 0.12)",
+    displayAccentBorder: "rgba(253, 230, 138, 0.5)",
+    displayAccentEdge: "rgba(253, 230, 138, 0.3)",
+    displayStatusLive: "#22c55e",
+    displayStatusPlayback: "#3b82f6",
+    displayStatusPlaybackMuted: "rgba(96, 165, 250, 0.5)",
+    displayStatusPlaybackLine: "rgba(59, 130, 246, 0.8)",
+    displayStatusPlaybackHead: "#93c5fd",
+    displayScrollbackAccent: "#3b82f6",
+    displayScrollbackAccentSoft: "rgba(59, 130, 246, 0.2)",
+    displayMarkerOk: "rgba(253, 230, 138, 0.85)",
+    displayMarkerWarn: "rgba(239, 68, 68, 0.9)",
+    displayMarkerPending: "rgba(160, 160, 160, 0.7)",
   },
   map: {
     background: "#060a12",
@@ -255,6 +308,22 @@ const alert: SDRTheme = {
     freqScaleTickMinor: "#551818",
     freqScaleLabel: "#cc4444",
     freqScaleUnitLabel: "#551818",
+    displayAccent: "#ff6666",
+    displayAccentLine: "rgba(255, 100, 100, 0.8)",
+    displayAccentMuted: "#cc4444",
+    displayAccentSoft: "rgba(255, 100, 100, 0.12)",
+    displayAccentBorder: "rgba(255, 100, 100, 0.5)",
+    displayAccentEdge: "rgba(255, 100, 100, 0.3)",
+    displayStatusLive: "#22c55e",
+    displayStatusPlayback: "#3b82f6",
+    displayStatusPlaybackMuted: "rgba(96, 165, 250, 0.5)",
+    displayStatusPlaybackLine: "rgba(59, 130, 246, 0.8)",
+    displayStatusPlaybackHead: "#93c5fd",
+    displayScrollbackAccent: "#f0a0a0",
+    displayScrollbackAccentSoft: "rgba(240, 160, 160, 0.12)",
+    displayMarkerOk: "rgba(255, 100, 100, 0.85)",
+    displayMarkerWarn: "rgba(239, 68, 68, 0.9)",
+    displayMarkerPending: "rgba(160, 160, 160, 0.7)",
   },
   map: {
     background: "#0a0204",
@@ -321,6 +390,22 @@ const muted: SDRTheme = {
     freqScaleTickMinor: "#333333",
     freqScaleLabel: "#777777",
     freqScaleUnitLabel: "#333333",
+    displayAccent: "#aaaaaa",
+    displayAccentLine: "rgba(170, 170, 170, 0.8)",
+    displayAccentMuted: "#888888",
+    displayAccentSoft: "rgba(170, 170, 170, 0.12)",
+    displayAccentBorder: "rgba(170, 170, 170, 0.5)",
+    displayAccentEdge: "rgba(170, 170, 170, 0.3)",
+    displayStatusLive: "#22c55e",
+    displayStatusPlayback: "#3b82f6",
+    displayStatusPlaybackMuted: "rgba(96, 165, 250, 0.5)",
+    displayStatusPlaybackLine: "rgba(59, 130, 246, 0.8)",
+    displayStatusPlaybackHead: "#93c5fd",
+    displayScrollbackAccent: "#a0c0c8",
+    displayScrollbackAccentSoft: "rgba(160, 192, 200, 0.12)",
+    displayMarkerOk: "rgba(170, 170, 170, 0.85)",
+    displayMarkerWarn: "rgba(239, 68, 68, 0.9)",
+    displayMarkerPending: "rgba(160, 160, 160, 0.7)",
   },
   map: {
     background: "#0a0a0a",

@@ -45,6 +45,7 @@ export class SpectrumRenderer {
   private passbandCenterKHz = 0;
   private passbandLowHz = 0;
   private passbandHighHz = 0;
+  private historicalMode = false;
 
   private gradient: CanvasGradient | null = null;
   private dirty = false;
@@ -126,6 +127,12 @@ export class SpectrumRenderer {
     this.passbandCenterKHz = centerKHz;
     this.passbandLowHz = lowHz;
     this.passbandHighHz = highHz;
+    this.dirty = true;
+  }
+
+  setHistoricalMode(enabled: boolean): void {
+    if (this.historicalMode === enabled) return;
+    this.historicalMode = enabled;
     this.dirty = true;
   }
 
@@ -295,7 +302,10 @@ export class SpectrumRenderer {
 
     if (x2 < 0 || x1 > w) return;
 
-    this.ctx.fillStyle = getDisplay().spectrumPassbandFill;
+    const d = getDisplay();
+    this.ctx.fillStyle = this.historicalMode
+      ? `${d.displayStatusPlaybackHead}2e` // same blue as playback head, ~18% opacity
+      : d.spectrumPassbandFill;
     this.ctx.fillRect(x1, 0, x2 - x1, h);
   }
 

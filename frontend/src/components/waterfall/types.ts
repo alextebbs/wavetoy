@@ -19,6 +19,7 @@ export interface WaterfallHandle {
   setLevels(min: number, max: number): void;
   setMaxBandwidth(maxKHz: number): void;
   setDataCoverage(startKHz: number, endKHz: number): void;
+  setCurrentTuning(freqKHz: number, passbandLo: number, passbandHi: number): void;
   setChunkSource(source: import("@/lib/chunk-loader").ChunkSource): void;
   loadManifest(
     chunks: import("@/lib/chunk-loader").ChunkMeta[],

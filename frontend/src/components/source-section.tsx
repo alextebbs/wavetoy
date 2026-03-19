@@ -32,6 +32,17 @@ export function SourceSection({
   const [noteDraft, setNoteDraft] = useState("");
   const [noteLoading, setNoteLoading] = useState(false);
   const [noteSaving, setNoteSaving] = useState(false);
+  const [hasNote, setHasNote] = useState(false);
+
+  useEffect(() => {
+    if (!source) {
+      setHasNote(false);
+      return;
+    }
+    getSourceNote(source.id)
+      .then((note) => setHasNote(!!(note?.content ?? "").trim()))
+      .catch(() => setHasNote(false));
+  }, [source?.id]);
 
   useEffect(() => {
     if (!notesOpen || !source) return;
@@ -41,6 +52,7 @@ export function SourceSection({
         const content = note?.content ?? "";
         setNoteContent(content);
         setNoteDraft(content);
+        setHasNote(!!content.trim());
       })
       .catch(() => {
         setNoteContent("");
@@ -55,6 +67,7 @@ export function SourceSection({
     try {
       await putSourceNote(source.id, noteDraft);
       setNoteContent(noteDraft);
+      setHasNote(!!noteDraft.trim());
       setNotesOpen(false);
       onNotesChanged?.();
     } catch {
@@ -104,7 +117,7 @@ export function SourceSection({
             {source && (
               <Tooltip content="Notes">
                 <Button
-                  variant="ghost"
+                  variant={hasNote ? "outline" : "ghost"}
                   size="icon-sm"
                   onClick={() => setNotesOpen(true)}
                   aria-label="Source notes"

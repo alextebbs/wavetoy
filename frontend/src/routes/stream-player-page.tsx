@@ -14,41 +14,43 @@ import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
 import { SpectrumDisplay } from "@/components/spectrum/spectrum-display";
 import type { SpectrumHandle } from "@/components/spectrum/spectrum-display";
-import { BandViewport, computeOptimalWFConfig } from "@/components/waterfall/band-viewport";
+import { BandViewport } from "@/components/waterfall/band-viewport";
 import { FrequencyScale } from "@/components/waterfall/frequency-scale";
 import { TuningOverlay } from "@/components/waterfall/tuning-overlay";
-import { WaterfallDisplay } from "@/components/waterfall/waterfall-display";
+import { WaterfallDisplayGL as WaterfallDisplay } from "@/components/waterfall/waterfall-display-gl";
 import { WaterfallTimeline, type WaterfallTimelineHandle } from "@/components/waterfall/waterfall-timeline";
 import type { WaterfallHandle } from "@/components/waterfall/types";
 import { useBandViewStore } from "@/lib/band-view-store";
 import {
-  type FilterConfig,
-  type InterpreterConfig,
-  type InterpreterOutput,
-  type Peer,
-  type RecentSource,
-  type Source,
-  type Stream,
-  deleteStream,
-  getSessionColor,
-  getSessionId,
-  getSource,
-  getStream,
-  listRecentSources,
-  PEER_COLORS,
+    type FilterConfig,
+    type InterpreterConfig,
+    type InterpreterOutput,
+    type Peer,
+    type RecentSource,
+    type Stream,
+    deleteStream,
+    getSessionColor,
+    getSessionId,
+    getSource,
+    getStream,
+    listRecentSources,
+    PEER_COLORS,
 } from "@/lib/api";
 import { getToken } from "@/lib/auth";
 import { useSourcePicker } from "@/hooks/use-source-picker";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RotateCwIcon, ScissorsIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
+import { AudioWaveformIcon, ClockIcon, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RewindIcon, RotateCwIcon, ScissorsIcon, Volume2Icon, VolumeOffIcon, XIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
 import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useThrottle, CONTROL_THROTTLE_MS } from "@/lib/timing";
 import { ALERT_THEME, MUTED_THEME, useThemeStore } from "@/lib/theme";
 import { streamLog, PerfBucket, ResourceMonitor } from "@/lib/stream-logger";
+import { useTuningStore } from "@/lib/tuning-store";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
 import { RingBufferSource } from "@/lib/chunk-loader";
 import { HistoricalAudioPlayer } from "@/lib/historical-audio-player";
+import { ScrubController } from "@/lib/scrub-controller";
 import { parseWFChunk } from "@/lib/chunk-parser";
 
 const AUDIO_TYPE = 0x02;
@@ -64,14 +66,11 @@ const MODE_PASSBAND: Record<string, [number, number]> = {
   nbfm: [-6000,  6000],
 };
 
-type ResamplerState = {
-  carryPos: number;
-  lastSample: number;
-  hasLast: boolean;
-  firFactor: number;
-  firTaps: Float32Array;
-  firTail: Float32Array;
-};
+import {
+  type ResamplerState,
+  createResamplerState,
+  resamplePCM as resamplePCMShared,
+} from "@/lib/resample";
 
 import type { LogEntry } from "@/components/logs-panel";
 
@@ -142,14 +141,16 @@ export function StreamPlayerPage() {
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [captureFilename, setCaptureFilename] = useState("capture.wav");
   const [logLines, setLogLines] = useState<LogEntry[]>([]);
-  const [sourceId, setSourceId] = useState("");
-  const [frequency, setFrequency] = useState(10000);
-  const confirmedFreqRef = useRef(10000);
   const viewLocked = stream?.view_locked ?? false;
 
-  const [mode, setMode] = useState("am");
-  const [lo, setLo] = useState(-4900);
-  const [hi, setHi] = useState(4900);
+  const sourceId = useTuningStore((s) => s.sourceId);
+  const frequency = useTuningStore((s) => s.frequency);
+  const confirmedFrequency = useTuningStore((s) => s.confirmedFrequency);
+  const mode = useTuningStore((s) => s.mode);
+  const lo = useTuningStore((s) => s.lo);
+  const hi = useTuningStore((s) => s.hi);
+  const freqAnimating = useTuningStore((s) => s.freqAnimating);
+
   const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
   const picker = useSourcePicker(streamId);
   const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
@@ -159,8 +160,6 @@ export function StreamPlayerPage() {
   const [interpreterWpm, setInterpreterWpm] = useState(0);
   const [detectedSidetoneHz, setDetectedSidetoneHz] = useState(0);
   const [voiceProgress, setVoiceProgress] = useState(0);
-  const [freqAnimating, setFreqAnimating] = useState(false);
-  const freqAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshRecentSources = useCallback(() => {
     void listRecentSources(streamId)
@@ -170,6 +169,7 @@ export function StreamPlayerPage() {
   const refreshRecentSourcesRef = useRef(refreshRecentSources);
   refreshRecentSourcesRef.current = refreshRecentSources;
 
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
@@ -187,6 +187,7 @@ export function StreamPlayerPage() {
   const spectrumRef = useRef<SpectrumHandle>(null);
 
   const setOverride = useThemeStore((s) => s.setOverride);
+  const d = useThemeStore((s) => s.theme.display);
   const streamState = stream?.state;
   const [noAudio, setNoAudio] = useState(false);
   const [noWaterfall, setNoWaterfall] = useState(false);
@@ -245,11 +246,22 @@ export function StreamPlayerPage() {
   const gainNodeRef = useRef<GainNode | null>(null);
   const liveGainRef = useRef<GainNode | null>(null);
   const histGainRef = useRef<GainNode | null>(null);
+  const scrubGainRef = useRef<GainNode | null>(null);
+  const histAnalyserRef = useRef<AnalyserNode | null>(null);
+  const histWaveformRafRef = useRef(0);
+  const scrubControllerRef = useRef<ScrubController | null>(null);
   const histPlayerRef = useRef<HistoricalAudioPlayer | null>(null);
   const [muted, setMuted] = useState(false);
   const [isPlayingHistory, setIsPlayingHistory] = useState(false);
   const isPlayingHistoryRef = useRef(false);
+  const [playbackTuning, setPlaybackTuning] = useState<{
+    freqKHz: number;
+    passbandLo: number;
+    passbandHi: number;
+  } | null>(null);
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const isSyncingScrollRef = useRef(false);
+  const isDraggingTimelineRef = useRef(false);
   const tailScrollRafRef = useRef(0);
   const tailScrollOffsetRef = useRef(0);
   const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -259,6 +271,7 @@ export function StreamPlayerPage() {
     loading: boolean;
   } | null>(null);
   const histWFSourceRef = useRef<RingBufferSource | null>(null);
+  const lastScrollBackSpectrumRowRef = useRef<number | null>(null);
   const streamRateRef = useRef(12000);
   const audioMetricsRef = useRef<AudioMetrics>({
     startedAt: performance.now(),
@@ -275,18 +288,10 @@ export function StreamPlayerPage() {
   const prefillDoneRef = useRef(false);
   const prefillAbortRef = useRef<AbortController | null>(null);
   const lastAutoPatchRef = useRef("");
-  const resamplerRef = useRef<ResamplerState>({
-    carryPos: 0,
-    hasLast: false,
-    lastSample: 0,
-    firFactor: 0,
-    firTaps: new Float32Array(0),
-    firTail: new Float32Array(0),
-  });
+  const resamplerRef = useRef<ResamplerState>(createResamplerState());
   const waveformSamplesRef = useRef<Float32Array>(new Float32Array(0));
   const tabHiddenAtRef = useRef(0);
   const droppingStaleRef = useRef(false);
-  const lastRemoteUpdateAtRef = useRef(0);
   const perfAudioRef = useRef(new PerfBucket("perf.audio"));
   const perfResampleRef = useRef(new PerfBucket("perf.resample"));
   const resourceMonRef = useRef(new ResourceMonitor());
@@ -373,6 +378,7 @@ export function StreamPlayerPage() {
       const url = URL.createObjectURL(blob);
       await ctx.audioWorklet.addModule(url);
       URL.revokeObjectURL(url);
+      await ScrubController.registerProcessor(ctx);
       const node = new AudioWorkletNode(ctx, "sdr-audio-processor");
       const gain = ctx.createGain();
       gain.gain.value = 1;
@@ -386,12 +392,22 @@ export function StreamPlayerPage() {
       histGain.gain.value = 0;
       histGain.connect(gain);
 
+      const histAnalyser = ctx.createAnalyser();
+      histAnalyser.fftSize = 2048;
+      histGain.connect(histAnalyser);
+      histAnalyserRef.current = histAnalyser;
+
+      const scrubGain = ctx.createGain();
+      scrubGain.gain.value = 0;
+      scrubGain.connect(gain);
+
       gain.connect(ctx.destination);
       audioCtxRef.current = ctx;
       workletRef.current = node;
       gainNodeRef.current = gain;
       liveGainRef.current = liveGain;
       histGainRef.current = histGain;
+      scrubGainRef.current = scrubGain;
       streamLog.debug("audio.pipeline", `created, state=${ctx.state}`);
       ctx.onstatechange = () => {
         streamLog.debug("audio.state", ctx.state);
@@ -409,113 +425,10 @@ export function StreamPlayerPage() {
     }
   }, []);
 
-  const buildFIRTaps = useCallback((factor: number) => {
-    const transitionBandwidth = 0.05;
-    let numTaps = Math.round(4 / transitionBandwidth);
-    if (numTaps % 2 === 0) numTaps += 1;
-    const taps = new Float32Array(numTaps);
-    const mid = Math.floor(numTaps / 2);
-    const cutoff = 1 / factor / 2;
-    const hamming = (r: number) => {
-      const rate = 0.5 + r / 2;
-      return 0.54 - 0.46 * Math.cos(2 * Math.PI * rate);
-    };
-    taps[mid] = 2 * Math.PI * cutoff * hamming(0);
-    for (let i = 1; i <= mid; i++) {
-      const value = (Math.sin(2 * Math.PI * cutoff * i) / i) * hamming(i / mid);
-      taps[mid - i] = value;
-      taps[mid + i] = value;
-    }
-    let sum = 0;
-    for (let i = 0; i < taps.length; i++) sum += taps[i];
-    for (let i = 0; i < taps.length; i++) taps[i] /= sum;
-    return taps;
-  }, []);
-
-  const upsampleByIntegerFIR = useCallback(
-    (input: Int16Array, factor: number): Float32Array => {
-      const state = resamplerRef.current;
-      if (state.firFactor !== factor || state.firTaps.length === 0) {
-        state.firFactor = factor;
-        state.firTaps = buildFIRTaps(factor);
-        state.firTail = new Float32Array(state.firTaps.length - 1);
-      }
-      const taps = state.firTaps;
-      const tail = state.firTail;
-      const upLen = input.length * factor;
-      const up = new Float32Array(upLen);
-      for (let i = 0; i < input.length; i++) {
-        up[i * factor] = input[i] / 32768;
-      }
-      const work = new Float32Array(tail.length + up.length);
-      work.set(tail, 0);
-      work.set(up, tail.length);
-
-      const out = new Float32Array(upLen);
-      const tapCount = taps.length;
-      const start = tapCount - 1;
-      for (let wi = start; wi < work.length; wi++) {
-        let acc = 0;
-        for (let k = 0; k < tapCount; k++) {
-          acc += work[wi - k] * taps[k];
-        }
-        out[wi - start] = factor * acc;
-      }
-
-      state.firTail = work.slice(work.length - (tapCount - 1));
-      return out;
-    },
-    [buildFIRTaps],
-  );
-
   const resamplePCM = useCallback(
-    (input: Int16Array, inRate: number, outRate: number): Float32Array => {
-      if (input.length === 0) return new Float32Array(0);
-      if (!inRate || !outRate) return new Float32Array(0);
-      if (inRate === outRate) {
-        const passthrough = new Float32Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          passthrough[i] = input[i] / 32768;
-        }
-        return passthrough;
-      }
-      if (outRate % inRate === 0) {
-        return upsampleByIntegerFIR(input, outRate / inRate);
-      }
-
-      const state = resamplerRef.current;
-      const step = inRate / outRate;
-      const srcLen = input.length + (state.hasLast ? 1 : 0);
-      const src = new Int16Array(srcLen);
-      if (state.hasLast) {
-        src[0] = state.lastSample;
-        src.set(input, 1);
-      } else {
-        src.set(input);
-      }
-      const out: number[] = [];
-      let pos = state.carryPos;
-      while (pos + 1 < src.length) {
-        const idx = Math.floor(pos);
-        const frac = pos - idx;
-        const s0 = src[idx];
-        const s1 = src[idx + 1];
-        out.push((s0 + (s1 - s0) * frac) / 32768);
-        pos += step;
-      }
-      state.lastSample = src[src.length - 1];
-      state.hasLast = true;
-      state.carryPos = pos - (src.length - 1);
-      if (
-        !Number.isFinite(state.carryPos) ||
-        state.carryPos < 0 ||
-        state.carryPos >= 1
-      ) {
-        state.carryPos = 0;
-      }
-      return Float32Array.from(out);
-    },
-    [upsampleByIntegerFIR],
+    (input: Int16Array, inRate: number, outRate: number): Float32Array =>
+      resamplePCMShared(input, inRate, outRate, resamplerRef.current),
+    [],
   );
 
   const FADE_TIME = 0.05;
@@ -525,9 +438,15 @@ export function StreamPlayerPage() {
     if (player?.playing) player.stopPlayback();
     setIsPlayingHistory(false);
     isPlayingHistoryRef.current = false;
+    useScrollBackStore.getState().set(false);
     histWFCacheRef.current = null;
     histWFSourceRef.current = null;
     waterfallRef.current?.setPlaybackHead(null);
+    setPlaybackTuning(null);
+    if (histWaveformRafRef.current) {
+      cancelAnimationFrame(histWaveformRafRef.current);
+      histWaveformRafRef.current = 0;
+    }
     if (tailScrollRafRef.current) {
       cancelAnimationFrame(tailScrollRafRef.current);
       tailScrollRafRef.current = 0;
@@ -536,14 +455,43 @@ export function StreamPlayerPage() {
       clearTimeout(scrubTimerRef.current);
       scrubTimerRef.current = null;
     }
+    scrubControllerRef.current?.destroy();
+    scrubControllerRef.current = null;
 
     const ctx = audioCtxRef.current;
     if (ctx) {
       const now = ctx.currentTime;
       liveGainRef.current?.gain.setTargetAtTime(1, now, FADE_TIME);
       histGainRef.current?.gain.setTargetAtTime(0, now, FADE_TIME);
+      scrubGainRef.current?.gain.setTargetAtTime(0, now, FADE_TIME);
     }
   }, []);
+
+  const ensureScrubController = useCallback(() => {
+    if (scrubControllerRef.current) return scrubControllerRef.current;
+    const ctx = audioCtxRef.current;
+    const scrubGain = scrubGainRef.current;
+    if (!ctx || !scrubGain) return null;
+
+    const source = new RingBufferSource(streamId);
+    const ctrl = new ScrubController(ctx, scrubGain, source);
+
+    ctrl.onSettled = (targetRow) => {
+      const sg = scrubGainRef.current;
+      if (sg) {
+        sg.gain.cancelScheduledValues(ctx.currentTime);
+        sg.gain.setValueAtTime(0, ctx.currentTime);
+      }
+
+      const player = histPlayerRef.current;
+      if (player?.playing) {
+        player.seek(targetRow);
+      }
+    };
+
+    scrubControllerRef.current = ctrl;
+    return ctrl;
+  }, [streamId]);
 
   const pushSpectrumForRow = useCallback((row: number) => {
     const wf = waterfallRef.current;
@@ -569,6 +517,9 @@ export function StreamPlayerPage() {
         const f = cache.frames[idx];
         spectrumRef.current?.pushFrame(f.bins, f.xBin, f.zoom);
         spectrumRef.current?.setPassband(f.freqKHz, f.passbandLo, f.passbandHi);
+        if (isPlayingHistoryRef.current) {
+          setPlaybackTuning({ freqKHz: f.freqKHz, passbandLo: f.passbandLo, passbandHi: f.passbandHi });
+        }
       }
     } else if (!cache || cache.startedAt !== chunk.startedAt) {
       const startedAt = chunk.startedAt;
@@ -599,7 +550,8 @@ export function StreamPlayerPage() {
 
     const totalRows = wf.rowCount();
     const scrollOffset = wf.getScrollOffset();
-    const targetRow = totalRows - scrollOffset;
+    const lookahead = Math.round(wf.visibleRows() * 0.1);
+    const targetRow = totalRows - scrollOffset - lookahead;
 
     if (!histPlayerRef.current) {
       const source = new RingBufferSource(streamId);
@@ -615,7 +567,8 @@ export function StreamPlayerPage() {
     player.onRowChange = (row) => {
       isSyncingScrollRef.current = true;
       const total = wf.rowCount();
-      const offset = total - row;
+      const lookahead = Math.round(wf.visibleRows() * 0.1);
+      const offset = Math.max(0, total - row - lookahead);
       wf.setScrollOffset(offset);
       wf.setPlaybackHead(row);
       isSyncingScrollRef.current = false;
@@ -647,6 +600,19 @@ export function StreamPlayerPage() {
 
     setIsPlayingHistory(true);
     isPlayingHistoryRef.current = true;
+    spectrumRef.current?.setHistoricalMode(true);
+
+    const analyser = histAnalyserRef.current;
+    if (analyser) {
+      const buf = new Float32Array(analyser.fftSize);
+      const pumpWaveform = () => {
+        if (!isPlayingHistoryRef.current) return;
+        analyser.getFloatTimeDomainData(buf);
+        waveformSamplesRef.current = new Float32Array(buf);
+        histWaveformRafRef.current = requestAnimationFrame(pumpWaveform);
+      };
+      histWaveformRafRef.current = requestAnimationFrame(pumpWaveform);
+    }
 
     try {
       await player.startPlayback({
@@ -787,17 +753,11 @@ export function StreamPlayerPage() {
                 s.source_id, s.frequency_khz, s.mode,
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
-              lastRemoteUpdateAtRef.current = performance.now();
-              setFreqAnimating(true);
-              if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
-              freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
               setStream(s);
-              setSourceId(s.source_id);
-              setFrequency(s.frequency_khz);
-              confirmedFreqRef.current = s.frequency_khz;
-              setMode(s.mode);
-              setLo(s.bandwidth_low_hz);
-              setHi(s.bandwidth_high_hz);
+              useTuningStore.getState().applyRemote(
+                s.source_id, s.frequency_khz, s.mode,
+                s.bandwidth_low_hz, s.bandwidth_high_hz,
+              );
             }
 
             if (!prefillDoneRef.current && waterfallRef.current) {
@@ -831,17 +791,11 @@ export function StreamPlayerPage() {
               s.source_id, s.frequency_khz, s.mode,
               s.bandwidth_low_hz, s.bandwidth_high_hz,
             );
-            lastRemoteUpdateAtRef.current = performance.now();
-            setFreqAnimating(true);
-            if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
-            freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
             setStream(s);
-            setSourceId(s.source_id);
-            setFrequency(s.frequency_khz);
-            confirmedFreqRef.current = s.frequency_khz;
-            setMode(s.mode);
-            setLo(s.bandwidth_low_hz);
-            setHi(s.bandwidth_high_hz);
+            useTuningStore.getState().applyRemote(
+              s.source_id, s.frequency_khz, s.mode,
+              s.bandwidth_low_hz, s.bandwidth_high_hz,
+            );
             refreshRecentSourcesRef.current();
           } else if (msg.type === "peer_joined" && msg.peer) {
             const peer = msg.peer as Peer;
@@ -864,17 +818,11 @@ export function StreamPlayerPage() {
                 s.source_id, s.frequency_khz, s.mode,
                 s.bandwidth_low_hz, s.bandwidth_high_hz,
               );
-              lastRemoteUpdateAtRef.current = performance.now();
-              setFreqAnimating(true);
-              if (freqAnimTimerRef.current) clearTimeout(freqAnimTimerRef.current);
-              freqAnimTimerRef.current = setTimeout(() => setFreqAnimating(false), 250);
               setStream(s);
-              setSourceId(s.source_id);
-              setFrequency(s.frequency_khz);
-              confirmedFreqRef.current = s.frequency_khz;
-              setMode(s.mode);
-              setLo(s.bandwidth_low_hz);
-              setHi(s.bandwidth_high_hz);
+              useTuningStore.getState().applyRemote(
+                s.source_id, s.frequency_khz, s.mode,
+                s.bandwidth_low_hz, s.bandwidth_high_hz,
+              );
             } else if (msg.code === "VALIDATION" && typeof msg.error === "string" && msg.error.includes("not subscribed")) {
               streamLog.warn("ws.resub", "lost topic subscription, re-subscribing", "client", "wavetoy");
               ws.send(JSON.stringify({ type: "subscribe", topics: [`stream:${streamId}`, "streams"] }));
@@ -960,7 +908,8 @@ export function StreamPlayerPage() {
         const zoom = dv.getUint16(4, true);
         const bins = new Uint8Array(ev.data, 9);
         waterfallRef.current?.pushFrame(bins, xBin, zoom);
-        if (!isPlayingHistoryRef.current) {
+        const inScrollBack = useScrollBackStore.getState().isInScrollBack;
+        if (!isPlayingHistoryRef.current && !inScrollBack) {
           spectrumRef.current?.pushFrame(bins, xBin, zoom);
         }
         return;
@@ -990,11 +939,13 @@ export function StreamPlayerPage() {
         if (sample & 0x8000) sample -= 0x10000;
         pcm[i] = sample;
       }
-      const wfBuf = new Float32Array(count);
-      for (let i = 0; i < count; i++) {
-        wfBuf[i] = pcm[i] / 32768;
+      if (!isPlayingHistoryRef.current) {
+        const wfBuf = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+          wfBuf[i] = pcm[i] / 32768;
+        }
+        waveformSamplesRef.current = wfBuf;
       }
-      waveformSamplesRef.current = wfBuf;
       const outRate = audioCtxRef.current?.sampleRate ?? 48000;
       const rt0 = performance.now();
       const resampled = resamplePCM(pcm, streamRateRef.current, outRate);
@@ -1189,9 +1140,10 @@ export function StreamPlayerPage() {
   );
 
   useEffect(() => {
-    if (performance.now() - lastRemoteUpdateAtRef.current < 150) return;
+    if (isInScrollBack) return;
+    if (useTuningStore.getState().isRemoteRecent()) return;
     throttledAutoPatch(sourceId, frequency, mode, lo, hi);
-  }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch]);
+  }, [frequency, hi, lo, mode, sourceId, throttledAutoPatch, isInScrollBack]);
 
   useEffect(() => {
     spectrumRef.current?.setPassband(frequency, lo, hi);
@@ -1210,7 +1162,7 @@ export function StreamPlayerPage() {
     const store = useBandViewStore.getState();
     const span = store.endKHz - store.startKHz;
     const newStart = frequency - span / 2;
-    const isRemote = performance.now() - lastRemoteUpdateAtRef.current < 150;
+    const isRemote = useTuningStore.getState().isRemoteRecent();
     if (isRemote) {
       store.setViewRemote(newStart, newStart + span);
     } else {
@@ -1218,18 +1170,26 @@ export function StreamPlayerPage() {
     }
   }, [frequency, viewLocked]);
 
+  useEffect(() => {
+    waterfallRef.current?.setCurrentTuning(frequency, lo, hi);
+  }, [frequency, lo, hi]);
+
+  useEffect(() => {
+    spectrumRef.current?.setHistoricalMode(isInScrollBack || isPlayingHistory);
+  }, [isInScrollBack, isPlayingHistory]);
+
   // When locked, panning/zooming should retune to center
   useEffect(() => {
-    if (!viewLocked) return;
+    if (!viewLocked || isInScrollBack) return;
     return useBandViewStore.subscribe((state) => {
       if (state.viewSource !== "local") return;
       const center = (state.startKHz + state.endKHz) / 2;
       const rounded = Math.round(center * 100) / 100;
       if (Math.abs(rounded - frequency) > 0.01) {
-        setFrequency(Math.min(rounded, 30000));
+        useTuningStore.getState().setFrequency(rounded);
       }
     });
-  }, [viewLocked, frequency]);
+  }, [viewLocked, frequency, isInScrollBack]);
 
   useEffect(() => {
     void getStream(streamId)
@@ -1242,13 +1202,11 @@ export function StreamPlayerPage() {
           s.bandwidth_high_hz,
         );
         setStream(s);
-        setSourceId(s.source_id);
         picker.setSelectedSourceId(s.source_id);
-        setFrequency(s.frequency_khz);
-        confirmedFreqRef.current = s.frequency_khz;
-        setMode(s.mode);
-        setLo(s.bandwidth_low_hz);
-        setHi(s.bandwidth_high_hz);
+        useTuningStore.getState().applyRemote(
+          s.source_id, s.frequency_khz, s.mode,
+          s.bandwidth_low_hz, s.bandwidth_high_hz,
+        );
       })
       .catch(() => { setNotFound(true); });
 
@@ -1269,6 +1227,7 @@ export function StreamPlayerPage() {
       prefillAbortRef.current?.abort();
       histPlayerRef.current?.destroy();
       histPlayerRef.current = null;
+      useTuningStore.getState().reset();
     };
   }, [connect, streamId]);
 
@@ -1354,7 +1313,7 @@ export function StreamPlayerPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-6 gap-1 px-2 text-[10px]"
+                          className={`h-6 gap-1 px-2 text-[10px] transition-opacity duration-200 ${isInScrollBack ? "opacity-40 pointer-events-none" : ""}`}
                           onClick={() => sendPatch({ source_id: src.id })}
                         >
                           <RotateCwIcon className="size-3" />
@@ -1408,199 +1367,297 @@ export function StreamPlayerPage() {
       label: "Logs",
       content: <LogsPanel lines={logLines} streamId={streamId} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress]);
+  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress, isInScrollBack]);
 
   if (notFound) return <ErrorPage code="404" />;
 
   return (
     <div className="flex h-screen overflow-hidden">
-      {/* ── Timeline bar (full height) ── */}
-      <WaterfallTimeline
+      {/* ── Main area (header + content) ── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+      {/* ── Top bar ── */}
+      <header className="grid h-[54px] shrink-0 items-center border-b bg-background" style={{ gridTemplateColumns: "1fr auto 1fr 54px", paddingLeft: 0, paddingRight: 16, columnGap: 12 }} dir="rtl">
+        {/* Right: status + multiplayer + toggle info */}
+        <div className="flex items-center gap-3 justify-self-start pl-4" dir="ltr">
+          {statusChip && (
+            <Tooltip content={statusChip.tooltip} className="normal-case tracking-normal">
+              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                statusChip.color === "red"
+                  ? "bg-destructive/15 text-destructive"
+                  : statusChip.color === "blue"
+                    ? "bg-primary/15 text-primary"
+                    : "bg-muted text-muted-foreground"
+              }`}>
+                {statusChip.label}
+              </span>
+            </Tooltip>
+          )}
+          <div className="flex items-center gap-1.5">
+            {peers.map((p, i) => (
+              <Tooltip key={p.session_id} content={`user ${p.session_id.slice(0, 8)} connected`}>
+                <span
+                  className="inline-block size-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: PEER_COLORS[i % PEER_COLORS.length] }}
+                />
+              </Tooltip>
+            ))}
+          </div>
+          <Tooltip content="Stream settings">
+            <button
+              className="font-xanh-mono min-w-0 truncate text-base transition-colors hover:text-muted-foreground"
+              onClick={() => {
+                setEditName(stream?.name ?? "");
+                setStreamSettingsOpen(true);
+              }}
+            >
+              {stream?.name || "Untitled stream"}
+            </button>
+          </Tooltip>
+          <Tooltip content={muted ? "Unmute" : "Mute"}>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                const next = !muted;
+                setMuted(next);
+                const g = gainNodeRef.current;
+                if (g) g.gain.setTargetAtTime(next ? 0 : 1, g.context.currentTime, 0.01);
+                useThemeStore.getState().setOverride(next ? MUTED_THEME : null);
+              }}
+            >
+              {muted ? <VolumeOffIcon className="size-4" /> : <Volume2Icon className="size-4" />}
+            </Button>
+          </Tooltip>
+          <Tooltip content={sidebarOpen ? "Hide info panel" : "Show info panel"}>
+            <Button
+              variant={sidebarOpen ? "outline" : "ghost"}
+              size="icon"
+              onClick={() => setSidebarOpen((v) => !v)}
+            >
+              <PanelRightIcon className="size-4" />
+            </Button>
+          </Tooltip>
+        </div>
+
+        {/* Center: knob + freq + lock (truly centered) */}
+        <div className="flex h-full items-center gap-5 justify-self-center self-stretch" dir="ltr">
+          <FrequencyInput
+            value={isPlayingHistory && playbackTuning ? playbackTuning.freqKHz : frequency}
+            optimistic={!isPlayingHistory && frequency !== confirmedFrequency}
+            onSubmit={(kHz) => useTuningStore.getState().setFrequency(kHz)}
+            dimmed={isInScrollBack && !isPlayingHistory}
+            playbackMode={isPlayingHistory}
+          />
+          <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
+            <Button
+              variant={viewLocked ? "outline" : "ghost"}
+              size="icon"
+              className="size-8"
+              style={isInScrollBack ? { opacity: 0.35, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" }}
+              onClick={() => {
+                const next = !viewLocked;
+                sendPatch({ view_locked: next });
+                if (next) {
+                  const { startKHz, endKHz } = useBandViewStore.getState();
+                  const span = endKHz - startKHz;
+                  const newStart = frequency - span / 2;
+                  useBandViewStore.getState().setView(newStart, newStart + span);
+                }
+              }}
+            >
+              {viewLocked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
+            </Button>
+          </Tooltip>
+        </div>
+
+        {/* Left: mode + bandwidth */}
+        <div className="flex items-center gap-3 justify-self-end pr-4" dir="ltr">
+          <Tooltip content="Demodulation mode">
+            <div
+              className="flex h-8 overflow-hidden rounded-md border border-border"
+              style={isInScrollBack ? { pointerEvents: "none" } : undefined}
+            >
+              {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => {
+                    const [defaultLo, defaultHi] = MODE_PASSBAND[m] ?? [-4900, 4900];
+                    useTuningStore.getState().setMode(m, defaultLo, defaultHi);
+                  }}
+                  className={`px-3.5 text-xs font-medium transition-colors ${
+                    mode === m
+                      ? isPlayingHistory
+                        ? "text-black"
+                        : "bg-primary text-primary-foreground"
+                      : "bg-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                  style={{
+                    ...(isInScrollBack && !isPlayingHistory && mode === m ? { opacity: 0.35 } : {}),
+                    ...(isPlayingHistory && mode === m ? { backgroundColor: d.displayStatusPlayback, color: "black" } : {}),
+                    transition: "opacity 0.2s ease, background-color 0.2s ease, color 0.2s ease",
+                  }}
+                >
+                  {m.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </Tooltip>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Lo</span>
+            <Tooltip content="Low cut (Hz)">
+              <div className="h-8 w-20 overflow-hidden rounded-md border border-input">
+                <Input
+                  type="number"
+                  min={-6000}
+                  max={6000}
+                  value={isPlayingHistory && playbackTuning ? playbackTuning.passbandLo : lo}
+                  onChange={(e) => useTuningStore.getState().setLo(Number(e.target.value))}
+                  className="h-full w-full border-0 text-xs shadow-none focus-visible:ring-0"
+                  disabled={isInScrollBack}
+                  style={{
+                    ...(isInScrollBack && !isPlayingHistory ? { opacity: 0.35 } : {}),
+                    ...(isPlayingHistory ? { color: d.displayStatusPlaybackHead } : {}),
+                    transition: "opacity 0.2s ease, color 0.2s ease",
+                  }}
+                />
+              </div>
+            </Tooltip>
+            <Tooltip content="High cut (Hz)">
+              <div className="h-8 w-20 overflow-hidden rounded-md border border-input">
+                <Input
+                  type="number"
+                  min={-6000}
+                  max={6000}
+                  value={isPlayingHistory && playbackTuning ? playbackTuning.passbandHi : hi}
+                  onChange={(e) => useTuningStore.getState().setHi(Number(e.target.value))}
+                  className="h-full w-full border-0 text-xs shadow-none focus-visible:ring-0"
+                  disabled={isInScrollBack}
+                  style={{
+                    ...(isInScrollBack && !isPlayingHistory ? { opacity: 0.35 } : {}),
+                    ...(isPlayingHistory ? { color: d.displayStatusPlaybackHead } : {}),
+                    transition: "opacity 0.2s ease, color 0.2s ease",
+                  }}
+                />
+              </div>
+            </Tooltip>
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Hi</span>
+          </div>
+        </div>
+
+        {/* Rewind button — 4th column, centered in 54px timeline column */}
+        <div className="flex h-full items-center justify-center border-r" dir="ltr">
+          <Tooltip content="Rewind">
+            <Button
+              variant={timelineOpen ? "outline" : "ghost"}
+              size="icon"
+              className="size-8"
+              style={timelineOpen ? { borderColor: d.displayScrollbackAccent, color: d.displayScrollbackAccent, backgroundColor: d.displayScrollbackAccentSoft } : { color: d.displayScrollbackAccent }}
+              onClick={() => setTimelineOpen((v) => !v)}
+            >
+              <RewindIcon className="size-4" />
+            </Button>
+          </Tooltip>
+        </div>
+      </header>
+
+      {/* ── Content: timeline + waterfall + sidebar ── */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* ── Timeline bar ── */}
+        {timelineOpen && <WaterfallTimeline
         ref={timelineRef}
         spectrumHeight={spectrumHeight}
+        isPlayingHistory={isPlayingHistory}
         onScrollOffset={(offset) => {
           waterfallRef.current?.setScrollOffset(offset);
-          if (isPlayingHistory && !isSyncingScrollRef.current) {
-            const wf = waterfallRef.current;
+          useScrollBackStore.getState().set(offset > 0);
+          const wf = waterfallRef.current;
+          if (offset === 0) {
+            if (isPlayingHistory) {
+              stopHistoricalPlayback();
+              waterfallRef.current?.scrollToLive();
+            }
+            histWFSourceRef.current = null;
+            histWFCacheRef.current = null;
+            lastScrollBackSpectrumRowRef.current = null;
+            return;
+          }
+          if (offset > 0 && !isPlayingHistory && !isSyncingScrollRef.current) {
+            if (!histWFSourceRef.current) {
+              histWFSourceRef.current = new RingBufferSource(streamId);
+            }
             if (wf) {
-              const headRow = wf.rowCount() - offset;
+              const lookahead = Math.round(wf.visibleRows() * 0.1);
+              const headRow = wf.rowCount() - offset - lookahead;
+              lastScrollBackSpectrumRowRef.current = headRow;
+              pushSpectrumForRow(headRow);
+            }
+          }
+          if (isPlayingHistory && !isSyncingScrollRef.current) {
+            if (wf) {
+              const lookahead = Math.round(wf.visibleRows() * 0.1);
+              const headRow = wf.rowCount() - offset - lookahead;
               wf.setPlaybackHead(headRow);
               pushSpectrumForRow(headRow);
             }
             const player = histPlayerRef.current;
             if (!player?.playing) return;
             player.scrubPause();
-            if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
-            scrubTimerRef.current = setTimeout(() => {
-              scrubTimerRef.current = null;
-              if (!wf || !player.playing) return;
-              const so = wf.getScrollOffset();
-              const targetRow = wf.rowCount() - so;
-              player.seek(targetRow);
-            }, 250);
+
+            const ctrl = ensureScrubController();
+            if (ctrl && wf) {
+              ctrl.setChunks([...wf.chunkManifest()]);
+              const ctx = audioCtxRef.current;
+              if (ctx) {
+                const now = ctx.currentTime;
+                scrubGainRef.current?.gain.cancelScheduledValues(now);
+                scrubGainRef.current?.gain.setTargetAtTime(1, now, 0.01);
+              }
+              const la = Math.round(wf.visibleRows() * 0.1);
+              ctrl.scrub(
+                wf.rowCount() - offset - la,
+                !isDraggingTimelineRef.current,
+              );
+            }
           }
         }}
         onSnapToLive={() => {
           if (isPlayingHistory) stopHistoricalPlayback();
+          else {
+            histWFSourceRef.current = null;
+            histWFCacheRef.current = null;
+            lastScrollBackSpectrumRowRef.current = null;
+          }
+          useScrollBackStore.getState().set(false);
           waterfallRef.current?.scrollToLive();
         }}
-        onPlay={startHistoricalPlayback}
-        onStop={stopHistoricalPlayback}
-        isPlaying={isPlayingHistory}
-      />
-      {/* ── Left: top bar + waterfall area ── */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* ── Top bar (waterfall area only) ── */}
-        <header className="grid h-[54px] shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b bg-background px-4" dir="rtl">
-          {/* Right: status + multiplayer + toggle info */}
-          <div className="flex items-center gap-3 justify-self-start pl-4" dir="ltr">
-            {statusChip && (
-              <Tooltip content={statusChip.tooltip} className="normal-case tracking-normal">
-                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-                  statusChip.color === "red"
-                    ? "bg-destructive/15 text-destructive"
-                    : statusChip.color === "blue"
-                      ? "bg-primary/15 text-primary"
-                      : "bg-muted text-muted-foreground"
-                }`}>
-                  {statusChip.label}
-                </span>
-              </Tooltip>
-            )}
-            <div className="flex items-center gap-1.5">
-              {peers.map((p, i) => (
-                <Tooltip key={p.session_id} content={`user ${p.session_id.slice(0, 8)} connected`}>
-                  <span
-                    className="inline-block size-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: PEER_COLORS[i % PEER_COLORS.length] }}
-                  />
-                </Tooltip>
-              ))}
-            </div>
-            <Tooltip content="Stream settings">
-              <button
-                className="font-xanh-mono min-w-0 truncate text-base transition-colors hover:text-muted-foreground"
-                onClick={() => {
-                  setEditName(stream?.name ?? "");
-                  setStreamSettingsOpen(true);
-                }}
-              >
-                {stream?.name || "Untitled stream"}
-              </button>
-            </Tooltip>
-            <Tooltip content={muted ? "Unmute" : "Mute"}>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => {
-                  const next = !muted;
-                  setMuted(next);
-                  const g = gainNodeRef.current;
-                  if (g) g.gain.setTargetAtTime(next ? 0 : 1, g.context.currentTime, 0.01);
-                  useThemeStore.getState().setOverride(next ? MUTED_THEME : null);
-                }}
-              >
-                {muted ? <VolumeOffIcon className="size-4" /> : <Volume2Icon className="size-4" />}
-              </Button>
-            </Tooltip>
-            <Tooltip content={sidebarOpen ? "Hide info panel" : "Show info panel"}>
-              <Button
-                variant={sidebarOpen ? "outline" : "ghost"}
-                size="icon"
-                onClick={() => setSidebarOpen((v) => !v)}
-              >
-                <PanelRightIcon className="size-4" />
-              </Button>
-            </Tooltip>
-          </div>
-
-          {/* Center: knob + freq + lock (truly centered) */}
-          <div className="flex h-full items-center gap-5 justify-self-center" dir="ltr">
-            <FrequencyInput
-              value={frequency}
-              optimistic={frequency !== confirmedFreqRef.current}
-              onSubmit={(kHz) => setFrequency(Math.min(kHz, 30000))}
-            />
-            <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
-              <Button
-                variant={viewLocked ? "outline" : "ghost"}
-                size="icon"
-                className="size-8"
-                onClick={() => {
-                  const next = !viewLocked;
-                  sendPatch({ view_locked: next });
-                  if (next) {
-                    const { startKHz, endKHz } = useBandViewStore.getState();
-                    const span = endKHz - startKHz;
-                    const newStart = frequency - span / 2;
-                    useBandViewStore.getState().setView(newStart, newStart + span);
-                  }
-                }}
-              >
-                {viewLocked ? <LockIcon className="size-4" /> : <LockOpenIcon className="size-4" />}
-              </Button>
-            </Tooltip>
-          </div>
-
-          {/* Left: mode + bandwidth */}
-          <div className="flex items-center gap-3 justify-self-end pr-4" dir="ltr">
-            <Tooltip content="Demodulation mode">
-              <div className="flex h-8 overflow-hidden rounded-md border border-border">
-                {["am", "usb", "lsb", "cw", "nbfm"].map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => {
-                      setMode(m);
-                      const [defaultLo, defaultHi] = MODE_PASSBAND[m] ?? [-4900, 4900];
-                      setLo(defaultLo);
-                      setHi(defaultHi);
-                    }}
-                    className={`px-3.5 text-xs font-medium transition-colors ${
-                      mode === m
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-transparent text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {m.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </Tooltip>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Lo</span>
-              <Tooltip content="Low cut (Hz)">
-                <Input
-                  type="number"
-                  min={-6000}
-                  max={6000}
-                  value={lo}
-                  onChange={(e) => setLo(Number(e.target.value))}
-                  className="h-8 w-20 text-xs"
-                />
-              </Tooltip>
-              <Tooltip content="High cut (Hz)">
-                <Input
-                  type="number"
-                  min={-6000}
-                  max={6000}
-                  value={hi}
-                  onChange={(e) => setHi(Number(e.target.value))}
-                  className="h-8 w-20 text-xs"
-                />
-              </Tooltip>
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Hi</span>
-            </div>
-          </div>
-        </header>
-
-        {/* Spectrum + freq scale + waterfall */}
+        onDragStart={() => {
+          isDraggingTimelineRef.current = true;
+        }}
+        onDragEnd={() => {
+          isDraggingTimelineRef.current = false;
+          if (!isPlayingHistory) return;
+          const wf = waterfallRef.current;
+          const player = histPlayerRef.current;
+          if (!wf || !player?.playing) return;
+          const so = wf.getScrollOffset();
+          const ctrl = scrubControllerRef.current;
+          if (ctrl) {
+            ctrl.settle();
+          } else {
+            const lookahead = Math.round(wf.visibleRows() * 0.1);
+            const targetRow = wf.rowCount() - so - lookahead;
+            player.seek(targetRow);
+          }
+        }}
+      />}
+        {/* ── Waterfall area ── */}
         <BandViewport
           className="min-w-0 flex-1"
           zoomToCenter={viewLocked}
-          onClickFrequency={(freqKHz) => {
-            setFrequency(Math.min(Math.round(freqKHz * 100) / 100, 30000));
+          onClickFrequency={isInScrollBack ? undefined : (freqKHz) => {
+            useTuningStore.getState().setFrequency(Math.round(freqKHz * 100) / 100);
           }}
-          onWFConfigChange={(zoom, centerKHz, viewStartKHz, viewEndKHz) => {
+          onWFConfigChange={isInScrollBack ? undefined : (zoom, centerKHz, viewStartKHz, viewEndKHz) => {
             const ws = wsRef.current;
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(
@@ -1619,33 +1676,59 @@ export function StreamPlayerPage() {
             // transitions via pushFrame() using actual frame metadata
           }}
         >
-          <TuningOverlay
-            centerFreqKHz={frequency}
-            passbandLowHz={lo}
-            passbandHighHz={hi}
-            centerLocked={viewLocked}
-            animate={freqAnimating}
-            onFrequencyChange={viewLocked ? undefined : setFrequency}
-            onBandwidthChange={(newLo, newHi) => {
-              setLo(newLo);
-              setHi(newHi);
+          <div
+            className="absolute inset-0 z-[25] pointer-events-none transition-opacity duration-200 ease-out"
+            style={{
+              opacity: isInScrollBack || isPlayingHistory ? 0 : 1,
             }}
-          />
+          >
+            <TuningOverlay
+              centerFreqKHz={isPlayingHistory && playbackTuning ? playbackTuning.freqKHz : frequency}
+              passbandLowHz={isPlayingHistory && playbackTuning ? playbackTuning.passbandLo : lo}
+              passbandHighHz={isPlayingHistory && playbackTuning ? playbackTuning.passbandHi : hi}
+              centerLocked={viewLocked}
+              animate={freqAnimating}
+              playbackMode={isPlayingHistory}
+              onFrequencyChange={isPlayingHistory ? undefined : viewLocked ? undefined : (kHz) => useTuningStore.getState().setFrequency(kHz)}
+              onBandwidthChange={isPlayingHistory ? undefined : (newLo, newHi) => {
+                const s = useTuningStore.getState();
+                s.setLo(newLo);
+                s.setHi(newHi);
+              }}
+            />
+          </div>
           <SpectrumDisplay
             ref={spectrumRef}
             className="w-full shrink-0"
             style={{ height: spectrumHeight }}
           />
-          <FrequencyScale onResizeStart={onSpectrumResizeStart} />
+          <FrequencyScale onResizeStart={onSpectrumResizeStart} hideTopBorder={spectrumHeight <= 0} />
           <WaterfallDisplay
             ref={waterfallRef}
             timelineRef={timelineRef}
             className="min-h-0 flex-1"
+            onPlay={startHistoricalPlayback}
+            onStop={stopHistoricalPlayback}
+            isPlaying={isPlayingHistory}
+            showTuningTrace={timelineOpen}
+            onOverlayState={(state) => {
+              if (isPlayingHistoryRef.current || state.scrollOffset <= 0) return;
+              const visibleRows = Math.ceil(state.height / state.rowScale);
+              const lookahead = Math.round(visibleRows * 0.1);
+              const headRow = state.totalRows - state.scrollOffset - lookahead;
+              if (headRow === lastScrollBackSpectrumRowRef.current) return;
+              lastScrollBackSpectrumRowRef.current = headRow;
+              if (!histWFSourceRef.current) {
+                histWFSourceRef.current = new RingBufferSource(streamId);
+              }
+              pushSpectrumForRow(headRow);
+            }}
           />
         </BandViewport>
       </div>
+      </div>
 
-      {/* Right: info panel (full height, animated) */}
+      {/* Right: info panel (full height) */}
       <aside
         className={`relative flex shrink-0 flex-col border-l ${isResizing ? "" : "transition-[width] duration-200 ease-in-out"}`}
         style={{ width: sidebarOpen ? sidebarWidth : 0, borderLeftWidth: sidebarOpen ? 1 : 0 }}

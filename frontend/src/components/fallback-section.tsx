@@ -16,7 +16,8 @@ import {
   RotateCwIcon,
   ShieldCheckIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
 
 interface FallbackSectionProps {
   stream: Stream | null;
@@ -35,6 +36,7 @@ export function FallbackSection({
   audioCtxRef,
   gainNodeRef,
 }: FallbackSectionProps) {
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const [suggestions, setSuggestions] = useState<FallbackSuggestion[]>([]);
   const [probing, setProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState<{
@@ -121,12 +123,24 @@ export function FallbackSection({
     ws.send(JSON.stringify({ type: "switch_fallback", source_id: sourceId }));
   };
 
+  const STALE_MS = 30 * 60 * 1000;
+  const isStale = useMemo(() => {
+    if (suggestions.length === 0) return false;
+    const newest = Math.max(
+      ...suggestions.map((s) => new Date(s.last_probed).getTime()),
+    );
+    return Date.now() - newest > STALE_MS;
+  }, [suggestions]);
+
   return (
     <section className="border-t border-border/60">
       <div className="px-3 py-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
             Fallback sources
+            {isStale && (
+              <span className="ml-2 text-[10px] font-normal opacity-50">Stale</span>
+            )}
           </h3>
           <div className="flex items-center gap-2">
             {suggestions.length > 0 && (
@@ -145,7 +159,7 @@ export function FallbackSection({
                 variant="ghost"
                 size="icon"
                 className="size-6 shrink-0"
-                disabled={reprobing}
+                disabled={reprobing || isInScrollBack}
                 onClick={() => void handleProbe()}
               >
                 <RefreshCwIcon
@@ -164,6 +178,7 @@ export function FallbackSection({
                 variant={autoFallback ? "outline" : "ghost"}
                 size="icon"
                 className="size-6 shrink-0"
+                disabled={isInScrollBack}
                 onClick={() => onToggleFallback(!autoFallback)}
               >
                 <ShieldCheckIcon className="size-3" />
@@ -228,6 +243,7 @@ function SuggestionCard({
   audioCtxRef: React.RefObject<AudioContext | null>;
   gainNodeRef: React.RefObject<GainNode | null>;
 }) {
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const scorePercent = Math.round(s.score * 100);
   const distLabel =
     s.distance_km < 1
@@ -275,7 +291,7 @@ function SuggestionCard({
             variant="ghost"
             size="sm"
             className="h-6 gap-1 px-2 text-[10px]"
-            disabled={isCurrentSource}
+            disabled={isCurrentSource || isInScrollBack}
             onClick={() => onSwitch(s.source_id)}
           >
             {isCurrentSource ? "Current" : <><RotateCwIcon className="size-3" /> Swap</>}

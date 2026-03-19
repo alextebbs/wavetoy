@@ -1,5 +1,7 @@
-import { forwardRef, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { useThemeStore } from "@/lib/theme";
 import type { OverlayState } from "./waterfall-renderer";
+import type { TuningTracePoint } from "./waterfall-renderer-base";
 
 export interface WaterfallMarker {
   id: string;
@@ -12,14 +14,12 @@ export interface WaterfallOverlayHandle {
   addMarker(marker: WaterfallMarker): void;
   removeMarker(id: string): void;
   update(state: OverlayState): void;
+  updateTuningTrace(points: TuningTracePoint[]): void;
 }
 
 const MONO_FONT = '"Iosevka Charon Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 const EXPECTED_WF_PER_CHUNK = 1360;
 const FULLNESS_THRESHOLD = 0.8;
-const COLOR_OK = "rgba(94, 234, 212, 0.85)";
-const COLOR_WARN = "rgba(239, 68, 68, 0.9)";
-const COLOR_PENDING = "rgba(160, 160, 160, 0.7)";
 
 function formatTimestamp(iso: string): string {
   try {
@@ -46,7 +46,10 @@ interface DiagInfo {
   inProgress: boolean;
 }
 
-function buildDiagInfo(marker: WaterfallMarker): DiagInfo {
+function buildDiagInfo(
+  marker: WaterfallMarker,
+  colors: { ok: string; warn: string; pending: string },
+): DiagInfo {
   const meta = marker.metadata;
   const complete = meta?.complete as boolean | undefined;
   const inProgress = complete === false;
@@ -60,26 +63,30 @@ function buildDiagInfo(marker: WaterfallMarker): DiagInfo {
     ? wfFrames / EXPECTED_WF_PER_CHUNK
     : 1;
   const wfColor = inProgress
-    ? COLOR_PENDING
-    : wfPct < FULLNESS_THRESHOLD ? COLOR_WARN : COLOR_OK;
+    ? colors.pending
+    : wfPct < FULLNESS_THRESHOLD ? colors.warn : colors.ok;
   const wfTooltip = `WF: ${wfFrames} / ${EXPECTED_WF_PER_CHUNK} frames (${Math.round(wfPct * 100)}%)`;
 
   const audioBytes = (meta?.audio_bytes as number | undefined) ?? 0;
   const audioExpected = (meta?.audio_expected as number | undefined) ?? 0;
   const sndPct = audioExpected > 0 ? audioBytes / audioExpected : 1;
+  const sndPctRounded = Math.round(sndPct * 100);
   const sndColor = inProgress
-    ? COLOR_PENDING
-    : sndPct < FULLNESS_THRESHOLD ? COLOR_WARN : COLOR_OK;
+    ? colors.pending
+    : sndPct < FULLNESS_THRESHOLD ? colors.warn : colors.ok;
   const sndTooltip = audioExpected > 0
-    ? `SND: ${formatBytes(audioBytes)} / ${formatBytes(audioExpected)} (${Math.round(sndPct * 100)}%)`
+    ? `SND: ${formatBytes(audioBytes)} / ${formatBytes(audioExpected)} (${sndPctRounded}%)`
     : `SND: ${formatBytes(audioBytes)}`;
+
+  const wfWarn = !inProgress && wfPct < FULLNESS_THRESHOLD;
+  const sndWarn = !inProgress && sndPct < FULLNESS_THRESHOLD;
 
   return {
     time,
-    wfLabel: "WF",
+    wfLabel: wfWarn ? `WF ${wfFrames}` : "WF",
     wfTooltip,
     wfColor,
-    sndLabel: "SND",
+    sndLabel: sndWarn ? `SND ${sndPctRounded}%` : "SND",
     sndTooltip,
     sndColor,
     inProgress,
@@ -95,36 +102,32 @@ function ensureSpinnerStyle() {
   document.head.appendChild(style);
 }
 
-function createPlaybackHeadEl(): HTMLDivElement {
-  const el = document.createElement("div");
-  el.style.position = "absolute";
-  el.style.top = "0";
-  el.style.left = "0";
-  el.style.width = "100%";
-  el.style.display = "none";
-  el.style.pointerEvents = "none";
-  el.style.willChange = "transform";
-  el.style.zIndex = "10";
-
-  const line = document.createElement("div");
-  line.style.position = "absolute";
-  line.style.top = "0";
-  line.style.left = "0";
-  line.style.right = "0";
-  line.style.height = "1px";
-  line.style.backgroundColor = "rgba(94, 234, 212, 0.8)";
-  line.style.boxShadow = "0 0 4px rgba(94, 234, 212, 0.5), 0 0 8px rgba(94, 234, 212, 0.2)";
-  el.appendChild(line);
-
-  return el;
+interface WaterfallOverlayProps {
+  isPlaying?: boolean;
+  showTuningTrace?: boolean;
+  onPlaybackHeadState?: (state: { visible: boolean; isPlaying: boolean }) => void;
 }
 
-export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
-  function WaterfallOverlayLayer(_props, ref) {
+export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, WaterfallOverlayProps>(
+  function WaterfallOverlayLayer({ isPlaying = false, showTuningTrace = true, onPlaybackHeadState }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const traceCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const markersRef = useRef<Map<string, WaterfallMarker>>(new Map());
     const nodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
-    const headRef = useRef<HTMLDivElement | null>(null);
+    const onPlaybackHeadStateRef = useRef(onPlaybackHeadState);
+    const isPlayingRef = useRef(isPlaying);
+    const showTuningTraceRef = useRef(showTuningTrace);
+    onPlaybackHeadStateRef.current = onPlaybackHeadState;
+    isPlayingRef.current = isPlaying;
+    showTuningTraceRef.current = showTuningTrace;
+
+    const themeRef = useRef(useThemeStore.getState().theme.display);
+    useEffect(
+      () => useThemeStore.subscribe(() => {
+        themeRef.current = useThemeStore.getState().theme.display;
+      }),
+      [],
+    );
 
     function createMarkerNode(marker: WaterfallMarker): HTMLDivElement {
       const el = document.createElement("div");
@@ -144,16 +147,18 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
       line.style.height = "1px";
       line.style.backgroundColor = "rgba(255, 255, 255, 0.25)";
       line.style.mixBlendMode = "screen";
+      line.style.opacity = "0";
+      line.style.transition = "opacity 0.15s ease";
       el.appendChild(line);
 
       const pill = document.createElement("div");
       pill.style.position = "absolute";
-      pill.style.top = "2px";
-      pill.style.left = "4px";
+      pill.style.bottom = "0";
+      pill.style.right = "0";
       pill.style.fontSize = "10px";
       pill.style.lineHeight = "14px";
       pill.style.padding = "1px 5px";
-      pill.style.borderRadius = "3px";
+      pill.style.borderRadius = "3px 0 0 0";
       pill.style.backgroundColor = "rgba(0, 0, 0, 0.55)";
       pill.style.whiteSpace = "nowrap";
       pill.style.pointerEvents = "auto";
@@ -163,8 +168,14 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
       pill.style.display = "flex";
       pill.style.alignItems = "center";
       pill.style.gap = "6px";
+      pill.style.transition = "border-radius 0.15s ease";
 
-      const info = buildDiagInfo(marker);
+      const d = themeRef.current;
+      const info = buildDiagInfo(marker, {
+        ok: d.displayMarkerOk,
+        warn: d.displayMarkerWarn,
+        pending: d.displayMarkerPending,
+      });
 
       const timeSpan = document.createElement("span");
       timeSpan.style.color = "rgba(255, 255, 255, 0.7)";
@@ -199,6 +210,15 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
         pill.appendChild(spinner);
       }
 
+      pill.addEventListener("mouseenter", () => {
+        line.style.opacity = "1";
+        pill.style.borderRadius = "0";
+      });
+      pill.addEventListener("mouseleave", () => {
+        line.style.opacity = "0";
+        pill.style.borderRadius = "3px 0 0 0";
+      });
+
       el.appendChild(pill);
 
       return el;
@@ -226,10 +246,16 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
       update(state: OverlayState) {
         const { totalRows, scrollOffset, rowScale, height, dpr, playbackRow } = state;
         const cssHeight = height / dpr;
+        const traceVisible = showTuningTraceRef.current;
 
         for (const [id, marker] of markersRef.current) {
           const node = nodesRef.current.get(id);
           if (!node) continue;
+
+          if (!traceVisible) {
+            node.style.display = "none";
+            continue;
+          }
 
           const canvasY = (totalRows - marker.row - scrollOffset) * rowScale;
           const cssY = canvasY / dpr;
@@ -242,26 +268,106 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle>(
           }
         }
 
-        const showHead = state.headShiftPx > 0;
-        let head = headRef.current;
-        if (showHead) {
-          if (!head) {
-            head = createPlaybackHeadEl();
-            headRef.current = head;
-            containerRef.current?.appendChild(head);
+        const showHead = playbackRow !== null || scrollOffset > 0;
+        onPlaybackHeadStateRef.current?.({ visible: showHead, isPlaying: isPlayingRef.current });
+      },
+
+      updateTuningTrace(points: TuningTracePoint[]) {
+        const container = containerRef.current;
+        if (!container) return;
+
+        if (!showTuningTraceRef.current) {
+          const existing = traceCanvasRef.current;
+          if (existing) {
+            const ctx = existing.getContext("2d");
+            if (ctx) ctx.clearRect(0, 0, existing.width, existing.height);
           }
-          const headY = playbackRow !== null
-            ? (totalRows - playbackRow - scrollOffset) * rowScale / dpr
-            : state.headShiftPx;
-          if (headY < -2 || headY > cssHeight + 2) {
-            head.style.display = "none";
-          } else {
-            head.style.display = "";
-            head.style.transform = `translateY(${headY}px)`;
-          }
-        } else if (head) {
-          head.style.display = "none";
+          return;
         }
+
+        const d = themeRef.current;
+        let canvas = traceCanvasRef.current;
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+          canvas.style.position = "absolute";
+          canvas.style.inset = "0";
+          canvas.style.width = "100%";
+          canvas.style.height = "100%";
+          canvas.style.pointerEvents = "none";
+          container.insertBefore(canvas, container.firstChild);
+          traceCanvasRef.current = canvas;
+        }
+
+        const rect = container.getBoundingClientRect();
+        const cssW = rect.width;
+        const cssH = rect.height;
+        const dpr = window.devicePixelRatio || 1;
+        const pxW = Math.round(cssW * dpr);
+        const pxH = Math.round(cssH * dpr);
+
+        if (canvas.width !== pxW || canvas.height !== pxH) {
+          canvas.width = pxW;
+          canvas.height = pxH;
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.clearRect(0, 0, pxW, pxH);
+
+        if (points.length < 2) return;
+
+        ctx.save();
+        ctx.scale(dpr, dpr);
+
+        // Passband fill
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const x = p.loX * cssW;
+          if (i === 0) ctx.moveTo(x, p.yCss);
+          else ctx.lineTo(x, p.yCss);
+        }
+        for (let i = points.length - 1; i >= 0; i--) {
+          const p = points[i];
+          ctx.lineTo(p.hiX * cssW, p.yCss);
+        }
+        ctx.closePath();
+        ctx.fillStyle = d.displayScrollbackAccentSoft;
+        ctx.fill();
+
+        // Passband edges
+        ctx.lineWidth = 0.5;
+        ctx.strokeStyle = d.displayStatusPlaybackMuted;
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const x = p.loX * cssW;
+          if (i === 0) ctx.moveTo(x, p.yCss);
+          else ctx.lineTo(x, p.yCss);
+        }
+        ctx.stroke();
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const x = p.hiX * cssW;
+          if (i === 0) ctx.moveTo(x, p.yCss);
+          else ctx.lineTo(x, p.yCss);
+        }
+        ctx.stroke();
+
+        // Center frequency line
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = d.displayStatusPlaybackLine;
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const x = p.centerX * cssW;
+          if (i === 0) ctx.moveTo(x, p.yCss);
+          else ctx.lineTo(x, p.yCss);
+        }
+        ctx.stroke();
+
+        ctx.restore();
       },
     }));
 

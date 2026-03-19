@@ -1,4 +1,5 @@
 import type { FilterConfig } from "@/lib/api";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
 import { PowerIcon } from "lucide-react";
 import type { RefObject } from "react";
 import { AudioWaveform } from "./audio-waveform";
@@ -29,6 +30,7 @@ export function FiltersSection({
   onFiltersChange,
   samplesRef,
 }: FiltersSectionProps) {
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const bypassed = filters.bypassed ?? false;
   const anyEnabled = hasAnyFilterEnabled(filters);
 
@@ -44,12 +46,13 @@ export function FiltersSection({
         />
       </div>
       {anyEnabled && (
-        <div className="flex shrink-0 items-center justify-between border-t border-border/60 px-3 py-2">
+        <div className={`flex shrink-0 items-center justify-between border-t border-border/60 px-3 py-2 transition-opacity duration-200${isInScrollBack ? " opacity-40 pointer-events-none" : ""}`}>
           <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
             {bypassed ? "Filters disabled" : "Filters active"}
           </span>
           <button
             type="button"
+            disabled={isInScrollBack}
             onClick={() => onFiltersChange({ ...filters, bypassed: !bypassed })}
             className={
               "flex h-6 items-center gap-1.5 rounded px-2 text-[10px] font-medium uppercase tracking-wider transition-colors " +

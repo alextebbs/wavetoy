@@ -1,6 +1,7 @@
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import type { InterpreterConfig } from "@/lib/api";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
 import { ClipboardCopyIcon, Trash2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -44,6 +45,7 @@ export function InterpreterPanel({
   voiceProgress,
   onClear,
 }: Props) {
+  const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
 
@@ -110,7 +112,7 @@ export function InterpreterPanel({
   return (
     <section className="flex min-h-0 flex-1 flex-col">
       {/* Mode toggle */}
-      <div className="border-b p-4">
+      <div className="border-b p-4 transition-opacity duration-200" style={isInScrollBack ? { opacity: 0.4, pointerEvents: "none" } : undefined}>
         <div className="inline-flex rounded-md border border-border">
           {MODES.map((m) => (
             <button
@@ -131,7 +133,7 @@ export function InterpreterPanel({
 
       {/* Morse controls */}
       {isMorse && (
-        <div className="space-y-4 border-b p-4">
+        <div className="space-y-4 border-b p-4 transition-opacity duration-200" style={isInScrollBack ? { opacity: 0.4, pointerEvents: "none" } : undefined}>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label className="text-xs text-muted-foreground">Sidetone</Label>
@@ -201,7 +203,7 @@ export function InterpreterPanel({
       {/* Output */}
       {mode !== "off" && (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center justify-between border-b px-4 py-2">
+          <div className="flex items-center justify-between border-b px-4 py-2 transition-opacity duration-200" style={isInScrollBack ? { opacity: 0.4, pointerEvents: "none" } : undefined}>
             <div className="flex min-w-0 flex-1 items-center gap-2">
               {isMorse ? (
                 <>

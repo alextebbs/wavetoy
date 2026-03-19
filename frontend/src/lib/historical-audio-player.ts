@@ -1,4 +1,5 @@
 import type { ChunkSource } from "./chunk-loader";
+import { decodeAndResampleWav } from "./resample";
 
 export interface ChunkInfo {
   startedAt: string;
@@ -401,7 +402,7 @@ export class HistoricalAudioPlayer {
   ): Promise<AudioBuffer | null> {
     try {
       const raw = await this.chunkSource.fetchAudio(startedAt);
-      return await this.audioCtx.decodeAudioData(raw);
+      return decodeAndResampleWav(raw, this.audioCtx);
     } catch (err) {
       console.warn("[hist-audio] fetch/decode failed:", startedAt, err);
       return null;
