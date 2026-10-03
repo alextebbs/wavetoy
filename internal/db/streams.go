@@ -255,7 +255,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes,
-		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
+		       state, health, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_probe, quality_fallback, offload_chunks, keep_alive, locked, view_locked,
 		       log_level, created_at, updated_at
 		FROM streams
@@ -263,7 +263,7 @@ func (db *DB) GetStreamByID(ctx context.Context, id string) (*models.Stream, err
 	`, id).Scan(
 		&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 		&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
-		&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+		&stream.State, &stream.Health, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 		&stream.AutoProbe, &stream.QualityFallback, &stream.OffloadChunks, &stream.KeepAlive, &stream.Locked, &stream.ViewLocked,
 		&stream.LogLevel, &stream.CreatedAt, &stream.UpdatedAt,
 	)
@@ -283,7 +283,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, tenant_id, source_id, frequency_khz, bandwidth_low_hz, bandwidth_high_hz,
 		       mode, name, agc_on, agc_gain_db, buffer_minutes,
-		       state, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
+		       state, health, version, filters, interpreter, wf_view_start_khz, wf_view_end_khz,
 		       auto_probe, quality_fallback, offload_chunks, keep_alive, locked, view_locked,
 		       log_level, created_at, updated_at
 		FROM streams
@@ -302,7 +302,7 @@ func (db *DB) ListStreamsByTenant(ctx context.Context, tenantID string, limit, o
 		if err := rows.Scan(
 			&stream.ID, &stream.TenantID, &stream.SourceID, &stream.FrequencyKHz, &stream.BandwidthLowHz, &stream.BandwidthHighHz,
 			&stream.Mode, &stream.Name, &stream.AGCOn, &stream.AGCGainDB, &stream.BufferMinutes,
-			&stream.State, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
+			&stream.State, &stream.Health, &stream.Version, &stream.Filters, &stream.Interpreter, &stream.WFViewStartKHz, &stream.WFViewEndKHz,
 			&stream.AutoProbe, &stream.QualityFallback, &stream.OffloadChunks, &stream.KeepAlive, &stream.Locked, &stream.ViewLocked,
 			&stream.LogLevel, &stream.CreatedAt, &stream.UpdatedAt,
 		); err != nil {
@@ -328,7 +328,18 @@ func (db *DB) UpdateStreamLogLevel(ctx context.Context, streamID, tenantID, logL
 }
 
 func (db *DB) UpdateStreamState(ctx context.Context, streamID, state string) error {
-	tag, err := db.Pool.Exec(ctx, `UPDATE streams SET state = $1, updated_at = now() WHERE id = $2`, state, streamID)
+	tag, err := db.Pool.Exec(ctx, `UPDATE streams SET state = $1, health = '{}', updated_at = now() WHERE id = $2`, state, streamID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("stream %s not found", streamID)
+	}
+	return nil
+}
+
+func (db *DB) UpdateStreamHealth(ctx context.Context, streamID string, health []string) error {
+	tag, err := db.Pool.Exec(ctx, `UPDATE streams SET health = $1, updated_at = now() WHERE id = $2`, health, streamID)
 	if err != nil {
 		return err
 	}
@@ -342,6 +353,13 @@ func (db *DB) UpdateStreamView(ctx context.Context, streamID string, startKHz, e
 	_, err := db.Pool.Exec(ctx, `
 		UPDATE streams SET wf_view_start_khz = $1, wf_view_end_khz = $2 WHERE id = $3
 	`, startKHz, endKHz, streamID)
+	return err
+}
+
+func (db *DB) SwitchStreamSource(ctx context.Context, streamID, sourceID string) error {
+	_, err := db.Pool.Exec(ctx, `
+		UPDATE streams SET source_id = $1, version = version + 1, updated_at = now() WHERE id = $2
+	`, sourceID, streamID)
 	return err
 }
 

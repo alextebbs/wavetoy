@@ -19,7 +19,7 @@ func (db *DB) ListSources(ctx context.Context, limit, offset int) ([]models.Sour
 	}
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
-		       max_listeners, available, users, snr_dbm, antenna, location, grid,
+		       max_listeners, available, users, ROUND(COALESCE(snr_ema, snr_dbm)::numeric, 2), antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
 		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources
@@ -52,7 +52,7 @@ func (db *DB) ListSources(ctx context.Context, limit, offset int) ([]models.Sour
 func (db *DB) ListMapSources(ctx context.Context) ([]models.Source, MapSourceCounts, error) {
 	rows, err := db.Pool.Query(ctx, `
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
-		       max_listeners, available, users, snr_dbm, antenna, location, grid,
+		       max_listeners, available, users, ROUND(COALESCE(snr_ema, snr_dbm)::numeric, 2), antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
 		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources
@@ -108,7 +108,7 @@ func (db *DB) GetSourceByID(ctx context.Context, id string) (*models.Source, err
 	var s models.Source
 	err := db.Pool.QueryRow(ctx, `
 		SELECT id, type, host, port, use_tls, latitude, longitude, name,
-		       max_listeners, available, users, snr_dbm, antenna, location, grid,
+		       max_listeners, available, users, ROUND(COALESCE(snr_ema, snr_dbm)::numeric, 2), antenna, location, grid,
 		       status, COALESCE(ant_connected, false), COALESCE(offline, false),
 		       last_health_check_at, last_reachable_at, last_synced_at, created_at, updated_at
 		FROM sources WHERE id = $1

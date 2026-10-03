@@ -73,6 +73,11 @@ func (h *HealthChecker) Run(ctx context.Context) error {
 				if err := h.db.SetSourceStatus(ctx, src.ID, st); err != nil {
 					log.Printf("health: set %s: %v", src.ID, err)
 				}
+				if st.SNRDBM != nil {
+					if err := h.db.InsertSNRReading(ctx, src.ID, *st.SNRDBM, st.Users, st.MaxListeners); err != nil {
+						log.Printf("health: snr reading %s: %v", src.ID, err)
+					}
+				}
 			} else {
 				if err := h.db.SetSourceUnreachable(ctx, src.ID); err != nil {
 					log.Printf("health: set unreachable %s: %v", src.ID, err)

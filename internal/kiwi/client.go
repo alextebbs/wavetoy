@@ -36,9 +36,10 @@ type Client struct {
 	label string
 	logFn LogFunc
 
-	closeOnce sync.Once
-	writeMu   sync.Mutex
-	adpcmMu   sync.Mutex
+	closeOnce  sync.Once
+	writeMu    sync.Mutex
+	adpcmMu    sync.Mutex
+	onTooBusy  func(busy bool)
 
 	done       chan struct{}
 	pcm        chan []byte
@@ -330,6 +331,10 @@ func (c *Client) send(cmd string) error {
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(cmd))
 }
 
+func (c *Client) SetOnTooBusy(fn func(busy bool)) {
+	c.onTooBusy = fn
+}
+
 func (c *Client) processMSG(body []byte) {
 	if len(body) == 0 {
 		return
@@ -384,6 +389,15 @@ func (c *Client) processMSG(body []byte) {
 			c.adpcmIndex = clamp(index, 0, len(stepSizeTable)-1)
 			c.adpcmPrev = clamp(prev, -32768, 32767)
 			c.adpcmMu.Unlock()
+		case "too_busy":
+			busy := value != "0"
+			if c.logFn != nil {
+				c.logFn(streamlog.LevelWarn, "kiwi.too_busy", "kiwi", "wavetoy",
+					fmt.Sprintf("too_busy=%s", value))
+			}
+			if c.onTooBusy != nil {
+				c.onTooBusy(busy)
+			}
 		}
 	}
 }

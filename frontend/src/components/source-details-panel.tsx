@@ -82,7 +82,7 @@ export function SourceDetailsPanel({
               </span>
               <span className="shrink-0 uppercase tracking-widest text-muted-foreground">snr dbm</span>
               <span className="min-w-0 truncate text-right text-white" title={String(source.snr_dbm ?? "n/a")}>
-                {source.snr_dbm ?? "n/a"}
+                {source.snr_dbm != null ? source.snr_dbm.toFixed(2) : "n/a"}
               </span>
               <span className="shrink-0 uppercase tracking-widest text-muted-foreground">grid</span>
               <span className="min-w-0 truncate text-right text-white" title={source.grid ?? "n/a"}>

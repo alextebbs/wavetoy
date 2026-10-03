@@ -262,8 +262,8 @@ export function InterpreterPanel({
                 )}
               </div>
             ) : voiceChunks.length === 0 ? (
-              <div className="p-4 font-mono text-sm text-muted-foreground/40 italic">
-                Waiting for speech…
+              <div className="p-4 font-mono text-sm text-muted-foreground/40 italic text-center">
+                ...listening...
               </div>
             ) : (
               <div className="divide-y divide-border/30">
@@ -272,7 +272,7 @@ export function InterpreterPanel({
                     <p className="mb-1 font-mono text-[10px] text-muted-foreground/50">
                       {formatRelative(now - chunk.receivedAt)}
                     </p>
-                    <p className="font-mono text-sm leading-relaxed text-foreground">
+                    <p className="font-mono text-sm leading-relaxed text-foreground italic">
                       {chunk.text}
                     </p>
                   </div>

@@ -63,6 +63,7 @@ func (c *Client) EnsureBucket(ctx context.Context) {
 		Bucket: aws.String(c.bucket),
 	})
 	if err == nil {
+		c.ensureCORS(ctx)
 		return
 	}
 	_, createErr := c.client.CreateBucket(ctx, &s3.CreateBucketInput{
@@ -72,6 +73,26 @@ func (c *Client) EnsureBucket(ctx context.Context) {
 		slog.Warn("s3: create bucket failed (may already exist)", "bucket", c.bucket, "err", createErr)
 	} else {
 		slog.Info("s3: created bucket", "bucket", c.bucket)
+	}
+	c.ensureCORS(ctx)
+}
+
+func (c *Client) ensureCORS(ctx context.Context) {
+	_, err := c.client.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		Bucket: aws.String(c.bucket),
+		CORSConfiguration: &s3types.CORSConfiguration{
+			CORSRules: []s3types.CORSRule{{
+				AllowedHeaders: []string{"*"},
+				AllowedMethods: []string{"GET", "HEAD"},
+				AllowedOrigins: []string{"*"},
+				MaxAgeSeconds:  aws.Int32(86400),
+			}},
+		},
+	})
+	if err != nil {
+		slog.Warn("s3: set CORS failed", "bucket", c.bucket, "err", err)
+	} else {
+		slog.Info("s3: CORS configured", "bucket", c.bucket)
 	}
 }
 

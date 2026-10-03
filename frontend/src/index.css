@@ -115,3 +115,8 @@
 [data-state="closed"] > .source-overlay-sidebar {
   animation: slide-out-right 220ms cubic-bezier(0.4, 0, 1, 1) both;
 }
+
+/* Hide scrollbar (WebKit). Firefox uses scrollbar-width: none inline. */
+[style*="scrollbar-width: none"]::-webkit-scrollbar {
+  display: none;
+}

@@ -85,7 +85,12 @@ type SourceStatus struct {
 func (db *DB) SetSourceStatus(ctx context.Context, id string, st SourceStatus) error {
 	_, err := db.Pool.Exec(ctx, `
 		UPDATE sources SET
-			available = $1, users = $2, max_listeners = $3, snr_dbm = $4,
+			available = $1, users = $2, max_listeners = $3, snr_dbm = $4::float,
+			snr_ema = CASE
+				WHEN $4::float IS NULL THEN snr_ema
+				WHEN snr_ema IS NULL THEN $4::float
+				ELSE 0.03 * $4::float + 0.97 * snr_ema
+			END,
 			antenna = NULLIF($5, ''), location = NULLIF($6, ''), grid = NULLIF($7, ''),
 			status = NULLIF($8, ''), ant_connected = $9, offline = $10,
 			latitude = COALESCE($11, sources.latitude),

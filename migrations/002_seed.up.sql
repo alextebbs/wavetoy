@@ -1,1 +1,0 @@
--- Seed data is created in Go on startup (see internal/db/seed.go)

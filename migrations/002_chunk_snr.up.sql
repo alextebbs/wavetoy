@@ -1,0 +1,1 @@
+ALTER TABLE offloaded_chunks ADD COLUMN IF NOT EXISTS in_band_snr_db DOUBLE PRECISION;

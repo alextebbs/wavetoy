@@ -1,14 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { useThemeStore } from "@/lib/theme";
-import type { OverlayState } from "./waterfall-renderer";
+import type { OverlayState, LoadingChunkRegion } from "./waterfall-renderer-base";
 import type { TuningTracePoint } from "./waterfall-renderer-base";
 
-export interface WaterfallMarker {
-  id: string;
-  row: number;
-  label: string;
-  metadata?: Record<string, unknown>;
-}
+import type { WaterfallMarker } from "@/lib/chunk-manager";
+export type { WaterfallMarker };
 
 export interface WaterfallOverlayHandle {
   addMarker(marker: WaterfallMarker): void;
@@ -39,10 +35,10 @@ function formatBytes(bytes: number): string {
 interface DiagInfo {
   time: string;
   wfLabel: string;
-  wfTooltip: string;
+  wfLabelHover: string;
   wfColor: string;
   sndLabel: string;
-  sndTooltip: string;
+  sndLabelHover: string;
   sndColor: string;
   inProgress: boolean;
 }
@@ -85,10 +81,10 @@ function buildDiagInfo(
   return {
     time,
     wfLabel: wfWarn ? `WF ${wfFrames}` : "WF",
-    wfTooltip,
+    wfLabelHover: `WF ${wfFrames}/${EXPECTED_WF_PER_CHUNK}`,
     wfColor,
     sndLabel: sndWarn ? `SND ${sndPctRounded}%` : "SND",
-    sndTooltip,
+    sndLabelHover: `SND ${formatBytes(audioBytes)}/${formatBytes(audioExpected)}`,
     sndColor,
     inProgress,
   };
@@ -99,7 +95,10 @@ function ensureSpinnerStyle() {
   if (spinnerStyleInjected) return;
   spinnerStyleInjected = true;
   const style = document.createElement("style");
-  style.textContent = "@keyframes wf-spin{to{transform:rotate(360deg)}}";
+  style.textContent = [
+    "@keyframes wf-spin{to{transform:rotate(360deg)}}",
+    "@keyframes wf-loading-pulse{0%,100%{opacity:.25}50%{opacity:.55}}",
+  ].join("");
   document.head.appendChild(style);
 }
 
@@ -115,6 +114,7 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
     const traceCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const markersRef = useRef<Map<string, WaterfallMarker>>(new Map());
     const nodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
+    const loadingNodesRef = useRef<HTMLDivElement[]>([]);
     const onPlaybackHeadStateRef = useRef(onPlaybackHeadState);
     const isPlayingRef = useRef(isPlaying);
     const showTuningTraceRef = useRef(showTuningTrace);
@@ -130,7 +130,43 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       [],
     );
 
-    function createGapNode(): HTMLDivElement {
+    function createLoadingNode(): HTMLDivElement {
+      ensureSpinnerStyle();
+      const el = document.createElement("div");
+      el.style.position = "absolute";
+      el.style.top = "0";
+      el.style.left = "0";
+      el.style.width = "100%";
+      el.style.display = "none";
+      el.style.pointerEvents = "none";
+      el.style.willChange = "transform";
+      el.style.overflow = "hidden";
+
+      const inner = document.createElement("div");
+      inner.style.display = "flex";
+      inner.style.alignItems = "center";
+      inner.style.justifyContent = "center";
+      inner.style.width = "100%";
+      inner.style.height = "100%";
+      inner.style.gap = "6px";
+      inner.style.animation = "wf-loading-pulse 1.6s ease-in-out infinite";
+
+      const spinner = document.createElement("span");
+      spinner.style.display = "inline-block";
+      spinner.style.width = "12px";
+      spinner.style.height = "12px";
+      spinner.style.borderRadius = "50%";
+      spinner.style.border = "1.5px solid rgba(255, 255, 255, 0.15)";
+      spinner.style.borderTopColor = "rgba(255, 255, 255, 0.5)";
+      spinner.style.animation = "wf-spin 0.8s linear infinite";
+      spinner.style.flexShrink = "0";
+      inner.appendChild(spinner);
+
+      el.appendChild(inner);
+      return el;
+    }
+
+    function createGapNode(text: string): HTMLDivElement {
       const el = document.createElement("div");
       el.style.position = "absolute";
       el.style.top = "0";
@@ -147,7 +183,7 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       ].join(", ");
 
       const label = document.createElement("span");
-      label.textContent = "NO DATA";
+      label.textContent = text;
       label.style.position = "absolute";
       label.style.top = "50%";
       label.style.left = "50%";
@@ -175,8 +211,8 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       el.style.willChange = "transform";
       el.style.overflow = "hidden";
       el.style.background = [
-        "repeating-linear-gradient(-45deg, transparent, transparent 5px, rgba(4, 22, 38, 0.4) 5px, rgba(4, 22, 38, 0.4) 10px)",
-        "#000306",
+        "repeating-linear-gradient(-45deg, transparent, transparent 5px, rgba(20, 60, 80, 0.5) 5px, rgba(20, 60, 80, 0.5) 10px)",
+        "#010a12",
       ].join(", ");
 
       const label = document.createElement("span");
@@ -185,7 +221,7 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       label.style.top = "50%";
       label.style.left = "50%";
       label.style.transform = "translate(-50%, -50%)";
-      label.style.color = "rgba(10, 105, 95, 0.7)";
+      label.style.color = "rgba(40, 160, 145, 0.85)";
       label.style.fontSize = "11px";
       label.style.fontWeight = "600";
       label.style.letterSpacing = "3px";
@@ -198,7 +234,7 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
     }
 
     function createMarkerNode(marker: WaterfallMarker): HTMLDivElement {
-      if (marker.metadata?.type === "gap") return createGapNode();
+      if (marker.metadata?.type === "gap") return createGapNode(marker.label);
       if (marker.metadata?.type === "end") return createEndNode();
 
       const el = document.createElement("div");
@@ -254,14 +290,12 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       wfSpan.style.color = info.wfColor;
       wfSpan.style.cursor = "default";
       wfSpan.textContent = info.wfLabel;
-      wfSpan.title = info.wfTooltip;
       pill.appendChild(wfSpan);
 
       const sndSpan = document.createElement("span");
       sndSpan.style.color = info.sndColor;
       sndSpan.style.cursor = "default";
       sndSpan.textContent = info.sndLabel;
-      sndSpan.title = info.sndTooltip;
       pill.appendChild(sndSpan);
 
       if (info.inProgress) {
@@ -280,9 +314,13 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
 
       pill.addEventListener("mouseenter", () => {
         pill.style.borderRadius = "0";
+        wfSpan.textContent = info.wfLabelHover;
+        sndSpan.textContent = info.sndLabelHover;
       });
       pill.addEventListener("mouseleave", () => {
         pill.style.borderRadius = "0 0 0 3px";
+        wfSpan.textContent = info.wfLabel;
+        sndSpan.textContent = info.sndLabel;
       });
 
       el.appendChild(pill);
@@ -310,7 +348,7 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
       },
 
       update(state: OverlayState) {
-        const { totalRows, scrollOffset, rowScale, height, dpr, playbackRow } = state;
+        const { totalRows, scrollOffset, rowScale, height, dpr, playbackRow, loadingChunks } = state;
         const cssHeight = height / dpr;
 
         for (const [id, marker] of markersRef.current) {
@@ -349,6 +387,37 @@ export const WaterfallOverlayLayer = forwardRef<WaterfallOverlayHandle, Waterfal
           } else {
             node.style.display = "";
             node.style.transform = `translateY(${cssY}px)`;
+          }
+        }
+
+        // Loading chunk indicators
+        const pool = loadingNodesRef.current;
+        const container = containerRef.current;
+        const needed = loadingChunks.length;
+
+        while (pool.length < needed && container) {
+          const node = createLoadingNode();
+          container.appendChild(node);
+          pool.push(node);
+        }
+
+        for (let i = 0; i < pool.length; i++) {
+          const node = pool[i];
+          if (i >= needed) {
+            node.style.display = "none";
+            continue;
+          }
+          const chunk = loadingChunks[i];
+          const topFromLive = totalRows - chunk.startRow - chunk.frameCount;
+          const cssYTop = (topFromLive - scrollOffset) * rowScale / dpr;
+          const cssH = chunk.frameCount * rowScale / dpr;
+
+          if (cssYTop + cssH < 0 || cssYTop > cssHeight) {
+            node.style.display = "none";
+          } else {
+            node.style.display = "";
+            node.style.height = `${cssH}px`;
+            node.style.transform = `translateY(${cssYTop}px)`;
           }
         }
 

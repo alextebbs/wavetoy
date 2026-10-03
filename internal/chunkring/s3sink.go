@@ -36,6 +36,8 @@ func (s *S3Sink) OnChunkComplete(chunk *Chunk) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	snrVal := ChunkSNR(chunk)
+
 	base := fmt.Sprintf("%s/streams/%s/%d", s.s3.Prefix(), s.streamID, chunk.StartedAt.Unix())
 
 	var audioBuf bytes.Buffer
@@ -68,20 +70,29 @@ func (s *S3Sink) OnChunkComplete(chunk *Chunk) error {
 	totalBytes := int64(audioSize + wfSize + evSize)
 
 	if err := s.db.InsertOffloadedChunk(ctx, db.InsertOffloadedChunkParams{
-		StreamID:  s.streamID,
-		StartedAt: chunk.StartedAt,
-		EndedAt:   chunk.EndedAt,
-		SizeBytes: totalBytes,
-		WFFrames:  len(chunk.WFFrames),
-		Events:    len(chunk.Events),
+		StreamID:    s.streamID,
+		StartedAt:   chunk.StartedAt,
+		EndedAt:     chunk.EndedAt,
+		SizeBytes:   totalBytes,
+		WFFrames:    len(chunk.WFFrames),
+		Events:      len(chunk.Events),
+		AudioBytes:  audioSize,
+		StreamState: int(chunk.StateSnap),
+		HealthFlags: int(chunk.HealthSnap),
+		InBandSNRdB: snrVal,
 	}); err != nil {
 		slog.Error("s3sink: manifest insert failed", "stream", s.streamID, "err", err)
 	}
 
+	snrLogVal := "n/a"
+	if snrVal != nil {
+		snrLogVal = fmt.Sprintf("%.1f dB", *snrVal)
+	}
 	slog.Debug("s3sink: chunk uploaded",
 		"stream", s.streamID,
 		"started_at", chunk.StartedAt.Unix(),
 		"bytes", totalBytes,
+		"in_band_snr", snrLogVal,
 	)
 
 	if s.onUpload != nil {

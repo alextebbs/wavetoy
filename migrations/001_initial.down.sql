@@ -1,5 +1,9 @@
-DROP INDEX IF EXISTS idx_streams_source;
-DROP INDEX IF EXISTS idx_streams_tenant;
+DROP TABLE IF EXISTS snr_readings;
+DROP TABLE IF EXISTS offloaded_chunks;
+DROP TABLE IF EXISTS source_notes;
+DROP TABLE IF EXISTS recent_sources;
+DROP TABLE IF EXISTS favorite_sources;
+DROP TABLE IF EXISTS probe_suggestions;
 DROP TABLE IF EXISTS streams;
 DROP TABLE IF EXISTS sources;
 DROP TABLE IF EXISTS tenants;

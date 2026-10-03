@@ -1,1 +1,0 @@
-ALTER TABLE streams ADD COLUMN keep_alive BOOLEAN NOT NULL DEFAULT false;

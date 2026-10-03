@@ -1,1 +1,0 @@
-ALTER TABLE streams ADD COLUMN view_locked BOOLEAN NOT NULL DEFAULT false;

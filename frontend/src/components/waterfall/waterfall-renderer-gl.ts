@@ -3,6 +3,7 @@ import {
   type ColorMapFn,
   type ColorMapName,
 } from "@/lib/display-colors";
+import type { ChunkManager } from "@/lib/chunk-manager";
 import { WaterfallRendererBase, type BaseTile } from "./waterfall-renderer-base";
 
 interface GLTile extends BaseTile {
@@ -59,8 +60,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
   private contextHandlersAttached = false;
   private colorMapName: ColorMapName = "default";
 
-  constructor(canvas: HTMLCanvasElement, options?: import("./waterfall-renderer-base").RendererOptions) {
-    super(canvas, options);
+  constructor(canvas: HTMLCanvasElement, manager: ChunkManager, options?: import("./waterfall-renderer-base").RendererOptions) {
+    super(canvas, manager, options);
     // Field initializers have now run — attach context loss handlers once
     if (!this.contextHandlersAttached) {
       this.contextHandlersAttached = true;
@@ -164,17 +165,18 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
 
     gl.bindVertexArray(this.vao);
 
-    const effectiveOffset = this.scrollOffset;
+    const { chunks, totalRows } = this.manager;
+    const effectiveOffset = this.manager.scrollOffset;
     const visibleRowsTop = effectiveOffset;
     const visibleRowsBottom =
       effectiveOffset + Math.ceil(height / this.rowScale);
 
     const firstInProgress =
-      this.chunks.length > 0 && !this.chunks[this.chunks.length - 1]!.complete
-        ? this.chunks[this.chunks.length - 1]!
+      chunks.length > 0 && !chunks[chunks.length - 1]!.complete
+        ? chunks[chunks.length - 1]!
         : null;
 
-    for (const chunk of this.chunks) {
+    for (const chunk of chunks) {
       if (chunk !== firstInProgress) {
         const expectedHeight = Math.max(chunk.expectedWF, MIN_CHUNK_DISPLAY_ROWS);
         if (chunk.frameCount < expectedHeight) {
@@ -190,10 +192,10 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
         }
       }
 
-      for (const tile of chunk.tiles) {
+      for (const tile of chunk.tiles as GLTile[]) {
         if (tile.rowCount === 0 || !tile.texture) continue;
-        const tileTop = this.totalRows - tile.startRow - tile.rowCount;
-        const tileBot = this.totalRows - tile.startRow - 1;
+        const tileTop = totalRows - tile.startRow - tile.rowCount;
+        const tileBot = totalRows - tile.startRow - 1;
         if (tileTop > visibleRowsBottom || tileBot < visibleRowsTop) continue;
         this.drawTile(tile, width, height, viewSpan);
       }
@@ -201,8 +203,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
 
     for (const tile of this.liveTiles) {
       if (tile.rowCount === 0 || !tile.texture) continue;
-      const tileTop = this.totalRows - tile.startRow - tile.rowCount;
-      const tileBot = this.totalRows - tile.startRow - 1;
+      const tileTop = totalRows - tile.startRow - tile.rowCount;
+      const tileBot = totalRows - tile.startRow - 1;
       if (tileTop > visibleRowsBottom || tileBot < visibleRowsTop) continue;
       this.drawTile(tile, width, height, viewSpan);
     }
@@ -230,8 +232,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
       }
     };
     for (const tile of this.liveTiles) reUpload(tile);
-    for (const chunk of this.chunks) {
-      for (const tile of chunk.tiles) reUpload(tile);
+    for (const chunk of this.manager.chunks) {
+      for (const tile of chunk.tiles as GLTile[]) reUpload(tile);
     }
   }
 
@@ -371,8 +373,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     const missingRows = expectedHeight - chunk.frameCount;
     if (missingRows <= 0) return;
 
-    const regionTopFromLive = this.totalRows - chunk.startRow - expectedHeight;
-    const regionBottomFromLive = this.totalRows - chunk.startRow - chunk.frameCount;
+    const regionTopFromLive = this.manager.totalRows - chunk.startRow - expectedHeight;
+    const regionBottomFromLive = this.manager.totalRows - chunk.startRow - chunk.frameCount;
 
     if (regionBottomFromLive < visibleRowsTop || regionTopFromLive > visibleRowsBottom) return;
 
@@ -380,8 +382,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     const clipBottom = Math.min(regionBottomFromLive, visibleRowsBottom);
     if (clipTop >= clipBottom) return;
 
-    const canvasYTop = (clipTop - this.scrollOffset) * this.rowScale;
-    const canvasYBottom = (clipBottom - this.scrollOffset) * this.rowScale;
+    const canvasYTop = (clipTop - this.manager.scrollOffset) * this.rowScale;
+    const canvasYBottom = (clipBottom - this.manager.scrollOffset) * this.rowScale;
     const rectHeight = canvasYBottom - canvasYTop;
     if (rectHeight <= 0) return;
 
@@ -416,7 +418,7 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     if (srcW < 0.5 || dstW < 0.5) return;
 
     const scaledOffset =
-      (this.totalRows - tile.startRow - tile.rowCount - this.scrollOffset) *
+      (this.manager.totalRows - tile.startRow - tile.rowCount - this.manager.scrollOffset) *
       this.rowScale;
     if (scaledOffset >= visibleHeight) return;
 
@@ -484,8 +486,8 @@ export class WaterfallRendererGL extends WaterfallRendererBase<GLTile> {
     };
 
     for (const tile of this.liveTiles) restore(tile);
-    for (const chunk of this.chunks) {
-      for (const tile of chunk.tiles) restore(tile);
+    for (const chunk of this.manager.chunks) {
+      for (const tile of chunk.tiles as GLTile[]) restore(tile);
     }
   }
 }

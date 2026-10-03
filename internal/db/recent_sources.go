@@ -15,7 +15,7 @@ type RecentSource struct {
 func (db *DB) ListRecentSources(ctx context.Context, streamID string) ([]RecentSource, error) {
 	rows, err := db.Pool.Query(ctx, `
 		SELECT s.id, s.type, s.host, s.port, s.use_tls, s.latitude, s.longitude, s.name,
-		       s.max_listeners, s.available, s.users, s.snr_dbm, s.antenna, s.location, s.grid,
+		       s.max_listeners, s.available, s.users, COALESCE(s.snr_ema, s.snr_dbm), s.antenna, s.location, s.grid,
 		       s.status, COALESCE(s.ant_connected, false), COALESCE(s.offline, false),
 		       s.last_health_check_at, s.last_reachable_at, s.last_synced_at, s.created_at, s.updated_at,
 		       r.started_at

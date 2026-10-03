@@ -1,33 +1,39 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
   useState,
 } from "react";
 import { useBandViewStore } from "@/lib/band-view-store";
+import { streamLog } from "@/lib/stream-logger";
 import { useThemeStore } from "@/lib/theme";
+import type { ChunkManager } from "@/lib/chunk-manager";
 import { WaterfallRendererGL } from "./waterfall-renderer-gl";
 import { WaterfallOverlayLayer, type WaterfallOverlayHandle } from "./waterfall-overlay";
 import { PlaybackHead } from "./playback-head";
-import type { OverlayState } from "./waterfall-renderer";
-import type { WaterfallTimelineHandle } from "./waterfall-timeline";
+import type { OverlayState } from "./waterfall-renderer-base";
+import type { WaterfallMinimapHandle } from "./waterfall-minimap";
 import type { WaterfallHandle } from "./types";
 
 interface WaterfallDisplayGLProps {
   className?: string;
-  timelineRef?: React.RefObject<WaterfallTimelineHandle | null>;
+  manager: ChunkManager;
+  timelineRef?: React.RefObject<WaterfallMinimapHandle | null>;
   onPlay?: () => void;
   onStop?: () => void;
   isPlaying?: boolean;
   showTuningTrace?: boolean;
   onOverlayState?: (state: OverlayState) => void;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
 }
 
 export const WaterfallDisplayGL = forwardRef<
   WaterfallHandle,
   WaterfallDisplayGLProps
->(function WaterfallDisplayGL({ className, timelineRef, onPlay, onStop, isPlaying, showTuningTrace = true, onOverlayState }, ref) {
+>(function WaterfallDisplayGL({ className, manager, timelineRef, onPlay, onStop, isPlaying, showTuningTrace = true, onOverlayState, onDragStart, onDragEnd }, ref) {
   const colorMapName = useThemeStore((s) => s.theme.display.defaultColorMap);
   const containerRef = useRef<HTMLDivElement>(null);
   const onOverlayStateRef = useRef(onOverlayState);
@@ -70,38 +76,11 @@ export const WaterfallDisplayGL = forwardRef<
       setDataCoverage(startKHz: number, endKHz: number) {
         rendererRef.current?.setDataCoverage(startKHz, endKHz);
       },
-      setChunkSource(source) {
-        rendererRef.current?.setChunkSource(source);
+      async loadInitialChunks() {
+        await rendererRef.current?.loadInitialChunks();
       },
-      loadManifest(chunks, streamInfo) {
-        return (
-          rendererRef.current?.loadManifest(chunks, streamInfo) ??
-          Promise.resolve(0)
-        );
-      },
-      onChunkComplete(msg) {
-        rendererRef.current?.onChunkComplete(msg);
-      },
-      resetLiveFrameCount() {
-        rendererRef.current?.resetLiveFrameCount();
-      },
-      rowCount() {
-        return rendererRef.current?.rowCount ?? 0;
-      },
-      chunkManifest() {
-        return rendererRef.current?.chunkManifest ?? [];
-      },
-      getScrollOffset() {
-        return rendererRef.current?.getScrollOffset() ?? 0;
-      },
-      setScrollOffset(offset: number) {
-        rendererRef.current?.setScrollOffset(offset);
-      },
-      scrollToLive() {
-        rendererRef.current?.scrollToLive();
-      },
-      setPlaybackHead(row: number | null) {
-        if (rendererRef.current) rendererRef.current.playbackRow = row;
+      drainStaleQueue() {
+        rendererRef.current?.drainStaleQueue();
       },
       visibleRows() {
         return rendererRef.current?.visibleRows ?? 0;
@@ -121,7 +100,9 @@ export const WaterfallDisplayGL = forwardRef<
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const renderer = new WaterfallRendererGL(canvas);
+    streamLog.warn("wf.component", "WaterfallDisplayGL MOUNT");
+
+    const renderer = new WaterfallRendererGL(canvas, manager);
     rendererRef.current = renderer;
 
     const s = useBandViewStore.getState();
@@ -129,8 +110,8 @@ export const WaterfallDisplayGL = forwardRef<
     renderer.setMaxBandwidth(s.maxBandwidthKHz || 30000);
     renderer.setDataCoverage(0, s.maxBandwidthKHz || 30000);
 
-    renderer.onMarkerAdd = (marker) => overlayRef.current?.addMarker(marker);
-    renderer.onMarkerRemove = (id) => overlayRef.current?.removeMarker(id);
+    manager.onMarkerAdd = (marker) => overlayRef.current?.addMarker(marker);
+    manager.onMarkerRemove = (id) => overlayRef.current?.removeMarker(id);
     renderer.onOverlayUpdate = (state, markers) => {
       overlayRef.current?.update(state);
       timelineRef?.current?.update(state, markers);
@@ -158,11 +139,25 @@ export const WaterfallDisplayGL = forwardRef<
     ro.observe(container);
 
     return () => {
+      streamLog.warn("wf.component", "WaterfallDisplayGL UNMOUNT");
       ro.disconnect();
       renderer.destroy();
       rendererRef.current = null;
     };
-  }, []);
+  }, [manager]);
+
+  const handleDragScroll = useCallback((deltaCssPx: number) => {
+    const r = rendererRef.current;
+    if (!r) return;
+    const deltaRows = r.cssToRows(deltaCssPx);
+    if (deltaRows === 0) return;
+    const current = manager.scrollOffset;
+    const max = manager.maxScrollOffset;
+    const next = Math.max(0, Math.min(current + deltaRows, max));
+    if (next !== current) {
+      manager.setScrollOffset(next);
+    }
+  }, [manager]);
 
   return (
     <div
@@ -183,6 +178,9 @@ export const WaterfallDisplayGL = forwardRef<
         visible={playbackHeadState.visible}
         isPlaying={playbackHeadState.isPlaying}
         onPlayPause={() => (isPlaying ? onStop?.() : onPlay?.())}
+        onDragScroll={handleDragScroll}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
       />
     </div>
   );

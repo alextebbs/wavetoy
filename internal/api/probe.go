@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/sammy/sdr-radio/internal/kiwi"
+	"github.com/sammy/sdr-radio/internal/probe"
 )
 
 type probeRequest struct {
@@ -41,6 +41,6 @@ func (s *Server) probeSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result := kiwi.QuickProbe(r.Context(), source.ID, source.Host, source.Port, source.UseTLS, freqKHz, mode)
+	result := probe.QuickProbe(r.Context(), *source, freqKHz, mode)
 	writeJSON(w, http.StatusOK, result)
 }

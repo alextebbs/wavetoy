@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
+	"github.com/sammy/sdr-radio/internal/streammgr"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
@@ -238,6 +239,19 @@ func (s *Server) handleWSMessage(r *http.Request, streamID string, client *strea
 			if err := s.db.UpdateStreamView(r.Context(), streamID, *msg.ViewStartKHz, *msg.ViewEndKHz); err != nil {
 				s.streamLog.Warn(streamID, "wf.view.persist_fail", fmt.Sprintf("err=%v", err))
 			}
+			// Warn if passband drifts outside the new WF view while offloading
+			if stream, _ := s.db.GetStreamByID(r.Context(), streamID); stream != nil && stream.OffloadChunks {
+				stream.WFViewStartKHz = *msg.ViewStartKHz
+				stream.WFViewEndKHz = *msg.ViewEndKHz
+				if !streammgr.PassbandInView(*stream) {
+					s.broadcastStreamEvent(streamID, map[string]any{
+						"type":    "activity_detection_warning",
+						"message": "Activity detection disabled — passband outside waterfall view",
+					})
+					s.streamLog.Warn(streamID, "offload.passband_outside",
+						"passband outside WF view — chunks will have no SNR reading")
+				}
+			}
 			evt := map[string]any{
 				"type":      "wf_view_changed",
 				"start_khz": *msg.ViewStartKHz,
@@ -381,7 +395,8 @@ func (s *Server) broadcastStreamEvent(streamID string, event map[string]any) {
 
 	s.registry.broadcast("stream:"+streamID, event)
 
-	if event["type"] == "stream_updated" {
+	switch event["type"] {
+	case "stream_updated", "stream_state_changed":
 		s.registry.broadcast("streams", event)
 	}
 }

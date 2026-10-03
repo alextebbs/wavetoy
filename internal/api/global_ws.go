@@ -281,7 +281,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			"field":      msg.Field,
 		})
 
-	case "switch_fallback":
+	case "switch_source":
 		streamID := s.findStreamTopicForClient(client)
 		if streamID == "" {
 			_ = client.writeJSON(map[string]any{
@@ -299,9 +299,9 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			})
 			return
 		}
-		s.handleSwitchFallback(r, streamID, msg.SourceID, client)
+		s.handleSwitchSource(r, streamID, msg.SourceID, client)
 
-	case "reprobe_fallbacks":
+	case "reprobe":
 		streamID := s.findStreamTopicForClient(client)
 		if streamID == "" {
 			_ = client.writeJSON(map[string]any{
@@ -311,8 +311,8 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 			})
 			return
 		}
-		if s.fallbackManager != nil {
-			s.fallbackManager.Reprobe(r.Context(), streamID)
+		if s.probeManager != nil {
+			s.probeManager.Reprobe(r.Context(), streamID)
 		}
 
 	default:
@@ -324,7 +324,7 @@ func (s *Server) handleGlobalWSMessage(r *http.Request, client *streamWSClient, 
 	}
 }
 
-func (s *Server) handleSwitchFallback(r *http.Request, streamID, sourceID string, client *streamWSClient) {
+func (s *Server) handleSwitchSource(r *http.Request, streamID, sourceID string, client *streamWSClient) {
 	existing, err := s.db.GetStreamByID(r.Context(), streamID)
 	if err != nil || existing == nil {
 		_ = client.writeJSON(map[string]any{
@@ -354,8 +354,8 @@ func (s *Server) handleSwitchFallback(r *http.Request, streamID, sourceID string
 		"sample_rate": s.streamManager.SampleRate(stream.ID),
 	})
 
-	if s.fallbackManager != nil && stream.AutoProbe && prevSourceID != sourceID {
-		go s.fallbackManager.NotifySwitch(r.Context(), streamID, prevSourceID, sourceID)
+	if s.probeManager != nil && stream.AutoProbe && prevSourceID != sourceID {
+		go s.probeManager.NotifySwitch(r.Context(), streamID, prevSourceID, sourceID)
 	}
 }
 

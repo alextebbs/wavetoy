@@ -13,12 +13,14 @@ import (
 
 	"github.com/sammy/sdr-radio/internal/chunkring"
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/probe"
 	"github.com/sammy/sdr-radio/internal/filter"
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/kiwi"
 	"github.com/sammy/sdr-radio/internal/models"
+	"github.com/sammy/sdr-radio/internal/quality"
 	s3client "github.com/sammy/sdr-radio/internal/s3"
+	"github.com/sammy/sdr-radio/internal/snr"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
@@ -51,16 +53,18 @@ type Manager struct {
 	onDegradedMu    sync.RWMutex
 	onDegraded      func(streamID, reason string)
 	onStateChangeMu sync.RWMutex
-	onStateChange   func(streamID, state string)
+	onStateChange   func(streamID, state string, health []string)
 
 	onInterpreterOutputMu sync.RWMutex
 	onInterpreterOutput   func(streamID string, output interpreter.Output)
 
-	onDataStaleMu sync.RWMutex
-	onDataStale   func(streamID, channel string, stale bool)
-
 	onChunkCompleteMu sync.RWMutex
 	onChunkComplete    func(streamID string, meta chunkring.ChunkMeta)
+
+	onSuggSNRMu    sync.RWMutex
+	onSuggSNR      func(streamID string) (float64, bool)
+	onIsFavoriteMu sync.RWMutex
+	onIsFavorite   func(streamID, sourceID string) bool
 }
 
 type listenSession struct {
@@ -126,6 +130,19 @@ type activeStream struct {
 	wfPerfMaxUs       int64
 	wfPerfBroadcastUs int64
 	wfPerfChunkUs     int64
+
+	audioStale atomic.Bool
+	wfStale    atomic.Bool
+	tooBusy    atomic.Bool
+
+	reconnectTimes [8]time.Time
+	reconnectIdx   int
+	reconnectChurn atomic.Bool
+
+	qualityMonitor *quality.Monitor
+	lastWFFrame    atomic.Value // stores *snr.WFFrameData
+
+	lastHealth atomic.Value // stores []string for dedup
 }
 
 func New(database *db.DB, logger *streamlog.Logger) *Manager {
@@ -143,7 +160,7 @@ func (m *Manager) SetOnDegraded(fn func(streamID, reason string)) {
 	m.onDegradedMu.Unlock()
 }
 
-func (m *Manager) SetOnStateChange(fn func(streamID, state string)) {
+func (m *Manager) SetOnStateChange(fn func(streamID, state string, health []string)) {
 	m.onStateChangeMu.Lock()
 	m.onStateChange = fn
 	m.onStateChangeMu.Unlock()
@@ -172,19 +189,16 @@ func (m *Manager) notifyInterpreterOutput(streamID string, output interpreter.Ou
 	}
 }
 
-func (m *Manager) SetOnDataStale(fn func(streamID, channel string, stale bool)) {
-	m.onDataStaleMu.Lock()
-	m.onDataStale = fn
-	m.onDataStaleMu.Unlock()
+func (m *Manager) SetOnSuggestionSNR(fn func(streamID string) (float64, bool)) {
+	m.onSuggSNRMu.Lock()
+	m.onSuggSNR = fn
+	m.onSuggSNRMu.Unlock()
 }
 
-func (m *Manager) notifyDataStale(streamID, channel string, stale bool) {
-	m.onDataStaleMu.RLock()
-	fn := m.onDataStale
-	m.onDataStaleMu.RUnlock()
-	if fn != nil {
-		fn(streamID, channel, stale)
-	}
+func (m *Manager) SetOnIsFavorite(fn func(streamID, sourceID string) bool) {
+	m.onIsFavoriteMu.Lock()
+	m.onIsFavorite = fn
+	m.onIsFavoriteMu.Unlock()
 }
 
 func (m *Manager) SetOnChunkComplete(fn func(streamID string, meta chunkring.ChunkMeta)) {
@@ -202,18 +216,105 @@ func (m *Manager) notifyChunkComplete(streamID string, meta chunkring.ChunkMeta)
 	}
 }
 
-func (m *Manager) notifyStateChange(streamID, state string) {
+func (m *Manager) notifyStateChange(streamID, state string, health []string) {
 	m.onStateChangeMu.RLock()
 	fn := m.onStateChange
 	m.onStateChangeMu.RUnlock()
 	if fn != nil {
-		fn(streamID, state)
+		fn(streamID, state, health)
 	}
 }
 
 func (m *Manager) setStreamStateInDBAndNotify(ctx context.Context, streamID string, state StreamState) {
 	_ = m.db.UpdateStreamState(ctx, streamID, string(state))
-	m.notifyStateChange(streamID, string(state))
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if ok {
+		as.audioStale.Store(false)
+		as.wfStale.Store(false)
+		as.tooBusy.Store(false)
+		as.reconnectChurn.Store(false)
+		as.lastHealth.Store([]string(nil))
+	}
+	m.notifyStateChange(streamID, string(state), nil)
+}
+
+func (m *Manager) syncHealth(streamID string) {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	var health []string
+	if as.audioStale.Load() {
+		health = append(health, HealthFlagAudioStale)
+	}
+	if as.wfStale.Load() {
+		health = append(health, HealthFlagWFStale)
+	}
+	if as.tooBusy.Load() {
+		health = append(health, HealthFlagTooBusy)
+	}
+	if as.reconnectChurn.Load() {
+		health = append(health, HealthFlagReconnectChurn)
+	}
+
+	prev, _ := as.lastHealth.Load().([]string)
+	if slicesEqual(prev, health) {
+		return
+	}
+	as.lastHealth.Store(health)
+
+	_ = m.db.UpdateStreamHealth(context.Background(), streamID, health)
+	m.notifyStateChange(streamID, string(StateActive), health)
+}
+
+func (m *Manager) healthSnapshot(as *activeStream) (uint8, uint8) {
+	as.mu.RLock()
+	reconnecting := as.reconnecting
+	client := as.client
+	as.mu.RUnlock()
+
+	var state StreamState
+	switch {
+	case reconnecting:
+		state = StateReconnecting
+	case client != nil:
+		state = StateActive
+	default:
+		state = StateIdle
+	}
+
+	var health []string
+	if as.audioStale.Load() {
+		health = append(health, HealthFlagAudioStale)
+	}
+	if as.wfStale.Load() {
+		health = append(health, HealthFlagWFStale)
+	}
+	if as.tooBusy.Load() {
+		health = append(health, HealthFlagTooBusy)
+	}
+	if as.reconnectChurn.Load() {
+		health = append(health, HealthFlagReconnectChurn)
+	}
+
+	return StateInt[state], HealthToFlags(health)
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func newListenSession(sourceID string) *listenSession {
@@ -243,6 +344,44 @@ func (m *Manager) tryCommitListen(as *activeStream) {
 	}()
 }
 
+const (
+	churnWindow    = 5 * time.Minute
+	churnThreshold = 3
+)
+
+// recordReconnect pushes a timestamp into the rolling ring buffer and
+// evaluates whether the stream is experiencing reconnect churn (≥3
+// short-lived connections within a 5-minute window).
+func (m *Manager) recordReconnect(as *activeStream) {
+	now := time.Now()
+	as.mu.Lock()
+	as.reconnectTimes[as.reconnectIdx%len(as.reconnectTimes)] = now
+	as.reconnectIdx++
+	as.mu.Unlock()
+
+	as.mu.RLock()
+	cutoff := now.Add(-churnWindow)
+	count := 0
+	for _, t := range as.reconnectTimes {
+		if !t.IsZero() && t.After(cutoff) {
+			count++
+		}
+	}
+	lastConnected := as.lastConnectedAt
+	as.mu.RUnlock()
+
+	shortLived := !lastConnected.IsZero() && now.Sub(lastConnected) < reconnectStabilityThreshold
+	if shortLived && count >= churnThreshold {
+		if !as.reconnectChurn.Swap(true) {
+			m.log.Warn(as.id, "health.reconnect_churn", fmt.Sprintf("detected: %d reconnects in %s window", count, churnWindow))
+			m.syncHealth(as.id)
+		}
+	} else if as.reconnectChurn.Load() && count < churnThreshold {
+		as.reconnectChurn.Store(false)
+		m.syncHealth(as.id)
+	}
+}
+
 func (m *Manager) SetAutoProbe(streamID string, enabled bool) {
 	m.mu.RLock()
 	as, ok := m.streams[streamID]
@@ -254,6 +393,128 @@ func (m *Manager) SetAutoProbe(streamID string, enabled bool) {
 	as.mu.Lock()
 	as.autoProbe = enabled
 	as.mu.Unlock()
+}
+
+func (m *Manager) SetQualityFallback(streamID string, enabled bool, stream models.Stream) {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	as.mu.Lock()
+	hasMonitor := as.qualityMonitor != nil
+	as.mu.Unlock()
+
+	if enabled && !hasMonitor {
+		m.startQualityMonitor(as, stream)
+	} else if !enabled && hasMonitor {
+		m.stopQualityMonitor(as)
+	}
+}
+
+func (m *Manager) startQualityMonitor(as *activeStream, stream models.Stream) {
+	bandCfg := snr.BandConfig{
+		CenterKHz:    stream.FrequencyKHz,
+		PassbandLoHz: stream.BandwidthLowHz,
+		PassbandHiHz: stream.BandwidthHighHz,
+	}
+
+	getHealth := func() quality.HealthSnapshot {
+		as.mu.RLock()
+		reconnecting := as.reconnecting
+		client := as.client
+		as.mu.RUnlock()
+
+		return quality.HealthSnapshot{
+			AudioStale:     as.audioStale.Load(),
+			WFStale:        as.wfStale.Load(),
+			TooBusy:        as.tooBusy.Load(),
+			ReconnectChurn: as.reconnectChurn.Load(),
+			Reconnecting:   reconnecting,
+			InErrorState:   client == nil && !reconnecting,
+		}
+	}
+
+	getWFFrame := func() *snr.WFFrameData {
+		v := as.lastWFFrame.Load()
+		if v == nil {
+			return nil
+		}
+		f, _ := v.(*snr.WFFrameData)
+		return f
+	}
+
+	getSuggSNR := func() (float64, bool) {
+		m.onSuggSNRMu.RLock()
+		fn := m.onSuggSNR
+		m.onSuggSNRMu.RUnlock()
+		if fn == nil {
+			return 0, false
+		}
+		return fn(as.id)
+	}
+
+	isFavorite := func(sourceID string) bool {
+		m.onIsFavoriteMu.RLock()
+		fn := m.onIsFavorite
+		m.onIsFavoriteMu.RUnlock()
+		if fn == nil {
+			return false
+		}
+		return fn(as.id, sourceID)
+	}
+
+	mon := quality.NewMonitor(
+		as.id,
+		m.log,
+		func(streamID, reason string) {
+			m.onDegradedMu.RLock()
+			fn := m.onDegraded
+			m.onDegradedMu.RUnlock()
+			if fn != nil {
+				fn(streamID, reason)
+			}
+		},
+		getHealth,
+		getWFFrame,
+		getSuggSNR,
+		bandCfg,
+		isFavorite,
+	)
+
+	as.mu.Lock()
+	as.qualityMonitor = mon
+	as.mu.Unlock()
+
+	mon.Start()
+	m.log.Info(as.id, "quality.enabled", "quality monitor started")
+}
+
+func (m *Manager) stopQualityMonitor(as *activeStream) {
+	as.mu.Lock()
+	mon := as.qualityMonitor
+	as.qualityMonitor = nil
+	as.mu.Unlock()
+
+	if mon != nil {
+		mon.Stop()
+		m.log.Info(as.id, "quality.disabled", "quality monitor stopped")
+	}
+}
+
+// GetQualityMonitor returns the active quality monitor for a stream, if any.
+func (m *Manager) GetQualityMonitor(streamID string) *quality.Monitor {
+	m.mu.RLock()
+	as, ok := m.streams[streamID]
+	m.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	return as.qualityMonitor
 }
 
 func (m *Manager) SetKeepAlive(streamID string, enabled bool) {
@@ -342,6 +603,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 			return err
 		}
 		as.mu.Lock()
+		oldWF := as.wfClient
 		as.client = client
 		as.wfClient = wfClient
 		as.sourceID = stream.SourceID
@@ -355,6 +617,13 @@ func (m *Manager) EnsureRunning(ctx context.Context, stream models.Stream) error
 		as.listen = newListenSession(stream.SourceID)
 		gen := as.generation
 		as.mu.Unlock()
+		if oldWF != nil {
+			_ = oldWF.Close()
+		}
+		client.SetOnTooBusy(func(busy bool) {
+			as.tooBusy.Store(busy)
+			m.syncHealth(stream.ID)
+		})
 		m.setStreamStateInDBAndNotify(ctx, stream.ID, StateActive)
 		m.log.Info(stream.ID, "state.change", "connecting → active")
 		m.startPump(as, client, gen)
@@ -421,6 +690,10 @@ func (m *Manager) Reconfigure(ctx context.Context, stream models.Stream) error {
 	gen := existing.generation
 	existing.mu.Unlock()
 
+	client.SetOnTooBusy(func(busy bool) {
+		existing.tooBusy.Store(busy)
+		m.syncHealth(stream.ID)
+	})
 	m.setStreamStateInDBAndNotify(ctx, stream.ID, StateActive)
 	existing.chunkRing.SetSourceID(stream.SourceID)
 	existing.filterChain.Reconfigure(stream.Filters, client.SampleRate())
@@ -556,6 +829,13 @@ func (m *Manager) startStream(ctx context.Context, stream models.Stream) error {
 	as.chunkRing.SetSourceID(stream.SourceID)
 	as.chunkRing.SetOnRotate(func(meta chunkring.ChunkMeta) {
 		m.notifyChunkComplete(stream.ID, meta)
+	})
+	as.chunkRing.SetHealthSnapshot(func() (uint8, uint8) {
+		return m.healthSnapshot(as)
+	})
+	client.SetOnTooBusy(func(busy bool) {
+		as.tooBusy.Store(busy)
+		m.syncHealth(stream.ID)
 	})
 	m.log.SetOnEmit(stream.ID, func(entry streamlog.Entry) {
 		data, _ := json.Marshal(entry)
@@ -736,6 +1016,8 @@ func (m *Manager) Remove(streamID string) error {
 		return nil
 	}
 
+	m.stopQualityMonitor(as)
+
 	as.mu.Lock()
 	client := as.client
 	wfClient := as.wfClient
@@ -783,7 +1065,8 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 
 		defer func() {
 			if audioStale {
-				m.notifyDataStale(as.id, "audio", false)
+				as.audioStale.Store(false)
+				m.syncHealth(as.id)
 			}
 
 			as.mu.Lock()
@@ -816,18 +1099,22 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 			case <-client.Done():
 				m.log.Wire(as.id, streamlog.LevelWarn, "disconnect", "wavetoy", "kiwi", "kiwi connection closed")
 				return
-			case <-staleTicker.C:
-				gap := time.Since(lastFrameAt)
-				if !audioStale && gap >= staleThreshold {
+		case <-staleTicker.C:
+			gap := time.Since(lastFrameAt)
+			if gap >= staleThreshold {
+				if !audioStale {
 					audioStale = true
-					m.log.Warn(as.id, "pump.audio.stale", fmt.Sprintf("no frames for %.0fs", gap.Seconds()))
-					m.notifyDataStale(as.id, "audio", true)
+					as.audioStale.Store(true)
+					m.syncHealth(as.id)
 				}
+				m.log.Warn(as.id, "pump.audio.stale", fmt.Sprintf("no frames for %.0fs", gap.Seconds()))
+			}
 			case <-metricsTicker.C:
 				m.logAudioMetrics(as, client, generation)
 
 				as.mu.RLock()
 				shouldIdleDisconnect := !as.keepAlive &&
+					as.qualityMonitor == nil &&
 					!as.idleSince.IsZero() &&
 					time.Since(as.idleSince) >= idleDisconnectTimeout &&
 					len(as.subscribers) == 0 && len(as.wfSubscribers) == 0
@@ -850,8 +1137,9 @@ func (m *Manager) startPump(as *activeStream, client *kiwi.Client, generation ui
 			lastFrameAt = frameStart
 			if audioStale {
 				audioStale = false
+				as.audioStale.Store(false)
 				m.log.Info(as.id, "pump.audio.resumed", "receiving frames again")
-				m.notifyDataStale(as.id, "audio", false)
+				m.syncHealth(as.id)
 			}
 
 			as.framesFromKiwi.Add(1)
@@ -928,7 +1216,8 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 
 		defer func() {
 			if wfStale {
-				m.notifyDataStale(as.id, "waterfall", false)
+				as.wfStale.Store(false)
+				m.syncHealth(as.id)
 			}
 			as.mu.Lock()
 			if as.wfClient == wfClient {
@@ -958,14 +1247,17 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 				if !gotFirstFrame {
 					m.log.Warn(as.id, "wf.timeout", fmt.Sprintf("no data in %s", wfTimeout))
 				}
-			case <-staleTicker.C:
-				gap := time.Since(lastFrameAt)
-				if !wfStale && gap >= staleThreshold {
-					wfStale = true
-					m.log.Warn(as.id, "pump.wf.stale", fmt.Sprintf("no frames for %.0fs", gap.Seconds()))
-					m.notifyDataStale(as.id, "waterfall", true)
-				}
-		case frame, ok := <-wfClient.Frames():
+	case <-staleTicker.C:
+		gap := time.Since(lastFrameAt)
+		if gap >= staleThreshold {
+			if !wfStale {
+				wfStale = true
+				as.wfStale.Store(true)
+				m.syncHealth(as.id)
+			}
+			m.log.Warn(as.id, "pump.wf.stale", fmt.Sprintf("no frames for %.0fs", gap.Seconds()))
+		}
+	case frame, ok := <-wfClient.Frames():
 			if !ok {
 				return
 			}
@@ -986,13 +1278,25 @@ func (m *Manager) startWFPump(as *activeStream, wfClient *kiwi.WFClient, generat
 			lastFrameAt = wfFrameStart
 			if wfStale {
 				wfStale = false
+				as.wfStale.Store(false)
 				m.log.Info(as.id, "pump.wf.resumed", "receiving frames again")
-				m.notifyDataStale(as.id, "waterfall", false)
+				m.syncHealth(as.id)
 			}
 			if !gotFirstFrame {
 				gotFirstFrame = true
 				timer.Stop()
 			}
+			wfBandwidthKHz := 30000.0
+			if wfClient.MaxFreqKHz() > 0 {
+				wfBandwidthKHz = float64(wfClient.MaxFreqKHz())
+			}
+			as.lastWFFrame.Store(&snr.WFFrameData{
+				Bins:         append([]byte(nil), frame.Bins...),
+				XBin:         frame.XBin,
+				Zoom:         frame.Zoom,
+				BandwidthKHz: wfBandwidthKHz,
+			})
+
 			tb := time.Now()
 			as.broadcastWF(frame)
 			wfBroadcastElapsed := time.Since(tb)
@@ -1154,6 +1458,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 	attempt := as.reconnectAttempts
 	as.mu.Unlock()
 
+	m.recordReconnect(as)
 	m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.start", "wavetoy", "kiwi", "initiating reconnection")
 	m.setStreamStateInDBAndNotify(context.Background(), as.id, StateReconnecting)
 
@@ -1188,18 +1493,6 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				m.log.Wire(as.id, streamlog.LevelError, "reconnect.abandon", "wavetoy", "kiwi",
 					fmt.Sprintf("giving up after %d unstable reconnects", attempt))
 				m.setStreamStateInDBAndNotify(context.Background(), as.id, StateError)
-
-				as.mu.RLock()
-				shouldFallback := as.autoProbe
-				as.mu.RUnlock()
-				if shouldFallback {
-					m.onDegradedMu.RLock()
-					onDeg := m.onDegraded
-					m.onDegradedMu.RUnlock()
-					if onDeg != nil {
-						onDeg(as.id, "unstable_reconnect")
-					}
-				}
 				return
 			}
 
@@ -1217,36 +1510,31 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				continue
 			}
 
+			// Auto-fallback: after enough unstable reconnects, try a probe suggestion
+			fallbackSource := ""
+			if attempt >= maxReconnectBeforeFallback {
+				as.mu.RLock()
+				currentSource := as.sourceID
+				hasAutoProbe := as.autoProbe
+				as.mu.RUnlock()
+
+				if hasAutoProbe {
+					suggestions, sugErr := m.db.ListProbeSuggestions(context.Background(), as.id)
+					if sugErr == nil && len(suggestions) > 0 && suggestions[0].SourceID != currentSource {
+						fallbackSource = suggestions[0].SourceID
+						stream.SourceID = fallbackSource
+						m.log.Wire(as.id, streamlog.LevelWarn, "reconnect.fallback", "wavetoy", "kiwi",
+							fmt.Sprintf("trying probe suggestion %s:%d (score=%.3f) after %d unstable reconnects",
+								suggestions[0].SourceHost, suggestions[0].SourcePort, suggestions[0].ScoreEMA, attempt))
+					}
+				}
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			client, wfClient, err := m.connectClient(ctx, *stream)
 			cancel()
 			if err != nil {
 				m.log.Warn(as.id, "reconnect.start", fmt.Sprintf("attempt=%d failed: %v", attempt, err))
-
-				as.mu.RLock()
-				shouldFallback := as.autoProbe && attempt >= maxReconnectBeforeFallback
-				as.mu.RUnlock()
-
-				if shouldFallback {
-					m.log.Info(as.id, "reconnect.escalate", fmt.Sprintf("attempt=%d, triggering fallback", attempt))
-					m.onDegradedMu.RLock()
-					onDeg := m.onDegraded
-					m.onDegradedMu.RUnlock()
-					if onDeg != nil {
-						onDeg(as.id, "reconnect_failed")
-					}
-
-					as.mu.RLock()
-					switched := as.client != nil
-					as.mu.RUnlock()
-					if switched {
-						return
-					}
-					attempt = 0
-					backoff = time.Second
-					continue
-				}
-
 				continue
 			}
 
@@ -1265,6 +1553,7 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 				}
 				return
 			}
+			oldWF := as.wfClient
 			as.client = client
 			as.wfClient = wfClient
 			as.sourceID = stream.SourceID
@@ -1278,6 +1567,24 @@ func (m *Manager) ensureReconnect(as *activeStream) {
 			as.reconnectAttempts = attempt
 			gen := as.generation
 			as.mu.Unlock()
+			if oldWF != nil {
+				_ = oldWF.Close()
+			}
+
+			client.SetOnTooBusy(func(busy bool) {
+				as.tooBusy.Store(busy)
+				m.syncHealth(as.id)
+			})
+			if fallbackSource != "" {
+				as.chunkRing.SetSourceID(fallbackSource)
+				if dbErr := m.db.SwitchStreamSource(context.Background(), as.id, fallbackSource); dbErr != nil {
+					m.log.Warn(as.id, "reconnect.fallback", fmt.Sprintf("db update failed: %v", dbErr))
+				}
+				m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.fallback.ok", "wavetoy", "kiwi",
+					fmt.Sprintf("switched source to %s gen=%d", fallbackSource, gen))
+				as.reconnectChurn.Store(false)
+				m.syncHealth(as.id)
+			}
 
 			m.log.Wire(as.id, streamlog.LevelInfo, "reconnect.ok", "wavetoy", "kiwi", fmt.Sprintf("after %d attempts gen=%d", attempt, gen))
 			m.setStreamStateInDBAndNotify(context.Background(), as.id, StateActive)
@@ -1315,10 +1622,10 @@ func (m *Manager) ChunkRing(streamID string) *chunkring.ChunkRing {
 	return as.chunkRing
 }
 
-func (m *Manager) CollectSnapshot(ctx context.Context, streamID string, duration time.Duration, stream models.Stream) (fallback.SnapshotResult, error) {
+func (m *Manager) CollectSnapshot(ctx context.Context, streamID string, duration time.Duration, stream models.Stream) (probe.SnapshotResult, error) {
 	audioCh, audioUnsub, err := m.Subscribe(streamID)
 	if err != nil {
-		return fallback.SnapshotResult{Snapshot: fallback.AudioSnapshot{SilenceRatio: 1}}, err
+		return probe.SnapshotResult{Snapshot: probe.AudioSnapshot{SilenceRatio: 1}}, err
 	}
 	defer audioUnsub()
 
@@ -1333,21 +1640,23 @@ func (m *Manager) CollectSnapshot(ctx context.Context, streamID string, duration
 		wfCh = nil
 	}
 
+	bandwidthKHz := 30000.0
+	m.mu.RLock()
+	if as, ok := m.streams[streamID]; ok && as.wfClient != nil {
+		if bw := as.wfClient.MaxFreqKHz(); bw > 0 {
+			bandwidthKHz = float64(bw)
+		}
+	}
+	m.mu.RUnlock()
+
 	deadline := time.After(duration)
 	var audioFrames [][]byte
 	var wfFrames []kiwi.WFFrame
 
-	finalize := func() fallback.SnapshotResult {
-		snap := fallback.CaptureReferenceSnapshot(audioFrames, wfFrames, duration, stream)
-		totalLen := 0
-		for _, f := range audioFrames {
-			totalLen += len(f)
-		}
-		raw := make([]byte, 0, totalLen)
-		for _, f := range audioFrames {
-			raw = append(raw, f...)
-		}
-		return fallback.SnapshotResult{Snapshot: snap, RawPCM: raw, SampleRate: sampleRate}
+	finalize := func() probe.SnapshotResult {
+		snap := probe.CaptureReferenceSnapshot(audioFrames, wfFrames, duration, stream, bandwidthKHz)
+		raw := probe.TruncateAudio(audioFrames, sampleRate, probe.ProbeStoredAudio)
+		return probe.SnapshotResult{Snapshot: snap, RawPCM: raw, SampleRate: sampleRate}
 	}
 
 	for {

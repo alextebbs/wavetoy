@@ -22,11 +22,12 @@ interface FrequencyInputProps {
   optimistic?: boolean;
   onSubmit: (kHz: number) => void;
   dimmed?: boolean;
+  disabled?: boolean;
   /** When true, use blue playback color to indicate historical playback */
   playbackMode?: boolean;
 }
 
-export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMode }: FrequencyInputProps) {
+export function FrequencyInput({ value, optimistic, onSubmit, dimmed, disabled, playbackMode }: FrequencyInputProps) {
   const playbackColor = useThemeStore((s) => s.theme.display.displayStatusPlaybackHead);
   const [editing, setEditing] = useState(false);
   const [draftVal, setDraftVal] = useState("");
@@ -41,10 +42,10 @@ export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMo
   const knobStartAngle = useRef(0);
 
   const startEditing = useCallback(() => {
-    if (editing) return;
+    if (editing || disabled) return;
     setDraftVal(formatFreq(value));
     setEditing(true);
-  }, [editing, value]);
+  }, [editing, disabled, value]);
 
   useEffect(() => {
     if (editing) {
@@ -109,6 +110,7 @@ export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMo
   }, []);
 
   const onKnobPointerDown = useCallback((e: React.PointerEvent) => {
+    if (disabled) return;
     e.preventDefault();
     draggingKnob.current = true;
     knobStartX.current = e.clientX;
@@ -116,7 +118,7 @@ export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMo
     knobStartAngle.current = knobAngle;
     document.body.style.cursor = "ew-resize";
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, [knobAngle]);
+  }, [knobAngle, disabled]);
 
   const inputClasses =
     "font-xanh-mono bg-transparent p-0 text-left text-3xl leading-none font-normal tracking-wide outline-none md:text-4xl";
@@ -125,7 +127,7 @@ export function FrequencyInput({ value, optimistic, onSubmit, dimmed, playbackMo
     <div
       ref={wrapperRef}
       className="relative flex h-full items-center gap-5"
-      style={dimmed ? { pointerEvents: "none" } : undefined}
+      style={dimmed || disabled ? { pointerEvents: "none" } : undefined}
     >
       <Tooltip content="Hold shift for fine tuning">
         <button

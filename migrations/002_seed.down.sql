@@ -1,1 +1,0 @@
--- Seed data is removed when dropping tables in 001

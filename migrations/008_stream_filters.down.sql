@@ -1,1 +1,0 @@
-ALTER TABLE streams DROP COLUMN IF EXISTS filters;

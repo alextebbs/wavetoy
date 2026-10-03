@@ -16,7 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/probe"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 	"github.com/sammy/sdr-radio/internal/streammgr"
 	healthsync "github.com/sammy/sdr-radio/internal/sync"
@@ -26,7 +26,7 @@ type Server struct {
 	db              *db.DB
 	streamManager   *streammgr.Manager
 	streamLog       *streamlog.Logger
-	fallbackManager *fallback.Manager
+	probeManager *probe.Manager
 	healthChecker   *healthsync.HealthChecker
 	wsUpgrader      websocket.Upgrader
 	registry        *topicRegistry
@@ -71,8 +71,8 @@ func (s *Server) StreamLog() *streamlog.Logger {
 	return s.streamLog
 }
 
-func (s *Server) SetFallbackManager(fm *fallback.Manager) {
-	s.fallbackManager = fm
+func (s *Server) SetProbeManager(fm *probe.Manager) {
+	s.probeManager = fm
 }
 
 func (s *Server) Router() http.Handler {
@@ -93,6 +93,7 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/sources/map", s.listMapSources)
 			protected.Get("/sources/{id}", s.getSource)
 			protected.Get("/sources/{id}/status", s.getSourceStatus)
+			protected.Get("/sources/{id}/snr-history", s.getSourceSNRHistory)
 			protected.Post("/sources/{id}/probe", s.probeSource)
 			protected.Get("/streams", s.listStreams)
 			protected.Get("/streams/{id}", s.getStream)
@@ -104,11 +105,12 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/streams/{id}/logs", s.getStreamLogs)
 			protected.Get("/streams/{id}/logs/download", s.downloadStreamLogs)
 			protected.Post("/streams/{id}/debug", s.setStreamDebug)
-			protected.Get("/streams/{id}/fallbacks", s.getStreamFallbacks)
-			protected.Get("/streams/{id}/fallbacks/ref-audio", s.getStreamRefAudio)
-			protected.Get("/streams/{id}/fallbacks/{rank}/probe-audio", s.getFallbackProbeAudio)
+			protected.Get("/streams/{id}/suggestions", s.getStreamSuggestions)
+			protected.Get("/streams/{id}/suggestions/ref-audio", s.getStreamRefAudio)
+			protected.Get("/streams/{id}/suggestions/{rank}/probe-audio", s.getSuggestionProbeAudio)
 			protected.Post("/streams/{id}/reprobe", s.reprobeStream)
 			protected.Post("/streams/{id}/capture", s.captureStream)
+			protected.Get("/streams/{id}/chunk-summary", s.streamChunkSummary)
 			protected.Get("/streams/{id}/manifest/{from}/{to}", s.streamManifest)
 			protected.Get("/streams/{id}/rewind/{ts}/audio", s.streamRewindChunkAudio)
 			protected.Get("/streams/{id}/rewind/{ts}/wf", s.streamRewindChunkWF)

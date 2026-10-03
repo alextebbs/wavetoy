@@ -1,13 +1,12 @@
 import { useRef, useState } from "react";
 import type { Stream } from "@/lib/api";
+import { useScrollBackStore } from "@/lib/scroll-back-store";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Button } from "./ui/button";
-import { Tooltip } from "./ui/tooltip";
+import { Switch } from "./ui/switch";
 import {
-  HardDriveIcon,
-  HeartPulseIcon,
+  ActivityIcon,
   PencilIcon,
-  PlugIcon,
-  ShieldCheckIcon,
   Skull,
 } from "lucide-react";
 
@@ -15,43 +14,6 @@ interface StreamSettingsPanelProps {
   stream: Stream | null;
   onPatch: (patch: Record<string, unknown>) => void;
   onDelete: () => Promise<void>;
-}
-
-function Toggle({
-  active,
-  label,
-  icon,
-  activeTooltip,
-  inactiveTooltip,
-  onToggle,
-  disabled,
-}: {
-  active: boolean;
-  label: string;
-  icon: React.ReactNode;
-  activeTooltip: string;
-  inactiveTooltip: string;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <>
-      <span className="shrink-0 text-xs uppercase tracking-widest text-muted-foreground">{label}</span>
-      <span className="flex justify-end">
-        <Tooltip content={active ? activeTooltip : inactiveTooltip}>
-          <Button
-            variant={active ? "outline" : "ghost"}
-            size="icon"
-            className="h-6 w-6"
-            onClick={onToggle}
-            disabled={disabled}
-          >
-            {icon}
-          </Button>
-        </Tooltip>
-      </span>
-    </>
-  );
 }
 
 export function StreamSettingsPanel({ stream, onPatch, onDelete }: StreamSettingsPanelProps) {
@@ -117,44 +79,9 @@ export function StreamSettingsPanel({ stream, onPatch, onDelete }: StreamSetting
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {/* Feature toggles */}
-        <div className="border-b border-border/80 px-3 pt-3 pb-2">
-          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2.5">
-            <Toggle
-              label="auto probe"
-              active={stream.auto_probe}
-              icon={<ShieldCheckIcon className="size-3" />}
-              activeTooltip="Disable auto probe"
-              inactiveTooltip="Enable auto probe"
-              onToggle={() => onPatch({ auto_probe: !stream.auto_probe })}
-              disabled
-            />
-            <Toggle
-              label="keep alive"
-              active={stream.keep_alive}
-              icon={<PlugIcon className="size-3" />}
-              activeTooltip="Disable keep alive"
-              inactiveTooltip="Enable keep alive"
-              onToggle={() => onPatch({ keep_alive: !stream.keep_alive })}
-            />
-            <Toggle
-              label="quality fallback"
-              active={stream.quality_fallback}
-              icon={<HeartPulseIcon className="size-3" />}
-              activeTooltip="Disable quality fallback"
-              inactiveTooltip="Enable quality fallback"
-              onToggle={() => onPatch({ quality_fallback: !stream.quality_fallback })}
-              disabled
-            />
-            <Toggle
-              label="chunk offload"
-              active={stream.offload_chunks}
-              icon={<HardDriveIcon className="size-3" />}
-              activeTooltip="Disable chunk offloading"
-              inactiveTooltip="Enable chunk offloading"
-              onToggle={() => onPatch({ offload_chunks: !stream.offload_chunks })}
-            />
-          </div>
+        {/* Monitor mode toggle */}
+        <div className="border-b border-border/80 px-3 py-2.5">
+          <MonitorModeToggle onPatch={onPatch} />
         </div>
 
         {/* Stream info */}
@@ -194,6 +121,18 @@ export function StreamSettingsPanel({ stream, onPatch, onDelete }: StreamSetting
 
             <span className="shrink-0 uppercase tracking-widest text-muted-foreground">created</span>
             <span className="min-w-0 truncate text-right text-white">{new Date(stream.created_at).toLocaleDateString()}</span>
+
+            <span className="shrink-0 uppercase tracking-widest text-muted-foreground">auto probe</span>
+            <span className={`min-w-0 truncate text-right ${stream.auto_probe ? "text-white" : "text-muted-foreground"}`}>{stream.auto_probe ? "on" : "off"}</span>
+
+            <span className="shrink-0 uppercase tracking-widest text-muted-foreground">keep alive</span>
+            <span className={`min-w-0 truncate text-right ${stream.keep_alive ? "text-white" : "text-muted-foreground"}`}>{stream.keep_alive ? "on" : "off"}</span>
+
+            <span className="shrink-0 uppercase tracking-widest text-muted-foreground">quality fallback</span>
+            <span className={`min-w-0 truncate text-right ${stream.quality_fallback ? "text-white" : "text-muted-foreground"}`}>{stream.quality_fallback ? "on" : "off"}</span>
+
+            <span className="shrink-0 uppercase tracking-widest text-muted-foreground">chunk offload</span>
+            <span className={`min-w-0 truncate text-right ${stream.offload_chunks ? "text-white" : "text-muted-foreground"}`}>{stream.offload_chunks ? "on" : "off"}</span>
           </div>
         </div>
       </div>
@@ -245,5 +184,94 @@ export function StreamSettingsPanel({ stream, onPatch, onDelete }: StreamSetting
         )}
       </div>
     </div>
+  );
+}
+
+function MonitorModeToggle({ onPatch }: { onPatch: (patch: Record<string, unknown>) => void }) {
+  const monitorMode = useScrollBackStore((s) => s.monitorMode);
+  const streamLocked = useScrollBackStore((s) => s.streamLocked);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const handleSwitchClick = () => {
+    if (streamLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const confirm = () => {
+    const next = !monitorMode;
+    onPatch({
+      auto_probe: next,
+      quality_fallback: next,
+      keep_alive: next,
+      offload_chunks: next,
+      ...(next ? { locked: true } : {}),
+    });
+    setConfirmOpen(false);
+  };
+
+  return (
+    <>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ActivityIcon className={`size-3.5 ${monitorMode ? "text-purple-400" : "text-muted-foreground"}`} />
+          <span className={`text-xs uppercase tracking-widest ${monitorMode ? "text-purple-400" : "text-muted-foreground"}`}>
+            Monitor mode
+          </span>
+        </div>
+        <Switch
+          checked={monitorMode}
+          onCheckedChange={handleSwitchClick}
+          disabled={streamLocked}
+          className="data-[state=checked]:bg-purple-600"
+        />
+      </div>
+
+      <DialogPrimitive.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-[fade-in_220ms_ease-out] data-[state=closed]:animate-[fade-out_180ms_ease-in]" />
+          <DialogPrimitive.Content className="fixed inset-0 z-50 flex items-center justify-center p-4 outline-none">
+            <div className="w-full max-w-lg rounded-lg border border-purple-500/30 bg-background p-5 shadow-lg">
+              <DialogPrimitive.Title className="font-xanh-mono flex items-center gap-2 text-base uppercase tracking-wide text-purple-400">
+                <ActivityIcon className="size-4" />
+                {monitorMode ? "Disable" : "Enable"} monitoring
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Description asChild>
+                <div className="mt-3 space-y-2 text-sm leading-relaxed text-purple-200/70 [&_strong]:font-normal [&_strong]:text-purple-400">
+                  {monitorMode ? (
+                    <p>The stream will no longer automatically recover from source failures, stay alive, or archive data.</p>
+                  ) : (
+                    <>
+                      <p>This stream <strong>will never die</strong>, even if no one is listening to it.</p>
+                      <p>This stream will automatically <strong>scan for backup sources</strong> and switch to them to <strong>recover from source failures</strong>.</p>
+                      <p>This stream will <strong>archive all data</strong> (audio and waterfall) to long term storage (30 days history preserved).</p>
+                      <p>Turning on monitor mode will also <strong>lock your stream settings</strong>, but you can unlock them if you wish.</p>
+                      <p className="mt-3 text-purple-400">Please make sure you understand the implications of your decision.</p>
+                    </>
+                  )}
+                </div>
+              </DialogPrimitive.Description>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-purple-400/60 hover:text-purple-300"
+                  onClick={() => setConfirmOpen(false)}
+                >
+                  {monitorMode ? "Cancel" : "Don\u2019t enable"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs border-purple-500/40 text-purple-400 hover:bg-purple-500/10 hover:text-purple-300"
+                  onClick={confirm}
+                >
+                  {monitorMode ? "Disable" : "Enable"}
+                </Button>
+              </div>
+            </div>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
+    </>
   );
 }

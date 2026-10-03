@@ -14,9 +14,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/probe"
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	"github.com/sammy/sdr-radio/internal/models"
+	"github.com/sammy/sdr-radio/internal/streammgr"
 	"github.com/sammy/sdr-radio/internal/streamlog"
 )
 
@@ -418,6 +419,26 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		return nil, &patchStreamError{Status: http.StatusBadRequest, Error: "no fields provided to update", Code: "VALIDATION"}
 	}
 
+	// Validate passband-in-view before committing to DB, so we don't leave
+	// offload_chunks=true in the DB with no sink attached.
+	if updated.OffloadChunks && !existing.OffloadChunks {
+		if !s.streamManager.S3Available() {
+			return nil, &patchStreamError{Status: http.StatusNotImplemented, Error: "S3 storage is not configured", Code: "S3_UNAVAILABLE"}
+		}
+		// Build a temporary stream with the updated values to check passband
+		checkStream := *existing
+		checkStream.FrequencyKHz = updated.FrequencyKHz
+		checkStream.BandwidthLowHz = updated.BandwidthLowHz
+		checkStream.BandwidthHighHz = updated.BandwidthHighHz
+		if !streammgr.PassbandInView(checkStream) {
+			return nil, &patchStreamError{
+				Status: http.StatusBadRequest,
+				Error:  "monitoring mode requires the listen frequency to be within the waterfall view — adjust your waterfall view or listen frequency",
+				Code:   "PASSBAND_OUTSIDE_VIEW",
+			}
+		}
+	}
+
 	stream, err := s.db.UpdateStream(ctx, existing.ID, existing.TenantID, updated, baseVersion)
 	if err != nil {
 		switch {
@@ -441,26 +462,50 @@ func (s *Server) applyPatchStream(ctx context.Context, existing *models.Stream, 
 		return nil, &patchStreamError{Status: http.StatusBadGateway, Error: "failed to reconfigure KiwiSDR source", Code: "SOURCE_CONNECT_FAILED"}
 	}
 
-	if s.fallbackManager != nil {
+	if s.probeManager != nil {
 		s.streamManager.SetAutoProbe(stream.ID, stream.AutoProbe)
 		sourceChanged := existing.SourceID != stream.SourceID
-		s.fallbackManager.OnStreamUpdated(*stream, sourceChanged)
+		tuningChanged := existing.FrequencyKHz != stream.FrequencyKHz ||
+			existing.Mode != stream.Mode ||
+			existing.BandwidthLowHz != stream.BandwidthLowHz ||
+			existing.BandwidthHighHz != stream.BandwidthHighHz
+		s.probeManager.OnStreamUpdated(*stream, sourceChanged, tuningChanged)
 	}
 
-	if existing.KeepAlive != stream.KeepAlive {
-		s.streamManager.SetKeepAlive(stream.ID, stream.KeepAlive)
+	if existing.QualityFallback != stream.QualityFallback {
+		s.streamManager.SetQualityFallback(stream.ID, stream.QualityFallback, *stream)
+		if stream.QualityFallback && s.probeManager != nil && !stream.AutoProbe {
+			s.probeManager.Enable(ctx, stream.ID)
+		}
+	}
+
+	if existing.KeepAlive != stream.KeepAlive || (stream.QualityFallback && !stream.KeepAlive) {
+		keepAlive := stream.KeepAlive || stream.QualityFallback
+		s.streamManager.SetKeepAlive(stream.ID, keepAlive)
 	}
 
 	if existing.OffloadChunks != stream.OffloadChunks {
 		if stream.OffloadChunks {
-			if !s.streamManager.S3Available() {
-				return nil, &patchStreamError{Status: http.StatusNotImplemented, Error: "S3 storage is not configured", Code: "S3_UNAVAILABLE"}
-			}
 			if err := s.streamManager.StartChunkOffload(ctx, stream.ID); err != nil {
 				return nil, &patchStreamError{Status: http.StatusInternalServerError, Error: "failed to start chunk offloading", Code: "INTERNAL_ERROR"}
 			}
 		} else {
 			s.streamManager.StopChunkOffload(ctx, stream.ID)
+		}
+	}
+
+	// Warn if tuning changed while offloading and passband is now outside WF view
+	if stream.OffloadChunks && existing.OffloadChunks {
+		tuningChanged := existing.FrequencyKHz != stream.FrequencyKHz ||
+			existing.BandwidthLowHz != stream.BandwidthLowHz ||
+			existing.BandwidthHighHz != stream.BandwidthHighHz
+		if tuningChanged && !streammgr.PassbandInView(*stream) {
+			s.BroadcastToStream(stream.ID, map[string]any{
+				"type":    "activity_detection_warning",
+				"message": "Activity detection disabled — passband outside waterfall view",
+			})
+			s.streamLog.Warn(stream.ID, "offload.passband_outside",
+				"passband outside WF view — chunks will have no SNR reading")
 		}
 	}
 
@@ -865,7 +910,7 @@ func (s *Server) setStreamDebug(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getStreamSuggestions(w http.ResponseWriter, r *http.Request) {
 	streamID := chi.URLParam(r, "id")
 	if strings.TrimSpace(streamID) == "" {
 		writeError(w, http.StatusBadRequest, "stream id is required", "VALIDATION")
@@ -882,7 +927,7 @@ func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.fallbackManager == nil {
+	if s.probeManager == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"stream_id":   streamID,
 			"auto_probe":  stream.AutoProbe,
@@ -891,13 +936,13 @@ func (s *Server) getStreamFallbacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	suggestions, err := s.fallbackManager.GetSuggestions(r.Context(), streamID)
+	suggestions, err := s.probeManager.GetSuggestions(r.Context(), streamID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
 	if suggestions == nil {
-		suggestions = make([]*fallback.FallbackSuggestion, 0)
+		suggestions = make([]*probe.Suggestion, 0)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -924,12 +969,12 @@ func (s *Server) reprobeStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.fallbackManager == nil {
-		writeError(w, http.StatusServiceUnavailable, "fallback manager not available", "INTERNAL_ERROR")
+	if s.probeManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "probe manager not available", "INTERNAL_ERROR")
 		return
 	}
 
-	s.fallbackManager.Reprobe(r.Context(), streamID)
+	s.probeManager.Reprobe(r.Context(), streamID)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"stream_id": streamID,
@@ -957,7 +1002,7 @@ func (s *Server) getStreamRefAudio(w http.ResponseWriter, r *http.Request) {
 	serveWAV(w, audio, sampleRate, filename)
 }
 
-func (s *Server) getFallbackProbeAudio(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getSuggestionProbeAudio(w http.ResponseWriter, r *http.Request) {
 	streamID := chi.URLParam(r, "id")
 	rankStr := chi.URLParam(r, "rank")
 	rank, err := strconv.Atoi(rankStr)
@@ -965,9 +1010,9 @@ func (s *Server) getFallbackProbeAudio(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "rank must be 1-10", "VALIDATION")
 		return
 	}
-	probe, err := s.db.GetFallbackProbeAudio(r.Context(), streamID, rank)
+	probe, err := s.db.GetProbeAudio(r.Context(), streamID, rank)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "fallback suggestion not found", "NOT_FOUND")
+		writeError(w, http.StatusNotFound, "suggestion not found", "NOT_FOUND")
 		return
 	}
 	if len(probe.Audio) == 0 {

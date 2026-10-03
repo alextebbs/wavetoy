@@ -22,9 +22,15 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-function streamChip(state: string): { label: string; color: "green" | "red" | "blue" | "grey" } {
+function streamChip(state: string, health?: string[]): { label: string; color: "green" | "red" | "blue" | "grey" } {
   switch (state) {
     case "active":
+      if (health?.includes("too_busy"))
+        return { label: "S/BUSY", color: "red" };
+      if (health?.includes("audio_stale"))
+        return { label: "S/SND", color: "red" };
+      if (health?.includes("wf_stale"))
+        return { label: "S/WF", color: "red" };
       return { label: "ACTIVE", color: "green" };
     case "connecting":
       return { label: "S/CON", color: "blue" };
@@ -113,6 +119,8 @@ export function StreamsPage() {
           type?: string;
           stream?: Stream;
           stream_id?: string;
+          state?: string;
+          health?: string[];
         };
         if (msg.type === "stream_created" && msg.stream) {
           setStreams((prev) => [msg.stream!, ...prev]);
@@ -124,6 +132,12 @@ export function StreamsPage() {
           setStreams((prev) =>
             prev.map((s) =>
               s.id === msg.stream!.id ? msg.stream! : s,
+            ),
+          );
+        } else if (msg.type === "stream_state_changed" && msg.stream_id && typeof msg.state === "string") {
+          setStreams((prev) =>
+            prev.map((s) =>
+              s.id === msg.stream_id ? { ...s, state: msg.state!, health: msg.health ?? [] } : s,
             ),
           );
         }
@@ -238,19 +252,27 @@ export function StreamsPage() {
                       className="h-[26rem] w-full"
                     />
                     {(() => {
-                      const chip = streamChip(stream.state);
+                      const chip = streamChip(stream.state, stream.health);
+                      const isMonitor = stream.auto_probe && stream.quality_fallback && stream.keep_alive && stream.offload_chunks;
                       return (
-                        <span className={`absolute right-3 top-3 z-20 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-                          chip.color === "green"
-                            ? "bg-emerald-500/15 text-emerald-400"
-                            : chip.color === "red"
-                              ? "bg-destructive/15 text-destructive"
-                              : chip.color === "blue"
-                                ? "bg-primary/15 text-primary"
-                                : "bg-muted text-muted-foreground"
-                        }`}>
-                          {chip.label}
-                        </span>
+                        <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+                          {isMonitor && (
+                            <span className="shrink-0 rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-purple-400">
+                              Monitor
+                            </span>
+                          )}
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                            chip.color === "green"
+                              ? "bg-emerald-500/15 text-emerald-400"
+                              : chip.color === "red"
+                                ? "bg-destructive/15 text-destructive"
+                                : chip.color === "blue"
+                                  ? "bg-primary/15 text-primary"
+                                  : "bg-muted text-muted-foreground"
+                          }`}>
+                            {chip.label}
+                          </span>
+                        </div>
                       );
                     })()}
                     <div className="relative z-10 -mt-80 px-3 pb-3">
@@ -338,6 +360,7 @@ export function StreamsPage() {
                   isFavorite={picker.favoriteIds.has(picker.displayedSource.id)}
                   onToggleFavorite={picker.toggleFavorite}
                   onNotesChanged={picker.refreshNotes}
+                  showSNRChart
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

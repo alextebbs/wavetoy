@@ -108,6 +108,7 @@ export type Stream = {
   agc_gain_db?: number;
   buffer_minutes: number;
   state: string;
+  health: string[];
   version: number;
   filters?: FilterConfig;
   interpreter?: InterpreterConfig;
@@ -134,7 +135,7 @@ export type ProbeMetrics = {
   latency_ms: number;
 };
 
-export type FallbackSuggestion = {
+export type ProbeSuggestion = {
   stream_id: string;
   source_id: string;
   source_name: string;
@@ -148,10 +149,10 @@ export type FallbackSuggestion = {
   probe_metrics: ProbeMetrics;
 };
 
-export type FallbacksResponse = {
+export type SuggestionsResponse = {
   stream_id: string;
   auto_probe: boolean;
-  suggestions: FallbackSuggestion[];
+  suggestions: ProbeSuggestion[];
 };
 
 export type Peer = {
@@ -339,16 +340,16 @@ export async function deleteStream(streamId: string): Promise<void> {
   await apiDelete(`/streams/${streamId}`);
 }
 
-export async function getFallbacks(streamId: string): Promise<FallbacksResponse> {
-  return apiGet<FallbacksResponse>(`/streams/${streamId}/fallbacks`);
+export async function getSuggestions(streamId: string): Promise<SuggestionsResponse> {
+  return apiGet<SuggestionsResponse>(`/streams/${streamId}/suggestions`);
 }
 
 export async function reprobeStream(streamId: string): Promise<void> {
   await apiPost(`/streams/${streamId}/reprobe`, {});
 }
 
-export async function fetchFallbackRefAudio(streamId: string): Promise<ArrayBuffer> {
-  const res = await fetch(`/api/streams/${streamId}/fallbacks/ref-audio`, {
+export async function fetchRefAudio(streamId: string): Promise<ArrayBuffer> {
+  const res = await fetch(`/api/streams/${streamId}/suggestions/ref-audio`, {
     headers: { ...authHeaders() },
   });
   handleUnauthorized(res);
@@ -356,8 +357,8 @@ export async function fetchFallbackRefAudio(streamId: string): Promise<ArrayBuff
   return res.arrayBuffer();
 }
 
-export async function fetchFallbackProbeAudio(streamId: string, rank: number): Promise<ArrayBuffer> {
-  const res = await fetch(`/api/streams/${streamId}/fallbacks/${rank}/probe-audio`, {
+export async function fetchProbeAudio(streamId: string, rank: number): Promise<ArrayBuffer> {
+  const res = await fetch(`/api/streams/${streamId}/suggestions/${rank}/probe-audio`, {
     headers: { ...authHeaders() },
   });
   handleUnauthorized(res);
@@ -485,4 +486,40 @@ export async function downloadStreamLogs(streamId: string): Promise<void> {
   a.download = `logs-${streamId}.json`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export type SNRReading = {
+  source_id: string;
+  t: string;
+  snr: number;
+  users?: number;
+  max_users?: number;
+};
+
+export type SNRHistoryResponse = {
+  source_id: string;
+  source_name: string;
+  readings: SNRReading[];
+  ema: number | null;
+  stats: {
+    avg: number;
+    min: number;
+    max: number;
+    stddev: number;
+    count: number;
+  } | null;
+};
+
+export async function getSourceSNRHistory(
+  sourceId: string,
+  from?: string,
+  to?: string,
+): Promise<SNRHistoryResponse> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  return apiGet<SNRHistoryResponse>(
+    `/sources/${sourceId}/snr-history${qs ? `?${qs}` : ""}`,
+  );
 }

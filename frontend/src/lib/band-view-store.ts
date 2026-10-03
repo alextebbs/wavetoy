@@ -21,7 +21,7 @@ export interface BandViewState {
   resetView: () => void;
 }
 
-const MIN_SPAN_KHZ = 50;
+const MIN_SPAN_KHZ = 22;
 const REMOTE_LERP_DURATION_MS = 200;
 
 function clampView(

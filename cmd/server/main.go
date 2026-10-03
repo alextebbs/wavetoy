@@ -18,7 +18,7 @@ import (
 	"github.com/sammy/sdr-radio/internal/chunkring"
 	"github.com/sammy/sdr-radio/internal/config"
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/probe"
 	"github.com/sammy/sdr-radio/internal/interpreter"
 	s3client "github.com/sammy/sdr-radio/internal/s3"
 	"github.com/sammy/sdr-radio/internal/startup"
@@ -87,24 +87,55 @@ func main() {
 
 	srv := api.New(database, streamLogger, cfg.JWTSecret, cfg.JWTExpiry)
 
-	fallbackMgr := fallback.NewManager(database, streamLogger, healthChecker, srv.StreamManager(), func(streamID string, event map[string]any) {
+	probeMgr := probe.NewManager(database, streamLogger, healthChecker, srv.StreamManager(), func(streamID string, event map[string]any) {
 		srv.BroadcastToStream(streamID, event)
 	})
-	srv.SetFallbackManager(fallbackMgr)
+	srv.SetProbeManager(probeMgr)
 	srv.StreamManager().SetOnDegraded(func(streamID, reason string) {
-		fallbackMgr.HandleDegraded(streamID, reason)
+		probeMgr.HandleDegraded(streamID, reason)
 	})
-	srv.StreamManager().SetOnStateChange(func(streamID, state string) {
-		srv.BroadcastToStream(streamID, map[string]any{
-			"type":  "stream_state_changed",
-			"state": state,
-		})
+	srv.StreamManager().SetOnSuggestionSNR(func(streamID string) (float64, bool) {
+		suggestions, err := probeMgr.GetSuggestions(context.Background(), streamID)
+		if err != nil || len(suggestions) == 0 {
+			return 0, false
+		}
+		return suggestions[0].InBandSNRdB, true
 	})
-	srv.StreamManager().SetOnDataStale(func(streamID, channel string, stale bool) {
+	srv.StreamManager().SetOnIsFavorite(func(streamID, sourceID string) bool {
+		stream, err := database.GetStreamByID(context.Background(), streamID)
+		if err != nil || stream == nil {
+			return false
+		}
+		favs, err := database.ListFavoriteSourceIDs(context.Background(), stream.TenantID)
+		if err != nil {
+			return false
+		}
+		for _, id := range favs {
+			if id == sourceID {
+				return true
+			}
+		}
+		return false
+	})
+	probeMgr.SetGetBlacklist(func(streamID string) map[string]time.Time {
+		mon := srv.StreamManager().GetQualityMonitor(streamID)
+		if mon == nil {
+			return nil
+		}
+		return mon.Blacklist()
+	})
+	probeMgr.SetBlacklistSource(func(streamID, sourceID string) {
+		mon := srv.StreamManager().GetQualityMonitor(streamID)
+		if mon != nil {
+			mon.BlacklistSource(sourceID)
+		}
+	})
+	srv.StreamManager().SetOnStateChange(func(streamID, state string, health []string) {
 		srv.BroadcastToStream(streamID, map[string]any{
-			"type":    "stream_data_stale",
-			"channel": channel,
-			"stale":   stale,
+			"type":      "stream_state_changed",
+			"stream_id": streamID,
+			"state":     state,
+			"health":    health,
 		})
 	})
 	srv.StreamManager().SetOnInterpreterOutput(func(streamID string, output interpreter.Output) {
@@ -118,7 +149,7 @@ func main() {
 		if meta.EndedAt != nil {
 			endedAt = meta.EndedAt.Unix()
 		}
-		srv.BroadcastToStream(streamID, map[string]any{
+		evt := map[string]any{
 			"type":        "chunk_complete",
 			"index":       meta.Index,
 			"started_at":  meta.StartedAt.Unix(),
@@ -126,18 +157,27 @@ func main() {
 			"source_id":   meta.SourceID,
 			"wf_frames":   meta.WFFrames,
 			"audio_bytes": meta.AudioBytes,
-		})
+		}
+		if meta.InBandSNRdB != nil {
+			evt["in_band_snr_db"] = *meta.InBandSNRdB
+			evt["has_activity"] = *meta.InBandSNRdB >= 6.0
+		}
+		srv.BroadcastToStream(streamID, evt)
 	})
 
 	// Register whisper pool for voice interpreter
-	modelsDir := filepath.Join("data", "whisper-models")
-	if wsperpool.Available() {
-		pool := wsperpool.NewPool(modelsDir, "small")
-		defer pool.Close()
-		interpreter.RegisterWhisperPool(pool)
-		slog.Info("whisper pool registered", "models_dir", modelsDir)
+	if os.Getenv("DISABLE_WHISPER") == "1" {
+		slog.Info("whisper disabled via DISABLE_WHISPER=1")
 	} else {
-		slog.Info("whisper not available (build with -tags whisper to enable voice interpreter)")
+		modelsDir := filepath.Join("data", "whisper-models")
+		if wsperpool.Available() {
+			pool := wsperpool.NewPool(modelsDir, "small")
+			defer pool.Close()
+			interpreter.RegisterWhisperPool(pool)
+			slog.Info("whisper pool registered", "models_dir", modelsDir)
+		} else {
+			slog.Info("whisper not available (build with -tags whisper to enable voice interpreter)")
+		}
 	}
 
 	s3c := s3client.NewFromEnv()
@@ -152,7 +192,7 @@ func main() {
 	startup.Run(ctx, startup.Deps{
 		DB:          database,
 		StreamMgr:   srv.StreamManager(),
-		FallbackMgr: fallbackMgr,
+		ProbeMgr: probeMgr,
 	})
 
 	go func() {
@@ -166,6 +206,12 @@ func main() {
 				slog.Error("retention: delete expired chunks", "err", err)
 			} else if deleted > 0 {
 				slog.Info("retention: cleaned expired chunk manifest rows", "deleted", deleted)
+			}
+			snrDeleted, err := database.DeleteExpiredSNRReadings(ctx, cutoff)
+			if err != nil {
+				slog.Error("retention: delete expired snr readings", "err", err)
+			} else if snrDeleted > 0 {
+				slog.Info("retention: cleaned expired snr readings", "deleted", snrDeleted)
 			}
 			select {
 			case <-ctx.Done():

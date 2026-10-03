@@ -190,6 +190,7 @@ type Stream struct {
 	AGCGainDB                *float64  `json:"agc_gain_db,omitempty"`
 	BufferMinutes            int       `json:"buffer_minutes"`
 	State                    string    `json:"state"`
+	Health                   []string  `json:"health"`
 	Version                  int64              `json:"version"`
 	Filters                  FilterConfig       `json:"filters"`
 	Interpreter              interpreter.Config `json:"interpreter"`

@@ -1,13 +1,19 @@
 import { parseWFChunk, type WFChunkFrame } from "@/lib/chunk-parser";
-import type { ChunkSource, ChunkMeta } from "@/lib/chunk-loader";
-import type { WaterfallMarker } from "./waterfall-overlay";
+import { type ChunkManager, type ChunkEntry, type WaterfallMarker } from "@/lib/chunk-manager";
 import { streamLog, PerfBucket } from "@/lib/stream-logger";
+
+export type { ChunkManager, ChunkEntry, WaterfallMarker };
 
 export interface RendererOptions {
   minLevel?: number;
   maxLevel?: number;
   rowScale?: number;
   tileHeight?: number;
+}
+
+export interface LoadingChunkRegion {
+  startRow: number;
+  frameCount: number;
 }
 
 export interface OverlayState {
@@ -19,6 +25,7 @@ export interface OverlayState {
   maxScrollOffset: number;
   isLive: boolean;
   playbackRow: number | null;
+  loadingChunks: LoadingChunkRegion[];
 }
 
 export interface TuningPoint {
@@ -46,30 +53,7 @@ export interface BaseTile {
 const DEFAULT_TILE_HEIGHT = 256;
 const NUM_BINS = 1024;
 const MAX_ZOOM = 14;
-const EVICT_DISTANCE_ROWS = 4 * 480;
-
-interface ChunkEntry<T extends BaseTile> {
-  startedAt: number;
-  sourceId: string;
-  startRow: number;
-  frameCount: number;
-  complete: boolean;
-  loaded: boolean;
-  loading: boolean;
-  tiles: T[];
-  expectedWF: number;
-  audioBytes: number;
-  actualWF: number | null;
-  failCount: number;
-  nextRetryAt: number;
-}
-
-interface GapEntry {
-  startRow: number;
-  rowCount: number;
-}
-
-const GAP_CSS_PX = 60;
+const EVICT_DISTANCE_ROWS = 8 * 480;
 
 function coverageFromFrame(
   xBin: number,
@@ -90,20 +74,19 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   protected readonly tileHeight: number;
   protected readonly rowScale: number;
 
+  readonly manager: ChunkManager;
+
   protected liveTiles: T[] = [];
   protected liveTile!: T;
-  protected totalRows = 0;
-  protected chunks: ChunkEntry<T>[] = [];
-  protected gaps: GapEntry[] = [];
   protected minLevel: number;
   protected maxLevel: number;
   protected viewStartKHz = 0;
   protected viewEndKHz = 30000;
   protected needsRepaint = false;
 
-  protected scrollOffset = 0;
-  private lowestStartRow = 0;
   private queue: Uint8Array[] = [];
+  private lastXBin = -1;
+  private lastZoom = -1;
   private rafId: number | null = null;
 
   private autoLevel = true;
@@ -116,32 +99,37 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   protected dataEndKHz = 30000;
   private maxBandwidthKHz = 30000;
 
-  private chunkSource: ChunkSource | null = null;
-  private liveFrameCount = 0;
-  private liveChunkStartRow = 0;
-  private liveChunkStartedAt: number | null = null;
-  private streamSampleRate = 12000;
-  private streamChunkDurationS = 60;
-  private markers = new Map<string, WaterfallMarker>();
-
   private currentTuning: TuningPoint | null = null;
 
   onOverlayUpdate: ((state: OverlayState, markers: WaterfallMarker[]) => void) | null = null;
   onTuningTrace: ((points: TuningTracePoint[]) => void) | null = null;
-  onMarkerAdd: ((marker: WaterfallMarker) => void) | null = null;
-  onMarkerRemove: ((id: string) => void) | null = null;
 
   private perfFlush = new PerfBucket("perf.wf.flush");
   private perfFetch = new PerfBucket("perf.wf.fetchChunk");
 
-  constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
+  constructor(canvas: HTMLCanvasElement, manager: ChunkManager, options: RendererOptions = {}) {
     this.canvas = canvas;
+    this.manager = manager;
     this.tileHeight = options.tileHeight ?? DEFAULT_TILE_HEIGHT;
     this.rowScale = options.rowScale ?? 1;
     this.minLevel = options.minLevel ?? -110;
     this.maxLevel = options.maxLevel ?? -10;
     this.smoothMin = this.minLevel;
     this.smoothMax = this.maxLevel;
+
+    manager.onTilesEvicted = (entries) => {
+      for (const entry of entries) {
+        for (const tile of entry.tiles as T[]) this.destroyTile(tile);
+        entry.tiles = [];
+      }
+    };
+
+    manager.onCoordinateShift = (shift) => {
+      for (const tile of this.liveTiles) {
+        tile.startRow += shift;
+      }
+    };
+
     this.initContext();
     this.liveTile = this.createTile(0, this.dataStartKHz, this.dataEndKHz);
     this.liveTiles.push(this.liveTile);
@@ -203,7 +191,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     if (startKHz === this.dataStartKHz && endKHz === this.dataEndKHz) return;
 
     if (this.liveTile.rowCount > 0) {
-      this.liveTile = this.createTile(this.totalRows, startKHz, endKHz);
+      this.liveTile = this.createTile(this.manager.totalRows, startKHz, endKHz);
       this.liveTiles.push(this.liveTile);
     } else {
       this.liveTile.dataStartKHz = startKHz;
@@ -220,26 +208,54 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   }
 
   pushFrame(bins: Uint8Array, xBin: number, zoom: number): void {
-    const totalBins = this.numBins * (1 << MAX_ZOOM);
-    const binScale = 1 << (MAX_ZOOM - zoom);
-    const frameStart = (xBin / totalBins) * this.maxBandwidthKHz;
-    const frameEnd =
-      ((xBin + this.numBins * binScale) / totalBins) * this.maxBandwidthKHz;
+    if (xBin !== this.lastXBin || zoom !== this.lastZoom) {
+      this.lastXBin = xBin;
+      this.lastZoom = zoom;
 
-    if (
-      Math.abs(frameStart - this.dataStartKHz) > 0.5 ||
-      Math.abs(frameEnd - this.dataEndKHz) > 0.5
-    ) {
+      const totalBins = this.numBins * (1 << MAX_ZOOM);
+      const binScale = 1 << (MAX_ZOOM - zoom);
+      const frameStart = (xBin / totalBins) * this.maxBandwidthKHz;
+      const frameEnd =
+        ((xBin + this.numBins * binScale) / totalBins) * this.maxBandwidthKHz;
       this.setDataCoverage(frameStart, frameEnd);
     }
 
-    this.liveFrameCount++;
+    this.manager.liveFrameCount++;
+    this.manager.pendingRows++;
     this.queue.push(bins);
   }
 
   pushBins(bins: Uint8Array): void {
-    this.liveFrameCount++;
+    this.manager.liveFrameCount++;
+    this.manager.pendingRows++;
     this.queue.push(bins);
+  }
+
+  /**
+   * Drop all queued frames and advance totalRows to keep the coordinate system
+   * consistent. Used on tab wake-up to avoid rendering thousands of stale frames.
+   */
+  drainStaleQueue(): void {
+    const count = this.queue.length;
+    if (count === 0) return;
+    this.queue.length = 0;
+    this.manager.pendingRows = 0;
+    this.manager.totalRows += count;
+    if (this.manager.scrollOffset > 0) {
+      this.manager.scrollOffset += count;
+    }
+    // Reset the live tile so new frames start at the correct position
+    if (this.liveTile) {
+      this.destroyTile(this.liveTile);
+    }
+    this.liveTiles = this.liveTiles.filter((t) => t !== this.liveTile);
+    this.liveTile = this.createTile(
+      this.manager.totalRows,
+      this.dataStartKHz,
+      this.dataEndKHz,
+    );
+    this.liveTiles.push(this.liveTile);
+    this.needsRepaint = true;
   }
 
   startRenderLoop(): void {
@@ -271,14 +287,17 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   }
 
   destroy(): void {
+    streamLog.warn(
+      "wf.destroy",
+      `chunks=${this.manager.chunks.length} liveTiles=${this.liveTiles.length}`,
+    );
     this.stopRenderLoop();
     this.queue.length = 0;
     for (const tile of this.liveTiles) this.destroyTile(tile);
-    for (const chunk of this.chunks) {
-      for (const tile of chunk.tiles) this.destroyTile(tile);
+    for (const chunk of this.manager.chunks) {
+      for (const tile of chunk.tiles as T[]) this.destroyTile(tile);
     }
     this.liveTiles.length = 0;
-    this.chunks.length = 0;
     this.onDestroy();
   }
 
@@ -287,367 +306,103 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   }
 
   get rowCount(): number {
-    return this.totalRows;
+    return this.manager.totalRows;
   }
 
   get visibleRows(): number {
     const h = this.canvas.height;
-    return h > 0 ? Math.ceil(h / this.rowScale) : 0;
+    const v = h > 0 ? Math.ceil(h / this.rowScale) : 0;
+    this.manager.visibleRows = v;
+    return v;
   }
 
   cssToRows(px: number): number {
     const dpr = window.devicePixelRatio || 1;
-    return Math.round((px * dpr) / this.rowScale);
-  }
-
-  get chunkManifest(): ReadonlyArray<{
-    startedAt: number;
-    startRow: number;
-    frameCount: number;
-    complete: boolean;
-    audioBytes: number;
-  }> {
-    const result: Array<{
-      startedAt: number;
-      startRow: number;
-      frameCount: number;
-      complete: boolean;
-      audioBytes: number;
-    }> = this.chunks.map((c) => ({
-      startedAt: c.startedAt,
-      startRow: c.startRow,
-      frameCount: c.frameCount,
-      complete: c.complete,
-      audioBytes: c.audioBytes,
-    }));
-
-    if (result.length > 0) {
-      const last = result[result.length - 1];
-      if (!last.complete) {
-        const coveredEnd = last.startRow + last.frameCount;
-        const liveEnd = this.totalRows;
-        if (liveEnd > coveredEnd) {
-          result[result.length - 1] = {
-            ...last,
-            frameCount: liveEnd - last.startRow,
-          };
-        }
-        return result;
-      }
-    }
-
-    if (this.liveChunkStartedAt && this.totalRows > this.liveChunkStartRow) {
-      const lastEnd =
-        result.length > 0
-          ? result[result.length - 1].startRow +
-            result[result.length - 1].frameCount
-          : this.liveChunkStartRow;
-      if (this.liveChunkStartRow >= lastEnd) {
-        result.push({
-          startedAt: this.liveChunkStartedAt,
-          startRow: this.liveChunkStartRow,
-          frameCount: this.totalRows - this.liveChunkStartRow,
-          complete: false,
-          audioBytes: -1,
-        });
-      }
-    }
-
-    return result;
+    return (px * dpr) / this.rowScale;
   }
 
   get maxScrollOffset(): number {
-    return this.totalRows - this.lowestStartRow;
+    return this.manager.maxScrollOffset;
   }
 
   get isLive(): boolean {
-    return this.scrollOffset === 0;
+    return this.manager.isLive;
   }
 
-  private _playbackRow: number | null = null;
-
   get playbackRow(): number | null {
-    return this._playbackRow;
+    return this.manager.playbackRow;
   }
 
   set playbackRow(row: number | null) {
-    if (row === this._playbackRow) return;
-    this._playbackRow = row;
+    if (row === this.manager.playbackRow) return;
+    this.manager.playbackRow = row;
     this.needsRepaint = true;
   }
 
   getScrollOffset(): number {
-    return this.scrollOffset;
+    return this.manager.scrollOffset;
   }
 
   setScrollOffset(offset: number): void {
-    const clamped = Math.max(0, Math.min(offset, this.maxScrollOffset));
-    if (clamped === this.scrollOffset) return;
-    this.scrollOffset = clamped;
+    this.manager.setScrollOffset(offset);
     this.needsRepaint = true;
   }
 
   scrollToLive(): void {
-    this.setScrollOffset(0);
+    this.manager.scrollToLive();
+    this.needsRepaint = true;
   }
 
   requestRepaint(): void {
     this.needsRepaint = true;
   }
 
-  // ---------------------------------------------------------------------------
-  // Chunk-aware public API
-  // ---------------------------------------------------------------------------
+  get chunkManifest() {
+    return this.manager.chunkManifest;
+  }
 
   resetLiveFrameCount(): void {
-    this.liveFrameCount = 0;
+    this.manager.resetLiveFrameCount();
   }
 
-  setChunkSource(source: ChunkSource): void {
-    this.chunkSource = source;
-  }
-
-  async loadManifest(
-    chunkMetas: ChunkMeta[],
-    streamInfo?: { sampleRate: number; chunkDurationS: number },
-  ): Promise<number> {
-    if (streamInfo) {
-      this.streamSampleRate = streamInfo.sampleRate;
-      this.streamChunkDurationS = streamInfo.chunkDurationS;
-    }
-    const sorted = [...chunkMetas].sort(
-      (a, b) => a.started_at - b.started_at,
+  /**
+   * Kick off loading the initial visible set of chunk tiles after the manager
+   * has populated its chunk list (e.g. after loadManifest).
+   */
+  async loadInitialChunks(): Promise<void> {
+    const visibleRows = Math.ceil(
+      this.canvas.height / (this.rowScale * (window.devicePixelRatio || 1)),
     );
+    const topFromLive = this.manager.scrollOffset;
+    const bottomFromLive = this.manager.scrollOffset + visibleRows;
 
-    if (sorted.length === 0) return 0;
-
-    const liveCount = this.liveFrameCount;
-
-    const frameCounts: number[] = [];
-    const hasGapBefore: boolean[] = [];
-    let totalFrames = 0;
-
-    for (let i = 0; i < sorted.length; i++) {
-      const c = sorted[i];
-      let count = c.wf_frames;
-      if (i === sorted.length - 1 && !c.complete && liveCount > 0) {
-        count = Math.max(0, count - liveCount);
-      }
-      frameCounts.push(count);
-      totalFrames += count;
-
-      if (i > 0) {
-        const elapsed = c.started_at - sorted[i - 1].started_at;
-        hasGapBefore.push(elapsed > this.streamChunkDurationS * 1.5);
-      } else {
-        hasGapBefore.push(false);
-      }
-    }
-
-    if (totalFrames === 0) return 0;
-
-    const dpr = window.devicePixelRatio || 1;
-    const gapRowCount = Math.ceil(GAP_CSS_PX * dpr / this.rowScale);
-    const numGaps = hasGapBefore.filter(Boolean).length;
-
-    const endRowCount = gapRowCount;
-    let currentRow = -(totalFrames + numGaps * gapRowCount + endRowCount);
-    this.chunks = [];
-    this.gaps = [];
-
-    this.addMarker({
-      id: "history-end",
-      row: currentRow,
-      label: "END",
-      metadata: {
-        type: "end",
-        gapStartRow: currentRow,
-        gapRowCount: endRowCount,
-      },
+    const toLoad = this.manager.chunks.filter((s) => {
+      if (s.loaded || s.loading || s.frameCount === 0) return false;
+      const slotTop = this.manager.totalRows - s.startRow - s.frameCount;
+      const slotBot = this.manager.totalRows - s.startRow - 1;
+      return slotBot >= topFromLive && slotTop <= bottomFromLive;
     });
-    currentRow += endRowCount;
 
-    for (let i = 0; i < sorted.length; i++) {
-      const c = sorted[i];
-      const count = frameCounts[i];
-
-      if (hasGapBefore[i]) {
-        this.gaps.push({ startRow: currentRow, rowCount: gapRowCount });
-        this.addMarker({
-          id: `gap-${i}`,
-          row: currentRow,
-          label: "NO DATA",
-          metadata: {
-            type: "gap",
-            gapStartRow: currentRow,
-            gapRowCount: gapRowCount,
-          },
-        });
-        currentRow += gapRowCount;
-      }
-
-      const entry: ChunkEntry<T> = {
-        startedAt: c.started_at,
-        sourceId: c.source_id,
-        startRow: currentRow,
-        frameCount: count,
-        complete: c.complete,
-        loaded: false,
-        loading: false,
-        tiles: [],
-        expectedWF: c.wf_frames,
-        audioBytes: c.audio_bytes,
-        actualWF: null,
-        failCount: 0,
-        nextRetryAt: 0,
-      };
-      this.chunks.push(entry);
-
-      const markerRow = currentRow + count;
-      const expectedAudio =
-        this.streamSampleRate * this.streamChunkDurationS * 2;
-      this.addMarker({
-        id: `chunk-${c.started_at}`,
-        row: markerRow,
-        label: String(c.started_at),
-        metadata: {
-          started_at: c.started_at,
-          source_id: c.source_id,
-          complete: c.complete,
-          wf_frames: c.wf_frames,
-          audio_bytes: c.audio_bytes,
-          audio_expected: expectedAudio,
-        },
-      });
-
-      currentRow += count;
-    }
-
-    if (this.chunks.length > 0) {
-      this.lowestStartRow = -(totalFrames + numGaps * gapRowCount + endRowCount);
-      this.needsRepaint = true;
-    }
-
-    const last = this.chunks[this.chunks.length - 1];
-    if (last && !last.complete) {
-      this.liveChunkStartedAt = last.startedAt;
-    }
-
-    await this.loadInitialChunks();
-    return totalFrames;
-  }
-
-  onChunkComplete(msg: {
-    started_at: number;
-    ended_at?: number;
-    source_id?: string;
-    wf_frames?: number;
-    audio_bytes?: number;
-  }): void {
-    const existing = this.chunks.find((s) => s.startedAt === msg.started_at);
-    if (existing) {
-      existing.complete = true;
-      if (msg.wf_frames != null) existing.expectedWF = msg.wf_frames;
-      if (msg.audio_bytes != null) existing.audioBytes = msg.audio_bytes;
-
-      if (msg.wf_frames != null && msg.wf_frames > existing.frameCount) {
-        existing.frameCount = msg.wf_frames;
-      }
-
-      const markerId = `chunk-${existing.startedAt}`;
-      const marker = this.markers.get(markerId);
-      if (marker) {
-        marker.row = existing.startRow + existing.frameCount;
-        this.addMarker(marker);
-      }
-
-      if (!existing.loading) {
-        existing.loaded = false;
-        this.fetchChunk(existing);
-      }
-
-      this.liveChunkStartRow = existing.startRow + existing.frameCount;
-      this.liveChunkStartedAt = msg.ended_at ?? null;
+    if (toLoad.length === 0) {
+      const fallback = this.manager.chunks
+        .slice(-3)
+        .filter((s) => !s.loaded && !s.loading && s.frameCount > 0);
+      await Promise.all(fallback.map((s) => this.fetchChunk(s)));
       return;
     }
 
-    const endRow = this.totalRows;
-    const frameCount = endRow - this.liveChunkStartRow;
-    const expectedWF = msg.wf_frames ?? frameCount;
-    const audioBytes = msg.audio_bytes ?? 0;
-    if (frameCount > 0) {
-      const entry: ChunkEntry<T> = {
-        startedAt: msg.started_at,
-        sourceId: msg.source_id ?? "",
-        startRow: this.liveChunkStartRow,
-        frameCount,
-        complete: true,
-        loaded: false,
-        loading: false,
-        tiles: [],
-        expectedWF,
-        audioBytes,
-        actualWF: null,
-        failCount: 0,
-        nextRetryAt: 0,
-      };
-      this.chunks.push(entry);
-      this.fetchChunk(entry);
+    const firstIdx = this.manager.chunks.indexOf(toLoad[0]);
+    const lastIdx = this.manager.chunks.indexOf(toLoad[toLoad.length - 1]);
+    if (firstIdx > 0) {
+      const prev = this.manager.chunks[firstIdx - 1];
+      if (!prev.loaded && !prev.loading && prev.frameCount > 0) toLoad.unshift(prev);
+    }
+    if (lastIdx < this.manager.chunks.length - 1) {
+      const next = this.manager.chunks[lastIdx + 1];
+      if (!next.loaded && !next.loading && next.frameCount > 0) toLoad.push(next);
     }
 
-    const expectedAudio =
-      this.streamSampleRate * this.streamChunkDurationS * 2;
-    this.addMarker({
-      id: `chunk-${msg.started_at}`,
-      row: endRow,
-      label: String(msg.started_at),
-      metadata: {
-        started_at: msg.started_at,
-        ended_at: msg.ended_at,
-        source_id: msg.source_id,
-        complete: true,
-        wf_frames: frameCount,
-        audio_bytes: audioBytes,
-        audio_expected: expectedAudio,
-      },
-    });
-
-    this.liveChunkStartRow = endRow;
-    this.liveChunkStartedAt = msg.ended_at ?? null;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Markers
-  // ---------------------------------------------------------------------------
-
-  private addMarker(marker: WaterfallMarker): void {
-    this.markers.set(marker.id, marker);
-    this.onMarkerAdd?.(marker);
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private removeMarker(id: string): void {
-    this.markers.delete(id);
-    this.onMarkerRemove?.(id);
-  }
-
-  private updateChunkMarker(entry: ChunkEntry<T>): void {
-    const id = `chunk-${entry.startedAt}`;
-    const existing = this.markers.get(id);
-    if (!existing) return;
-    const expectedAudio =
-      this.streamSampleRate * this.streamChunkDurationS * 2;
-    this.addMarker({
-      ...existing,
-      row: entry.startRow + entry.frameCount,
-      metadata: {
-        ...existing.metadata,
-        complete: entry.complete,
-        wf_frames: entry.actualWF ?? entry.expectedWF,
-        audio_bytes: entry.audioBytes,
-        audio_expected: expectedAudio,
-      },
-    });
+    await Promise.all(toLoad.map((s) => this.fetchChunk(s)));
   }
 
   // ---------------------------------------------------------------------------
@@ -655,10 +410,15 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   // ---------------------------------------------------------------------------
 
   private flush(): void {
-    const lines = this.queue.splice(0, this.queue.length);
+    const MAX_BATCH = 500;
+    const batchSize = Math.min(this.queue.length, MAX_BATCH);
+    const lines = this.queue.splice(0, batchSize);
+    this.manager.pendingRows -= lines.length;
     const hasNewData = lines.length > 0;
+    const hasBacklog = this.queue.length > 0;
 
     if (!hasNewData && !this.needsRepaint) return;
+    if (hasBacklog) this.needsRepaint = true;
 
     const t0 = performance.now();
 
@@ -673,17 +433,25 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     this.checkViewport();
     this.drawFrame();
     this.needsRepaint = false;
+    const loadingChunks: LoadingChunkRegion[] = [];
+    for (const c of this.manager.chunks) {
+      if (c.loading && c.frameCount > 0) {
+        loadingChunks.push({ startRow: c.startRow, frameCount: c.frameCount });
+      }
+    }
+
     const state: OverlayState = {
-      totalRows: this.totalRows,
-      scrollOffset: this.scrollOffset,
+      totalRows: this.manager.totalRows,
+      scrollOffset: this.manager.scrollOffset,
       rowScale: this.rowScale,
       height: this.canvas.height,
       dpr: window.devicePixelRatio || 1,
-      maxScrollOffset: this.maxScrollOffset,
-      isLive: this.isLive,
-      playbackRow: this.playbackRow,
+      maxScrollOffset: this.manager.maxScrollOffset,
+      isLive: this.manager.isLive,
+      playbackRow: this.manager.playbackRow,
+      loadingChunks,
     };
-    this.onOverlayUpdate?.(state, [...this.markers.values()]);
+    this.onOverlayUpdate?.(state, [...this.manager.markers.values()]);
 
     if (this.onTuningTrace) {
       this.onTuningTrace(this.computeTuningTrace());
@@ -695,7 +463,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   private appendToLiveTile(bins: Uint8Array): void {
     if (this.liveTile.rowCount >= this.tileHeight) {
       this.liveTile = this.createTile(
-        this.totalRows,
+        this.manager.totalRows,
         this.dataStartKHz,
         this.dataEndKHz,
       );
@@ -707,10 +475,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     tile.tuning.push(this.currentTuning ? { ...this.currentTuning } : null);
     this.writeRow(tile, bins, tile.rowCount);
     tile.rowCount++;
-    this.totalRows++;
-    if (this.scrollOffset > 0) {
-      this.scrollOffset++;
-    }
+    this.manager.advanceLive();
   }
 
   private pruneLiveTiles(): void {
@@ -720,7 +485,7 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     this.liveTiles = this.liveTiles.filter((tile) => {
       if (tile === this.liveTile) return true;
       const displayTopY =
-        (this.totalRows - tile.startRow - tile.rowCount - this.scrollOffset) *
+        (this.manager.totalRows - tile.startRow - tile.rowCount - this.manager.scrollOffset) *
         this.rowScale;
       if (displayTopY >= height) {
         this.destroyTile(tile);
@@ -760,76 +525,65 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
   // Chunk loading / eviction
   // ---------------------------------------------------------------------------
 
-  private checkViewport(): void {
-    if (this.chunks.length === 0 || !this.chunkSource) return;
+  private lastChunkDiagAt = 0;
 
+  private checkViewport(): void {
     const visibleRows = Math.ceil(
       this.canvas.height / (this.rowScale * (window.devicePixelRatio || 1)),
     );
-    const topFromLive = this.scrollOffset;
-    const bottomFromLive = this.scrollOffset + visibleRows;
+    this.manager.visibleRows = visibleRows;
+    const topFromLive = this.manager.scrollOffset;
+    const bottomFromLive = this.manager.scrollOffset + visibleRows;
 
-    for (let ci = 0; ci < this.chunks.length; ci++) {
-      const slot = this.chunks[ci];
+    this.emitChunkDiag(topFromLive, bottomFromLive);
+
+    if (this.manager.chunks.length === 0 || !this.manager.source) return;
+
+    const prefetchTop = Math.max(0, topFromLive - visibleRows);
+    const prefetchBottom = bottomFromLive + visibleRows;
+
+    for (let ci = 0; ci < this.manager.chunks.length; ci++) {
+      const slot = this.manager.chunks[ci];
       const slotTopFromLive =
-        this.totalRows - slot.startRow - slot.frameCount;
-      const slotBottomFromLive = this.totalRows - slot.startRow - 1;
+        this.manager.totalRows - slot.startRow - slot.frameCount;
+      const slotBottomFromLive = this.manager.totalRows - slot.startRow - 1;
 
-      const inView =
-        slotBottomFromLive >= topFromLive &&
-        slotTopFromLive <= bottomFromLive;
+      const inPrefetchZone =
+        slotBottomFromLive >= prefetchTop &&
+        slotTopFromLive <= prefetchBottom;
 
-      const nearView = this.isNearViewport(ci, topFromLive, bottomFromLive);
-
-      if ((inView || nearView) && !slot.loaded && !slot.loading && slot.frameCount > 0) {
+      if (inPrefetchZone && !slot.loaded && !slot.loading && slot.frameCount > 0) {
         if (slot.failCount === 0 || performance.now() >= slot.nextRetryAt) {
           this.fetchChunk(slot);
         }
       }
+
+      if (!inPrefetchZone && slot.loading && slot.abortController) {
+        streamLog.debug("wf.chunk.abort", `chunk=${slot.startedAt} scrolled out of view`);
+        slot.abortController.abort();
+      }
     }
 
     this.evictDistant(topFromLive, bottomFromLive);
+    this.manager.checkEdges(topFromLive, bottomFromLive);
   }
 
-  private isNearViewport(
-    chunkIdx: number,
-    topFromLive: number,
-    bottomFromLive: number,
-  ): boolean {
-    for (const offset of [-1, 1]) {
-      const ni = chunkIdx + offset;
-      if (ni < 0 || ni >= this.chunks.length) continue;
-      const neighbor = this.chunks[ni];
-      const nTop = this.totalRows - neighbor.startRow - neighbor.frameCount;
-      const nBot = this.totalRows - neighbor.startRow - 1;
-      if (nBot >= topFromLive && nTop <= bottomFromLive) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private async loadInitialChunks(): Promise<void> {
-    const toLoad = this.chunks
-      .slice(-3)
-      .filter((s) => !s.loaded && !s.loading && s.frameCount > 0);
-    await Promise.all(toLoad.map((s) => this.fetchChunk(s)));
-  }
-
-  private async fetchChunk(entry: ChunkEntry<T>): Promise<void> {
-    if (!this.chunkSource) return;
+  private async fetchChunk(entry: ChunkEntry): Promise<void> {
+    if (!this.manager.source) return;
     entry.loading = true;
+    const ac = new AbortController();
+    entry.abortController = ac;
     const t0 = performance.now();
     try {
-      const buffer = await this.chunkSource.fetchWF(entry.startedAt);
+      const buffer = await this.manager.source.fetchWF(entry.startedAt, ac.signal);
       let frames = parseWFChunk(buffer);
       const fetchedCount = frames.length;
 
       const isNewest =
-        this.chunks.length > 0 &&
-        this.chunks[this.chunks.length - 1] === entry;
+        this.manager.chunks.length > 0 &&
+        this.manager.chunks[this.manager.chunks.length - 1] === entry;
       if (isNewest && !entry.complete) {
-        const liveCount = this.liveFrameCount;
+        const liveCount = this.manager.liveFrameCount;
         if (liveCount > 0) {
           const trimmed = frames.length - liveCount;
           frames = trimmed > 0 ? frames.slice(0, trimmed) : [];
@@ -843,28 +597,52 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       entry.actualWF = fetchedCount;
       entry.loaded = true;
       this.retireLiveTiles(entry.startRow, entry.startRow + entry.frameCount);
-      this.updateChunkMarker(entry);
+      this.manager.addMarker(this.buildChunkMarker(entry));
 
       const elapsed = performance.now() - t0;
       this.perfFetch.record(elapsed);
       streamLog.debug(
         "perf.wf.fetchChunk",
-        `frames=${fetchedCount} elapsed=${elapsed.toFixed(1)}ms`,
+        `chunk=${entry.startedAt} frames=${fetchedCount} tiles=${entry.tiles.length} elapsed=${elapsed.toFixed(1)}ms`,
       );
     } catch (err) {
-      entry.failCount++;
-      const MAX_RETRIES = 5;
-      if (entry.failCount >= MAX_RETRIES) {
-        entry.loaded = true;
-        streamLog.warn("wf.chunk.failed", `chunk=${entry.startedAt} giving up after ${MAX_RETRIES} failures`);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        streamLog.debug("wf.chunk.aborted", `chunk=${entry.startedAt}`);
       } else {
-        const backoffMs = Math.min(2000 * Math.pow(2, entry.failCount - 1), 30000);
-        entry.nextRetryAt = performance.now() + backoffMs;
-        streamLog.warn("wf.chunk.retry", `chunk=${entry.startedAt} attempt=${entry.failCount}/${MAX_RETRIES} backoff=${backoffMs}ms err=${err}`);
+        entry.failCount++;
+        const MAX_RETRIES = 5;
+        if (entry.failCount >= MAX_RETRIES) {
+          entry.loaded = true;
+          streamLog.warn("wf.chunk.failed", `chunk=${entry.startedAt} giving up after ${MAX_RETRIES} failures`);
+        } else {
+          const backoffMs = Math.min(2000 * Math.pow(2, entry.failCount - 1), 30000);
+          entry.nextRetryAt = performance.now() + backoffMs;
+          streamLog.warn("wf.chunk.retry", `chunk=${entry.startedAt} attempt=${entry.failCount}/${MAX_RETRIES} backoff=${backoffMs}ms err=${err}`);
+        }
       }
     } finally {
       entry.loading = false;
+      entry.abortController = null;
     }
+  }
+
+  private buildChunkMarker(entry: ChunkEntry): WaterfallMarker {
+    const id = `chunk-${entry.startedAt}`;
+    const existing = this.manager.markers.get(id);
+    const expectedAudio =
+      this.manager.streamSampleRate * this.manager.streamChunkDurationS * 2;
+    return {
+      id,
+      row: entry.startRow + entry.frameCount,
+      label: existing?.label ?? String(entry.startedAt),
+      metadata: {
+        ...(existing?.metadata ?? {}),
+        complete: entry.complete,
+        wf_frames: entry.actualWF ?? entry.expectedWF,
+        audio_bytes: entry.audioBytes,
+        audio_expected: expectedAudio,
+      },
+    };
   }
 
   private retireLiveTiles(startRow: number, endRow: number): void {
@@ -883,10 +661,37 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     }
   }
 
+  private computeChunkLevels(frames: WFChunkFrame[]): {
+    min: number;
+    max: number;
+  } {
+    const sampleBins: number[] = [];
+    const step = Math.max(1, Math.floor(frames.length / 20));
+    for (let i = 0; i < frames.length; i += step) {
+      const bins = frames[i].bins;
+      for (let j = 0; j < bins.length; j++) {
+        sampleBins.push(bins[j] - 255);
+      }
+    }
+    sampleBins.sort((a, b) => a - b);
+    const p50 = sampleBins[Math.floor(sampleBins.length * 0.5)];
+    const p95 = sampleBins[Math.floor(sampleBins.length * 0.95)];
+    const min = p50 - 10;
+    const max = Math.max(p95 + 20, min + 30);
+    return { min, max };
+  }
+
   private insertFramesAsChunkTiles(
-    entry: ChunkEntry<T>,
+    entry: ChunkEntry,
     frames: WFChunkFrame[],
   ): void {
+    const savedMin = this.minLevel;
+    const savedMax = this.maxLevel;
+
+    const levels = this.computeChunkLevels(frames);
+    this.minLevel = levels.min;
+    this.maxLevel = levels.max;
+
     let i = 0;
     let row = entry.startRow;
     entry.tiles = [];
@@ -926,16 +731,49 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       i = j;
     }
 
+    this.minLevel = savedMin;
+    this.maxLevel = savedMax;
     this.needsRepaint = true;
   }
 
+  private emitChunkDiag(topFromLive: number, bottomFromLive: number): void {
+    const now = performance.now();
+    if (now - this.lastChunkDiagAt < 5000) return;
+    this.lastChunkDiagAt = now;
+
+    let loaded = 0;
+    let withTiles = 0;
+    let loading = 0;
+    let failed = 0;
+    let inView = 0;
+
+    for (const c of this.manager.chunks) {
+      if (c.loaded) loaded++;
+      if (c.tiles.length > 0) withTiles++;
+      if (c.loading) loading++;
+      if (c.failCount > 0) failed++;
+      const top = this.manager.totalRows - c.startRow - c.frameCount;
+      const bot = this.manager.totalRows - c.startRow - 1;
+      if (bot >= topFromLive && top <= bottomFromLive) inView++;
+    }
+
+    streamLog.debug(
+      "wf.chunk.diag",
+      `chunks=${this.manager.chunks.length} loaded=${loaded} withTiles=${withTiles} ` +
+      `loading=${loading} failed=${failed} inView=${inView} ` +
+      `liveTiles=${this.liveTiles.length} totalRows=${this.manager.totalRows} ` +
+      `scroll=${this.manager.scrollOffset} view=${topFromLive}-${bottomFromLive} ` +
+      `chunkSrc=${this.manager.source ? "yes" : "NO"}`,
+    );
+  }
+
   private evictDistant(topFromLive: number, bottomFromLive: number): void {
-    for (const entry of this.chunks) {
+    for (const entry of this.manager.chunks) {
       if (!entry.loaded) continue;
 
       const slotTopFromLive =
-        this.totalRows - entry.startRow - entry.frameCount;
-      const slotBottomFromLive = this.totalRows - entry.startRow - 1;
+        this.manager.totalRows - entry.startRow - entry.frameCount;
+      const slotBottomFromLive = this.manager.totalRows - entry.startRow - 1;
 
       const dist = Math.max(
         0,
@@ -946,9 +784,15 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       );
 
       if (dist > EVICT_DISTANCE_ROWS) {
-        for (const tile of entry.tiles) this.destroyTile(tile);
+        streamLog.debug(
+          "wf.chunk.evict",
+          `chunk=${entry.startedAt} tiles=${entry.tiles.length} dist=${dist} failCount=${entry.failCount}`,
+        );
+        for (const tile of entry.tiles as T[]) this.destroyTile(tile);
         entry.tiles = [];
         entry.loaded = false;
+        entry.failCount = 0;
+        entry.nextRetryAt = 0;
       }
     }
   }
@@ -957,29 +801,28 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
     const { width, height } = this.canvas;
     if (width === 0 || height === 0) return [];
     const dpr = window.devicePixelRatio || 1;
-    const cssHeight = height / dpr;
     const viewSpan = this.viewEndKHz - this.viewStartKHz;
     if (viewSpan <= 0) return [];
 
-    const visibleTop = this.scrollOffset;
-    const visibleBot = this.scrollOffset + Math.ceil(height / this.rowScale);
+    const visibleTop = this.manager.scrollOffset;
+    const visibleBot = this.manager.scrollOffset + Math.ceil(height / this.rowScale);
 
     const points: TuningTracePoint[] = [];
 
     const collectTile = (tile: T) => {
       if (tile.rowCount === 0) return;
-      const tileTopFromLive = this.totalRows - tile.startRow - tile.rowCount;
-      const tileBotFromLive = this.totalRows - tile.startRow - 1;
+      const tileTopFromLive = this.manager.totalRows - tile.startRow - tile.rowCount;
+      const tileBotFromLive = this.manager.totalRows - tile.startRow - 1;
       if (tileTopFromLive > visibleBot || tileBotFromLive < visibleTop) return;
 
       for (let i = 0; i < tile.rowCount; i++) {
         const tuning = tile.tuning[i];
         if (!tuning) continue;
 
-        const rowFromLive = this.totalRows - (tile.startRow + i);
+        const rowFromLive = this.manager.totalRows - (tile.startRow + i);
         if (rowFromLive < visibleTop || rowFromLive > visibleBot) continue;
 
-        const canvasY = (rowFromLive - this.scrollOffset) * this.rowScale;
+        const canvasY = (rowFromLive - this.manager.scrollOffset) * this.rowScale;
         const yCss = canvasY / dpr;
 
         const centerX = (tuning.freqKHz - this.viewStartKHz) / viewSpan;
@@ -990,8 +833,8 @@ export abstract class WaterfallRendererBase<T extends BaseTile> {
       }
     };
 
-    for (const chunk of this.chunks) {
-      for (const tile of chunk.tiles) collectTile(tile);
+    for (const chunk of this.manager.chunks) {
+      for (const tile of chunk.tiles as T[]) collectTile(tile);
     }
     for (const tile of this.liveTiles) collectTile(tile);
 

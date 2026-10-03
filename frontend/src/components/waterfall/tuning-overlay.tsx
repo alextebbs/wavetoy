@@ -16,6 +16,8 @@ interface TuningOverlayProps {
   onBandwidthChange?: (lo: number, hi: number) => void;
   /** When true, use blue playback colors for the passband */
   playbackMode?: boolean;
+  /** Live in-band SNR reading in dB, shown at the bottom of the tuning overlay */
+  snrDB?: number | null;
 }
 
 type DragKind = "left" | "right" | "center";
@@ -31,6 +33,7 @@ export function TuningOverlay({
   onFrequencyChange,
   onBandwidthChange,
   playbackMode,
+  snrDB,
 }: TuningOverlayProps) {
   const startKHz = useBandViewStore((s) => s.startKHz);
   const endKHz = useBandViewStore((s) => s.endKHz);
@@ -267,6 +270,45 @@ export function TuningOverlay({
           />
         </>
       )}
+      {/* SNR reading — slides up from bottom on hover/drag */}
+      <div
+        className="absolute z-50 pointer-events-none"
+        style={{
+          bottom: 0,
+          left: `${centerPct}%`,
+          transform: `translateX(-50%) translateY(${snrDB != null && (hoveredElement || activeElement) ? "0%" : "100%"})`,
+          opacity: snrDB != null && (hoveredElement || activeElement) ? 1 : 0,
+          transition: [
+            animate && !isDragging ? "left 200ms ease-out" : "",
+            "transform 250ms cubic-bezier(0.4, 0, 0.2, 1)",
+            "opacity 250ms cubic-bezier(0.4, 0, 0.2, 1)",
+          ].filter(Boolean).join(", "),
+        }}
+      >
+        <div
+          style={{
+            padding: "5px 10px 6px",
+            borderRadius: "4px 4px 0 0",
+            backgroundColor: "rgba(0, 0, 0, 0.7)",
+            backdropFilter: "blur(8px)",
+            WebkitBackdropFilter: "blur(8px)",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: '"Xanh Mono", monospace',
+              fontSize: 18,
+              lineHeight: 1,
+              color: "rgba(255, 255, 255, 0.85)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {snrDB != null ? (
+              <>{snrDB >= 0 ? "+" : "-"}{Math.abs(snrDB).toFixed(1).padStart(4, "0")}<span style={{ fontSize: 12, opacity: 0.7 }}> dB</span></>
+            ) : "—"}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

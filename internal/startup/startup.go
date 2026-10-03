@@ -5,14 +5,14 @@ import (
 	"log/slog"
 
 	"github.com/sammy/sdr-radio/internal/db"
-	"github.com/sammy/sdr-radio/internal/fallback"
+	"github.com/sammy/sdr-radio/internal/probe"
 	"github.com/sammy/sdr-radio/internal/streammgr"
 )
 
 type Deps struct {
 	DB          *db.DB
 	StreamMgr   *streammgr.Manager
-	FallbackMgr *fallback.Manager
+	ProbeMgr *probe.Manager
 }
 
 // Run executes all post-boot startup tasks in a background goroutine.
@@ -29,15 +29,21 @@ func run(ctx context.Context, d Deps) {
 	}
 
 	for _, stream := range streams {
-		if stream.AutoProbe {
-			d.FallbackMgr.Enable(ctx, stream.ID)
+		if stream.AutoProbe || stream.QualityFallback {
+			d.ProbeMgr.Enable(ctx, stream.ID)
 		}
 
-		if stream.KeepAlive {
-			slog.Info("startup: auto-connecting keep-alive stream", "stream", stream.ID, "source", stream.SourceID)
+		shouldConnect := stream.KeepAlive || stream.QualityFallback
+		if shouldConnect {
+			slog.Info("startup: auto-connecting stream", "stream", stream.ID, "source", stream.SourceID,
+				"keep_alive", stream.KeepAlive, "quality_fallback", stream.QualityFallback)
 			if err := d.StreamMgr.EnsureRunning(ctx, stream); err != nil {
-				slog.Error("startup: keep-alive connect failed", "stream", stream.ID, "err", err)
+				slog.Error("startup: auto-connect failed", "stream", stream.ID, "err", err)
 			}
+		}
+
+		if stream.QualityFallback {
+			d.StreamMgr.SetQualityFallback(stream.ID, true, stream)
 		}
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/sammy/sdr-radio/internal/snr"
 )
 
 // WFFrame is a single waterfall frame stored in a chunk.
@@ -41,6 +43,8 @@ type Chunk struct {
 	SampleRate int
 	WFFrames   []WFFrame
 	Events     []Event
+	StateSnap  uint8
+	HealthSnap uint8
 }
 
 // ChunkMeta is the metadata for a chunk, returned by Available().
@@ -55,6 +59,9 @@ type ChunkMeta struct {
 	WFZoom        uint16     `json:"wf_zoom"`
 	WFZoomChanged bool       `json:"wf_zoom_changed"`
 	SourceID      string     `json:"source_id"`
+	State         uint8      `json:"state"`
+	Health        uint8      `json:"health"`
+	InBandSNRdB   *float64   `json:"in_band_snr_db"`
 }
 
 func metaFromChunk(c *Chunk) ChunkMeta {
@@ -66,6 +73,8 @@ func metaFromChunk(c *Chunk) ChunkMeta {
 		WFFrames:   len(c.WFFrames),
 		Events:     len(c.Events),
 		SourceID:   c.SourceID,
+		State:      c.StateSnap,
+		Health:     c.HealthSnap,
 	}
 	if c.Complete {
 		m.EndedAt = &c.EndedAt
@@ -79,7 +88,40 @@ func metaFromChunk(c *Chunk) ChunkMeta {
 			}
 		}
 	}
+	m.InBandSNRdB = ChunkSNR(c)
 	return m
+}
+
+// ChunkSNR computes the aggregate in-band SNR from a chunk's waterfall frames.
+// Returns nil if the computation fails (no WF frames, passband outside view, etc.).
+func ChunkSNR(chunk *Chunk) *float64 {
+	if len(chunk.WFFrames) == 0 {
+		return nil
+	}
+
+	f := chunk.WFFrames[0]
+	band := snr.BandConfig{
+		CenterKHz:    float64(f.FreqKHz),
+		PassbandLoHz: int(f.PassbandLo),
+		PassbandHiHz: int(f.PassbandHi),
+	}
+
+	frames := make([]snr.WFFrameData, 0, len(chunk.WFFrames))
+	for _, wf := range chunk.WFFrames {
+		frames = append(frames, snr.WFFrameData{
+			Bins: wf.Bins,
+			XBin: wf.XBin,
+			Zoom: wf.Zoom,
+		})
+	}
+
+	result, err := snr.FromWFFrames(frames, band)
+	if err != nil {
+		return nil
+	}
+
+	v := result.InBandSNRdB
+	return &v
 }
 
 // ChunkSink receives completed chunks (e.g. for S3 upload in monitoring mode).
@@ -90,6 +132,9 @@ type ChunkSink interface {
 // OnRotate is called when a chunk rotation occurs, with the completed chunk's metadata.
 // Used to notify WebSocket subscribers.
 type OnRotate func(meta ChunkMeta)
+
+// HealthSnapshotFunc returns a point-in-time (stateInt, healthBitmask) for embedding in chunk metadata.
+type HealthSnapshotFunc func() (uint8, uint8)
 
 // ChunkRing is a ring buffer of fixed-duration chunks that captures audio,
 // waterfall, and events together. Rotation is wall-clock driven via a ticker.
@@ -109,7 +154,8 @@ type ChunkRing struct {
 	sinkCh   chan *Chunk
 	sinkDone chan struct{}
 
-	onRotate OnRotate
+	onRotate       OnRotate
+	healthSnapshot HealthSnapshotFunc
 
 	sourceID_ string
 
@@ -187,6 +233,11 @@ func (cr *ChunkRing) rotate() {
 		cr.ringCount++
 	}
 	cr.totalChunks++
+
+	healthSnap := cr.healthSnapshot
+	if healthSnap != nil {
+		completed.StateSnap, completed.HealthSnap = healthSnap()
+	}
 
 	if cr.sink != nil {
 		select {
@@ -295,6 +346,14 @@ func (cr *ChunkRing) runSinkWorker(done chan struct{}) {
 func (cr *ChunkRing) SetOnRotate(fn OnRotate) {
 	cr.mu.Lock()
 	cr.onRotate = fn
+	cr.mu.Unlock()
+}
+
+// SetHealthSnapshot registers a function that returns (stateInt, healthBitmask)
+// to be captured in chunk metadata at rotation time.
+func (cr *ChunkRing) SetHealthSnapshot(fn HealthSnapshotFunc) {
+	cr.mu.Lock()
+	cr.healthSnapshot = fn
 	cr.mu.Unlock()
 }
 

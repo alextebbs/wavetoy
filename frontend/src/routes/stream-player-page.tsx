@@ -1,6 +1,6 @@
 import { AudioCropModal } from "@/components/audio-crop-modal";
 import { ErrorPage } from "@/components/error-page";
-import { FallbackSection } from "@/components/fallback-section";
+import { SuggestionsSection } from "@/components/suggestions-section";
 import { FiltersSection } from "@/components/filters-section";
 import { FrequencyInput } from "@/components/frequency-input";
 import { LogsPanel } from "@/components/logs-panel";
@@ -18,7 +18,7 @@ import { BandViewport } from "@/components/waterfall/band-viewport";
 import { FrequencyScale } from "@/components/waterfall/frequency-scale";
 import { TuningOverlay } from "@/components/waterfall/tuning-overlay";
 import { WaterfallDisplayGL as WaterfallDisplay } from "@/components/waterfall/waterfall-display-gl";
-import { WaterfallTimeline, type WaterfallTimelineHandle } from "@/components/waterfall/waterfall-timeline";
+import { WaterfallMinimap, type WaterfallMinimapHandle } from "@/components/waterfall/waterfall-minimap";
 import type { WaterfallHandle } from "@/components/waterfall/types";
 import { useBandViewStore } from "@/lib/band-view-store";
 import {
@@ -40,7 +40,7 @@ import { getToken } from "@/lib/auth";
 import { useSourcePicker } from "@/hooks/use-source-picker";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { InfoPanelHolder, type InfoPanelTab } from "@/components/info-panel";
-import { AudioWaveformIcon, ClockIcon, Crosshair, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RewindIcon, RotateCwIcon, ScissorsIcon, SettingsIcon, Volume2Icon, VolumeOffIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
+import { AudioWaveformIcon, ChevronUpIcon, ClockIcon, Crosshair, LanguagesIcon, LockIcon, LockOpenIcon, PanelRightIcon, RewindIcon, RotateCwIcon, ScissorsIcon, SettingsIcon, Volume2Icon, VolumeOffIcon, RadioIcon, ScrollTextIcon } from "lucide-react";
 import { StreamSettingsPanel } from "@/components/stream-settings-panel";
 import { InterpreterPanel } from "@/components/interpreter-panel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -50,9 +50,11 @@ import { streamLog, PerfBucket, ResourceMonitor } from "@/lib/stream-logger";
 import { useTuningStore } from "@/lib/tuning-store";
 import { useScrollBackStore } from "@/lib/scroll-back-store";
 import { RemoteChunkSource, type ChunkSource } from "@/lib/chunk-loader";
+import { ChunkManager } from "@/lib/chunk-manager";
 import { HistoricalAudioPlayer } from "@/lib/historical-audio-player";
 import { ScrubController } from "@/lib/scrub-controller";
 import { parseWFChunk } from "@/lib/chunk-parser";
+import { SNRFrameBuffer, computeSNRFromFrames } from "@/lib/snr";
 
 const AUDIO_TYPE = 0x02;
 const WATERFALL_TYPE = 0x01;
@@ -136,7 +138,13 @@ export function StreamPlayerPage() {
   const { streamId } = useParams({ from: "/streams/$streamId" });
   const { scrollback: scrollbackParam } = useSearch({ from: "/streams/$streamId" });
   const navigate = useNavigate();
-  const [stream, setStream] = useState<Stream | null>(null);
+  const [stream, setStreamRaw] = useState<Stream | null>(null);
+  const setStream = (s: Stream) => {
+    setStreamRaw(s);
+    useScrollBackStore.getState().setMonitorMode(
+      s.auto_probe && s.quality_fallback && s.keep_alive && s.offload_chunks,
+    );
+  };
   const [notFound, setNotFound] = useState(false);
   const [status, setStatus] = useState("idle");
   const [cropModalOpen, setCropModalOpen] = useState(false);
@@ -155,6 +163,7 @@ export function StreamPlayerPage() {
   const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
   const picker = useSourcePicker(streamId);
   const [recentSources, setRecentSources] = useState<RecentSource[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [morseText, setMorseText] = useState("");
   const [voiceChunks, setVoiceChunks] = useState<{ text: string; receivedAt: number }[]>([]);
@@ -170,10 +179,15 @@ export function StreamPlayerPage() {
   const refreshRecentSourcesRef = useRef(refreshRecentSources);
   refreshRecentSourcesRef.current = refreshRecentSources;
 
-  const [timelineOpen, setTimelineOpen] = useState(!!scrollbackParam);
+  const [timelineOpen, setTimelineOpen] = useState(() => {
+    if (scrollbackParam) return true;
+    try { return localStorage.getItem("wt:timelineOpen") === "true"; } catch { return false; }
+  });
   const scrollbackTargetRef = useRef<number | null>(scrollbackParam ?? null);
   scrollbackTargetRef.current = scrollbackParam ?? null;
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { const v = localStorage.getItem("wt:sidebarOpen"); return v === null ? true : v === "true"; } catch { return true; }
+  });
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [sidebarTab, setSidebarTab] = useState("source");
   const setMaxBandwidth = useBandViewStore((s) => s.setMaxBandwidth);
@@ -185,14 +199,22 @@ export function StreamPlayerPage() {
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
   const waterfallRef = useRef<WaterfallHandle>(null);
-  const timelineRef = useRef<WaterfallTimelineHandle>(null);
+  const timelineRef = useRef<WaterfallMinimapHandle>(null);
   const spectrumRef = useRef<SpectrumHandle>(null);
+  const [manager] = useState(() => new ChunkManager(2));
+
+  const [snrDisplay, setSnrDisplay] = useState<number | null>(null);
+  const snrBufferRef = useRef(new SNRFrameBuffer(20));
+
+  useEffect(() => {
+    snrBufferRef.current.reset();
+    setSnrDisplay(null);
+  }, [confirmedFrequency, lo, hi]);
 
   const setOverride = useThemeStore((s) => s.setOverride);
   const d = useThemeStore((s) => s.theme.display);
   const streamState = stream?.state;
-  const [noAudio, setNoAudio] = useState(false);
-  const [noWaterfall, setNoWaterfall] = useState(false);
+  const streamHealth = stream?.health ?? [];
 
   const statusChip = useMemo((): { label: string; color: "red" | "blue" | "grey"; tooltip: string } | null => {
     switch (status) {
@@ -218,20 +240,18 @@ export function StreamPlayerPage() {
         case "idle":
           return { label: "S/IDL", color: "grey", tooltip: "The server disconnected from the SDR source because no clients were listening." };
       }
-      if (noAudio) {
+      if (streamHealth.includes("too_busy")) {
+        return { label: "S/BUSY", color: "red", tooltip: "The SDR source reported it is too busy to handle this connection." };
+      }
+      if (streamHealth.includes("audio_stale")) {
         return { label: "S/SND", color: "red", tooltip: "The SDR source stopped sending audio data. The connection is still open but audio frames are not arriving." };
       }
-      if (noWaterfall) {
+      if (streamHealth.includes("wf_stale")) {
         return { label: "S/WF", color: "red", tooltip: "The SDR source stopped sending waterfall data. The connection is still open but waterfall frames are not arriving." };
       }
     }
     return null;
-  }, [status, streamState, noAudio, noWaterfall]);
-
-  useEffect(() => {
-    setOverride(statusChip?.color === "red" ? ALERT_THEME : null);
-    return () => setOverride(null);
-  }, [statusChip?.color, setOverride]);
+  }, [status, streamState, streamHealth]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const versionRef = useRef<number>(0);
@@ -253,7 +273,23 @@ export function StreamPlayerPage() {
   const histWaveformRafRef = useRef(0);
   const scrubControllerRef = useRef<ScrubController | null>(null);
   const histPlayerRef = useRef<HistoricalAudioPlayer | null>(null);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(() => {
+    try { return localStorage.getItem("wt:muted") === "true"; } catch { return false; }
+  });
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  useEffect(() => {
+    try { localStorage.setItem("wt:muted", String(muted)); } catch {}
+    const g = gainNodeRef.current;
+    if (g) g.gain.setTargetAtTime(muted ? 0 : 1, g.context.currentTime, 0.01);
+  }, [muted]);
+  useEffect(() => {
+    setOverride(statusChip?.color === "red" ? ALERT_THEME : muted ? MUTED_THEME : null);
+    return () => setOverride(null);
+  }, [statusChip?.color, muted, setOverride]);
+  useEffect(() => { try { localStorage.setItem("wt:sidebarOpen", String(sidebarOpen)); } catch {} }, [sidebarOpen]);
+  useEffect(() => { try { localStorage.setItem("wt:timelineOpen", String(timelineOpen)); } catch {} }, [timelineOpen]);
+
   const [isPlayingHistory, setIsPlayingHistory] = useState(false);
   const isPlayingHistoryRef = useRef(false);
   const [playbackTuning, setPlaybackTuning] = useState<{
@@ -263,6 +299,7 @@ export function StreamPlayerPage() {
   } | null>(null);
   const isInScrollBack = useScrollBackStore((s) => s.isInScrollBack);
   const streamLocked = useScrollBackStore((s) => s.streamLocked);
+  const monitorMode = useScrollBackStore((s) => s.monitorMode);
   const shouldMuteUI = isInScrollBack || streamLocked;
   const isSyncingScrollRef = useRef(false);
   const isDraggingTimelineRef = useRef(false);
@@ -337,11 +374,9 @@ export function StreamPlayerPage() {
       if (ctx && ctx.state === "suspended") {
         ctx.resume().then(() => {
           streamLog.debug("audio.resumed", `via user gesture, state=${ctx.state}`);
-          setMuted(false);
         }).catch(() => {});
       }
       if (ctx?.state === "running") {
-        setMuted(false);
         document.removeEventListener("click", resumeOnGesture, true);
         document.removeEventListener("keydown", resumeOnGesture, true);
       }
@@ -390,7 +425,7 @@ export function StreamPlayerPage() {
       await ScrubController.registerProcessor(ctx);
       const node = new AudioWorkletNode(ctx, "sdr-audio-processor");
       const gain = ctx.createGain();
-      gain.gain.value = 1;
+      gain.gain.value = mutedRef.current ? 0 : 1;
 
       const liveGain = ctx.createGain();
       liveGain.gain.value = 1;
@@ -449,8 +484,10 @@ export function StreamPlayerPage() {
     isPlayingHistoryRef.current = false;
     useScrollBackStore.getState().set(false);
     histWFCacheRef.current = null;
-    waterfallRef.current?.setPlaybackHead(null);
+    manager.playbackRow = null;
     setPlaybackTuning(null);
+    snrBufferRef.current.reset();
+    setSnrDisplay(null);
     if (histWaveformRafRef.current) {
       cancelAnimationFrame(histWaveformRafRef.current);
       histWaveformRafRef.current = 0;
@@ -504,7 +541,7 @@ export function StreamPlayerPage() {
   const pushSpectrumForRow = useCallback((row: number) => {
     const wf = waterfallRef.current;
     if (!wf) return;
-    const m = wf.chunkManifest();
+    const m = manager.chunkManifest;
     let chunk: (typeof m)[number] | undefined;
     for (const c of m) {
       if (c.frameCount > 0 && row >= c.startRow && row < c.startRow + c.frameCount) {
@@ -527,6 +564,18 @@ export function StreamPlayerPage() {
         spectrumRef.current?.setPassband(f.freqKHz, f.passbandLo, f.passbandHi);
         if (isPlayingHistoryRef.current) {
           setPlaybackTuning({ freqKHz: f.freqKHz, passbandLo: f.passbandLo, passbandHi: f.passbandHi });
+        }
+
+        const windowHalf = 10;
+        const lo = Math.max(0, idx - windowHalf);
+        const hi = Math.min(cache.frames.length, idx + windowHalf + 1);
+        const windowFrames = cache.frames.slice(lo, hi);
+        const snrResult = computeSNRFromFrames(windowFrames, f.freqKHz, f.passbandLo, f.passbandHi);
+        if (snrResult) {
+          const rounded = Math.round(snrResult.snrDB * 10) / 10;
+          setSnrDisplay((prev) => prev === rounded ? prev : rounded);
+        } else {
+          setSnrDisplay(null);
         }
       }
     } else if (!cache || cache.startedAt !== chunk.startedAt) {
@@ -553,11 +602,11 @@ export function StreamPlayerPage() {
     const histGain = histGainRef.current;
     if (!wf || !ctx || !histGain) return;
 
-    const manifest = wf.chunkManifest();
+    const manifest = manager.chunkManifest;
     if (manifest.length === 0) return;
 
-    const totalRows = wf.rowCount();
-    const scrollOffset = wf.getScrollOffset();
+    const totalRows = manager.totalRows;
+    const scrollOffset = manager.scrollOffset;
     const lookahead = Math.round(wf.visibleRows() * 0.1);
     const targetRow = totalRows - scrollOffset - lookahead;
 
@@ -574,11 +623,11 @@ export function StreamPlayerPage() {
 
     player.onRowChange = (row) => {
       isSyncingScrollRef.current = true;
-      const total = wf.rowCount();
+      const total = manager.totalRows;
       const lookahead = Math.round(wf.visibleRows() * 0.1);
       const offset = Math.max(0, total - row - lookahead);
-      wf.setScrollOffset(offset);
-      wf.setPlaybackHead(row);
+      manager.setScrollOffset(offset);
+      manager.playbackRow = row;
       isSyncingScrollRef.current = false;
 
       pushSpectrumForRow(row);
@@ -586,16 +635,16 @@ export function StreamPlayerPage() {
 
     player.onReachLive = () => {
       stopHistoricalPlayback();
-      wf.scrollToLive();
+      manager.scrollToLive();
     };
 
     player.onTailing = () => {
       isPlayingHistoryRef.current = false;
-      tailScrollOffsetRef.current = wf.getScrollOffset();
+      tailScrollOffsetRef.current = manager.scrollOffset;
       const tick = () => {
         if (!histPlayerRef.current?.tailing) return;
         isSyncingScrollRef.current = true;
-        wf.setScrollOffset(tailScrollOffsetRef.current);
+        manager.setScrollOffset(tailScrollOffsetRef.current);
         isSyncingScrollRef.current = false;
         tailScrollRafRef.current = requestAnimationFrame(tick);
       };
@@ -673,8 +722,6 @@ export function StreamPlayerPage() {
       perfAudioRef.current.start();
       perfResampleRef.current.start();
       resourceMonRef.current.start();
-      setNoAudio(false);
-      setNoWaterfall(false);
       const wasReconnect = reconnectAttemptRef.current > 0;
       const attempts = reconnectAttemptRef.current;
       reconnectBackoffRef.current = 1000;
@@ -775,30 +822,34 @@ export function StreamPlayerPage() {
               prefillAbortRef.current = ac;
 
               const wf = waterfallRef.current;
-              wf.resetLiveFrameCount();
+              manager.resetLiveFrameCount();
               const source = new RemoteChunkSource(streamId);
               histWFSourceRef.current = source;
-              wf.setChunkSource(source);
+              manager.source = source;
 
               const now = Math.floor(Date.now() / 1000);
-              const dayAgo = now - 86400;
-              source.fetchManifest(dayAgo, now).then(async (manifest) => {
+              const windowHours = 2;
+              const windowFrom = now - windowHours * 3600;
+              manager.loadedWindow = { from: windowFrom, to: now };
+
+              source.fetchManifest(windowFrom, now).then(async (manifest) => {
                 if (ac.signal.aborted) return;
                 try {
-                  await wf.loadManifest(manifest.chunks, {
+                  manager.loadManifest(manifest.chunks ?? [], {
                     sampleRate: manifest.sample_rate,
                     chunkDurationS: manifest.chunk_duration_s,
                   });
+                  await wf.loadInitialChunks();
                   const target = scrollbackTargetRef.current;
                   if (target && target > 0) {
-                    const m = wf.chunkManifest();
+                    const m = manager.chunkManifest;
                     const chunk = m.find((c) => c.startedAt === target);
                     if (chunk) {
                       const lookahead = Math.round(wf.visibleRows() * 0.1);
-                      const offset = Math.max(0, wf.rowCount() - chunk.startRow - lookahead);
-                      wf.setScrollOffset(offset);
+                      const offset = Math.max(0, manager.totalRows - chunk.startRow - lookahead);
+                      manager.setScrollOffset(offset);
                       useScrollBackStore.getState().set(true);
-                      pushSpectrumForRow(wf.rowCount() - offset - lookahead);
+                      pushSpectrumForRow(manager.totalRows - offset - lookahead);
                       lastScrollbackChunkRef.current = target;
                     }
                   }
@@ -873,19 +924,15 @@ export function StreamPlayerPage() {
             }));
             appendLogEntries(entries);
           } else if (msg.type === "stream_state_changed" && typeof msg.state === "string") {
-            setStream((prev) => prev ? { ...prev, state: msg.state as string } : prev);
+            setStreamRaw((prev) => prev ? { ...prev, state: msg.state as string, health: (msg.health as string[]) ?? [] } : prev);
           } else if (msg.type === "chunk_complete") {
-            waterfallRef.current?.onChunkComplete({
+            manager.onChunkComplete({
               started_at: msg.started_at,
               ended_at: msg.ended_at,
               source_id: msg.source_id,
               wf_frames: msg.wf_frames,
               audio_bytes: msg.audio_bytes,
             });
-          } else if (msg.type === "stream_data_stale") {
-            const stale = msg.stale === true;
-            if (msg.channel === "audio") setNoAudio(stale);
-            else if (msg.channel === "waterfall") setNoWaterfall(stale);
           } else if (msg.type === "wf_view_changed") {
             if (msg.start_khz != null && msg.end_khz != null) {
               setViewRemote(msg.start_khz, msg.end_khz);
@@ -938,6 +985,17 @@ export function StreamPlayerPage() {
         if (!isPlayingHistoryRef.current && !inScrollBack) {
           spectrumRef.current?.pushFrame(bins, xBin, zoom);
         }
+
+        if (!isPlayingHistoryRef.current && !inScrollBack) {
+          snrBufferRef.current.push(bins, xBin, zoom);
+          const ts = useTuningStore.getState();
+          const snrResult = snrBufferRef.current.compute(ts.frequency, ts.lo, ts.hi);
+          if (snrResult) {
+            const rounded = Math.round(snrResult.snrDB * 10) / 10;
+            setSnrDisplay((prev) => prev === rounded ? prev : rounded);
+          }
+        }
+
         return;
       }
 
@@ -1088,10 +1146,12 @@ export function StreamPlayerPage() {
       streamLog.warn("ws.patch", "skipped, ws not open", "client", "wavetoy");
       return;
     }
+    const v = versionRef.current;
+    versionRef.current = v + 1;
     ws.send(
       JSON.stringify({
         type: "patch",
-        version: versionRef.current,
+        version: v,
         patch,
       }),
     );
@@ -1291,7 +1351,7 @@ export function StreamPlayerPage() {
                 </Tooltip>
               }
             />
-            <FallbackSection
+            <SuggestionsSection
               stream={stream}
               streamId={streamId}
               wsRef={wsRef}
@@ -1301,52 +1361,66 @@ export function StreamPlayerPage() {
           </div>
           {recentSources.length > 0 && (
             <div className="shrink-0 border-t border-border/80">
-              <div className="flex items-center gap-1.5 border-b border-border/80 px-3 py-2">
-                <ClockIcon className="size-3 text-muted-foreground" />
-                <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                  Source history
-                </span>
-              </div>
-              <div className="max-h-[300px] overflow-y-auto divide-y divide-border/50">
-                {recentSources.map((rs, idx) => {
-                  const src = rs.source;
-                  const nextStarted = idx + 1 < recentSources.length ? recentSources[idx + 1].started_at : null;
-                  const duration = nextStarted
-                    ? new Date(rs.started_at).getTime() - new Date(nextStarted).getTime()
-                    : null;
-                  return (
-                    <div
-                      key={`${src.id}-${rs.started_at}`}
-                      className="flex w-full items-center gap-2 px-3 py-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="font-xanh-mono block truncate text-sm text-foreground">
-                          {src.host}:{src.port}
-                        </p>
-                        {src.name && (
-                          <p className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-                            {src.name}
+              <button
+                type="button"
+                className="flex w-full items-center justify-between px-3 py-2.5 hover:bg-muted/40 transition-colors"
+                onClick={() => setHistoryOpen((o) => !o)}
+              >
+                <div className="flex items-center gap-2">
+                  <ClockIcon className="size-3.5 text-muted-foreground" />
+                  <span className="text-xs uppercase tracking-widest text-muted-foreground">
+                    Source history
+                  </span>
+                </div>
+                <ChevronUpIcon
+                  className={`size-3.5 text-muted-foreground transition-transform duration-200 ${historyOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+              <div
+                className="overflow-hidden transition-[max-height] duration-150 ease-in-out"
+                style={{ maxHeight: historyOpen ? "300px" : "0px" }}
+              >
+                <div className="max-h-[300px] overflow-y-auto divide-y divide-border/50 border-t border-border/80">
+                  {recentSources.map((rs, idx) => {
+                    const src = rs.source;
+                    const nextStarted = idx + 1 < recentSources.length ? recentSources[idx + 1].started_at : null;
+                    const duration = nextStarted
+                      ? new Date(rs.started_at).getTime() - new Date(nextStarted).getTime()
+                      : null;
+                    return (
+                      <div
+                        key={`${src.id}-${rs.started_at}`}
+                        className="flex w-full items-center gap-2 px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="font-xanh-mono block truncate text-sm text-foreground">
+                            {src.host}:{src.port}
                           </p>
-                        )}
+                          {src.name && (
+                            <p className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                              {src.name}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end gap-1">
+                          <p className="text-[10px] text-muted-foreground/60">
+                            {formatTimeAgo(rs.started_at)}
+                            {duration != null && duration > 0 && ` · ${formatDuration(duration)}`}
+                          </p>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className={`h-6 gap-1 px-2 text-[10px] transition-opacity duration-200 ${shouldMuteUI ? "opacity-40 pointer-events-none" : ""}`}
+                            onClick={() => sendPatch({ source_id: src.id })}
+                          >
+                            <RotateCwIcon className="size-3" />
+                            Swap
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex shrink-0 flex-col items-end gap-1">
-                        <p className="text-[10px] text-muted-foreground/60">
-                          {formatTimeAgo(rs.started_at)}
-                          {duration != null && duration > 0 && ` · ${formatDuration(duration)}`}
-                        </p>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className={`h-6 gap-1 px-2 text-[10px] transition-opacity duration-200 ${shouldMuteUI ? "opacity-40 pointer-events-none" : ""}`}
-                          onClick={() => sendPatch({ source_id: src.id })}
-                        >
-                          <RotateCwIcon className="size-3" />
-                          Swap
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
             </div>
           )}
@@ -1397,7 +1471,72 @@ export function StreamPlayerPage() {
       label: "Settings",
       content: <StreamSettingsPanel stream={stream} onPatch={sendPatch} onDelete={onDeleteStream} />,
     },
-  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress, shouldMuteUI]);
+  ], [currentSource, sourceId, stream, streamId, logLines, picker.favoriteIds, picker.toggleFavorite, recentSources, morseText, voiceChunks, interpreterWpm, detectedSidetoneHz, voiceProgress, shouldMuteUI, historyOpen]);
+
+  // Side-effect handler for scroll changes coming from manager.onChange
+  const handleScrollChange = useCallback(() => {
+    const offset = manager.scrollOffset;
+    useScrollBackStore.getState().set(offset > 0);
+    const wf = waterfallRef.current;
+    if (offset === 0) {
+      if (isPlayingHistoryRef.current) {
+        stopHistoricalPlayback();
+        manager.scrollToLive();
+      }
+      histWFCacheRef.current = null;
+      lastScrollBackSpectrumRowRef.current = null;
+      lastScrollbackChunkRef.current = null;
+      navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({}), replace: true });
+      return;
+    }
+    if (offset > 0 && !isPlayingHistoryRef.current && !isSyncingScrollRef.current) {
+      if (wf) {
+        const lookahead = Math.round(wf.visibleRows() * 0.1);
+        const headRow = manager.totalRows - offset - lookahead;
+        lastScrollBackSpectrumRowRef.current = headRow;
+        pushSpectrumForRow(headRow);
+        const m = manager.chunkManifest;
+        const chunk = m.find((c) => c.frameCount > 0 && headRow >= c.startRow && headRow < c.startRow + c.frameCount);
+        if (chunk && chunk.startedAt !== lastScrollbackChunkRef.current) {
+          lastScrollbackChunkRef.current = chunk.startedAt;
+          navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({ scrollback: chunk.startedAt }), replace: true });
+        }
+      }
+    }
+    if (isPlayingHistoryRef.current && !isSyncingScrollRef.current) {
+      if (wf) {
+        const lookahead = Math.round(wf.visibleRows() * 0.1);
+        const headRow = manager.totalRows - offset - lookahead;
+        manager.playbackRow = headRow;
+        pushSpectrumForRow(headRow);
+      }
+      const player = histPlayerRef.current;
+      if (!player?.playing) return;
+      player.scrubPause();
+
+      const ctrl = ensureScrubController();
+      if (ctrl && wf) {
+        ctrl.setChunks([...manager.chunkManifest]);
+        const ctx = audioCtxRef.current;
+        if (ctx) {
+          const now = ctx.currentTime;
+          scrubGainRef.current?.gain.cancelScheduledValues(now);
+          scrubGainRef.current?.gain.setTargetAtTime(1, now, 0.01);
+        }
+        const la = Math.round(wf.visibleRows() * 0.1);
+        ctrl.scrub(
+          manager.totalRows - offset - la,
+          !isDraggingTimelineRef.current,
+        );
+      }
+    }
+  }, [manager, streamId, navigate, stopHistoricalPlayback, pushSpectrumForRow, ensureScrubController]);
+
+  // Wire manager.onChange to the side-effect handler
+  useEffect(() => {
+    manager.onChange = handleScrollChange;
+    return () => { manager.onChange = null; };
+  }, [manager, handleScrollChange]);
 
   if (notFound) return <ErrorPage code="404" />;
 
@@ -1422,6 +1561,11 @@ export function StreamPlayerPage() {
               </span>
             </Tooltip>
           )}
+          {monitorMode && (
+            <span className="shrink-0 rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-purple-400">
+              Monitor
+            </span>
+          )}
           <div className="flex items-center gap-1.5 pr-2">
             {peers.map((p, i) => (
               <Tooltip key={p.session_id} content={`user ${p.session_id.slice(0, 8)} connected`}>
@@ -1436,13 +1580,7 @@ export function StreamPlayerPage() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => {
-                const next = !muted;
-                setMuted(next);
-                const g = gainNodeRef.current;
-                if (g) g.gain.setTargetAtTime(next ? 0 : 1, g.context.currentTime, 0.01);
-                useThemeStore.getState().setOverride(next ? MUTED_THEME : null);
-              }}
+              onClick={() => setMuted((v) => !v)}
             >
               {muted ? <VolumeOffIcon className="size-4" /> : <Volume2Icon className="size-4" />}
             </Button>
@@ -1474,6 +1612,7 @@ export function StreamPlayerPage() {
             optimistic={!isPlayingHistory && frequency !== confirmedFrequency}
             onSubmit={(kHz) => useTuningStore.getState().setFrequency(kHz)}
             dimmed={shouldMuteUI && !isPlayingHistory}
+            disabled={!!stream?.locked}
             playbackMode={isPlayingHistory}
           />
           <Tooltip content={viewLocked ? "Unlock view from frequency" : "Lock view to frequency"}>
@@ -1591,67 +1730,11 @@ export function StreamPlayerPage() {
       {/* ── Content: timeline + waterfall + sidebar ── */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* ── Timeline bar ── */}
-        {timelineOpen && <WaterfallTimeline
+        {timelineOpen && <WaterfallMinimap
         ref={timelineRef}
         spectrumHeight={spectrumHeight}
+        manager={manager}
         isPlayingHistory={isPlayingHistory}
-        onScrollOffset={(offset) => {
-          waterfallRef.current?.setScrollOffset(offset);
-          useScrollBackStore.getState().set(offset > 0);
-          const wf = waterfallRef.current;
-          if (offset === 0) {
-            if (isPlayingHistory) {
-              stopHistoricalPlayback();
-              waterfallRef.current?.scrollToLive();
-            }
-            histWFCacheRef.current = null;
-            lastScrollBackSpectrumRowRef.current = null;
-            lastScrollbackChunkRef.current = null;
-            navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({}), replace: true });
-            return;
-          }
-          if (offset > 0 && !isPlayingHistory && !isSyncingScrollRef.current) {
-            if (wf) {
-              const lookahead = Math.round(wf.visibleRows() * 0.1);
-              const headRow = wf.rowCount() - offset - lookahead;
-              lastScrollBackSpectrumRowRef.current = headRow;
-              pushSpectrumForRow(headRow);
-              const m = wf.chunkManifest();
-              const chunk = m.find((c) => c.frameCount > 0 && headRow >= c.startRow && headRow < c.startRow + c.frameCount);
-              if (chunk && chunk.startedAt !== lastScrollbackChunkRef.current) {
-                lastScrollbackChunkRef.current = chunk.startedAt;
-                navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({ scrollback: chunk.startedAt }), replace: true });
-              }
-            }
-          }
-          if (isPlayingHistory && !isSyncingScrollRef.current) {
-            if (wf) {
-              const lookahead = Math.round(wf.visibleRows() * 0.1);
-              const headRow = wf.rowCount() - offset - lookahead;
-              wf.setPlaybackHead(headRow);
-              pushSpectrumForRow(headRow);
-            }
-            const player = histPlayerRef.current;
-            if (!player?.playing) return;
-            player.scrubPause();
-
-            const ctrl = ensureScrubController();
-            if (ctrl && wf) {
-              ctrl.setChunks([...wf.chunkManifest()]);
-              const ctx = audioCtxRef.current;
-              if (ctx) {
-                const now = ctx.currentTime;
-                scrubGainRef.current?.gain.cancelScheduledValues(now);
-                scrubGainRef.current?.gain.setTargetAtTime(1, now, 0.01);
-              }
-              const la = Math.round(wf.visibleRows() * 0.1);
-              ctrl.scrub(
-                wf.rowCount() - offset - la,
-                !isDraggingTimelineRef.current,
-              );
-            }
-          }
-        }}
         onSnapToLive={() => {
           if (isPlayingHistory) stopHistoricalPlayback();
           else {
@@ -1661,7 +1744,7 @@ export function StreamPlayerPage() {
           lastScrollbackChunkRef.current = null;
           navigate({ to: "/streams/$streamId", params: { streamId }, search: () => ({}), replace: true });
           useScrollBackStore.getState().set(false);
-          waterfallRef.current?.scrollToLive();
+          manager.scrollToLive();
         }}
         onDragStart={() => {
           isDraggingTimelineRef.current = true;
@@ -1672,16 +1755,17 @@ export function StreamPlayerPage() {
           const wf = waterfallRef.current;
           const player = histPlayerRef.current;
           if (!wf || !player?.playing) return;
-          const so = wf.getScrollOffset();
+          const so = manager.scrollOffset;
           const ctrl = scrubControllerRef.current;
           if (ctrl) {
             ctrl.settle();
           } else {
             const lookahead = Math.round(wf.visibleRows() * 0.1);
-            const targetRow = wf.rowCount() - so - lookahead;
+            const targetRow = manager.totalRows - so - lookahead;
             player.seek(targetRow);
           }
         }}
+        onRequestRepaint={() => waterfallRef.current?.requestRepaint()}
       />}
         {/* ── Waterfall area ── */}
         <BandViewport
@@ -1713,6 +1797,7 @@ export function StreamPlayerPage() {
             className="absolute inset-0 z-[25] pointer-events-none transition-opacity duration-200 ease-out"
             style={{
               opacity: isInScrollBack || isPlayingHistory ? 0 : 1,
+              visibility: isInScrollBack || isPlayingHistory ? "hidden" : "visible",
             }}
           >
             <TuningOverlay
@@ -1722,8 +1807,9 @@ export function StreamPlayerPage() {
               centerLocked={viewLocked}
               animate={freqAnimating}
               playbackMode={isPlayingHistory}
-              onFrequencyChange={isPlayingHistory ? undefined : viewLocked ? undefined : (kHz) => useTuningStore.getState().setFrequency(kHz)}
-              onBandwidthChange={isPlayingHistory ? undefined : (newLo, newHi) => {
+              snrDB={snrDisplay}
+              onFrequencyChange={isPlayingHistory || viewLocked || streamLocked ? undefined : (kHz) => useTuningStore.getState().setFrequency(kHz)}
+              onBandwidthChange={isPlayingHistory || streamLocked ? undefined : (newLo, newHi) => {
                 const s = useTuningStore.getState();
                 s.setLo(newLo);
                 s.setHi(newHi);
@@ -1738,6 +1824,7 @@ export function StreamPlayerPage() {
           <FrequencyScale onResizeStart={onSpectrumResizeStart} hideTopBorder={spectrumHeight <= 0} />
           <WaterfallDisplay
             ref={waterfallRef}
+            manager={manager}
             timelineRef={timelineRef}
             className="min-h-0 flex-1"
             onPlay={startHistoricalPlayback}
@@ -1752,6 +1839,25 @@ export function StreamPlayerPage() {
               if (headRow === lastScrollBackSpectrumRowRef.current) return;
               lastScrollBackSpectrumRowRef.current = headRow;
               pushSpectrumForRow(headRow);
+            }}
+            onDragStart={() => {
+              isDraggingTimelineRef.current = true;
+            }}
+            onDragEnd={() => {
+              isDraggingTimelineRef.current = false;
+              if (!isPlayingHistory) return;
+              const wf = waterfallRef.current;
+              const player = histPlayerRef.current;
+              if (!wf || !player?.playing) return;
+              const so = manager.scrollOffset;
+              const ctrl = scrubControllerRef.current;
+              if (ctrl) {
+                ctrl.settle();
+              } else {
+                const lookahead = Math.round(wf.visibleRows() * 0.1);
+                const targetRow = manager.totalRows - so - lookahead;
+                player.seek(targetRow);
+              }
             }}
           />
         </BandViewport>
@@ -1846,6 +1952,7 @@ export function StreamPlayerPage() {
                   isFavorite={picker.favoriteIds.has((picker.displayedSource ?? currentSource)!.id)}
                   onToggleFavorite={picker.toggleFavorite}
                   onNotesChanged={picker.refreshNotes}
+                  showSNRChart
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

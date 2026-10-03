@@ -5,6 +5,7 @@ import { Button } from "./ui/button";
 import { Tooltip } from "./ui/tooltip";
 import { SourceDetailsPanel } from "./source-details-panel";
 import { SourceMiniMap } from "./source-mini-map";
+import { SNRHistoryChart } from "./snr-history-chart";
 
 interface SourceSectionProps {
   source: Source | null;
@@ -13,6 +14,7 @@ interface SourceSectionProps {
   isFavorite?: boolean;
   onToggleFavorite?: (sourceId: string) => void;
   onNotesChanged?: () => void;
+  showSNRChart?: boolean;
 }
 
 export function SourceSection({
@@ -22,6 +24,7 @@ export function SourceSection({
   isFavorite,
   onToggleFavorite,
   onNotesChanged,
+  showSNRChart = false,
 }: SourceSectionProps) {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -179,6 +182,11 @@ export function SourceSection({
             hideSourceName
             className="mt-3"
           />
+          {showSNRChart && source && (
+            <div className="mt-4 border-t border-border/50 pt-4">
+              <SNRHistoryChart sourceId={source.id} />
+            </div>
+          )}
         </div>
       </div>
 
